@@ -25,9 +25,11 @@ data/
 dev.db
 /tmp/
 
-# Generated model assets are fetched separately or stored via releases/LFS.
-export/
+# Generated model assets are usually fetched separately.
+# Keep ONNX files eligible for Git LFS if we choose to version them.
+export/*
 !export/.gitkeep
+!export/*.onnx
 
 # Unused archived code
 legacy/
