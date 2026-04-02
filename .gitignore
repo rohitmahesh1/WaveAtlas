@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+
+# Local environments
+.venv/
+
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+
+# Local configuration
+.env
+.env.*
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
+
+# Local runtime state
+data/
+dev.db
+/tmp/
+
+# Generated model assets are fetched separately or stored via releases/LFS.
+export/
+!export/.gitkeep
+
+# Unused archived code
+legacy/
+
+# OS/editor noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
