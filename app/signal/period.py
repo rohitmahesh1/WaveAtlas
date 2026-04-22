@@ -65,6 +65,58 @@ def frequency_to_period(
     return 1.0 / frequency
 
 
+def resolve_positive_frequency(
+    frequency: float,
+    *,
+    frame: np.ndarray = None,
+    sampling_rate: float = 1.0,
+    min_freq: float = None,
+    max_freq: float = None,
+) -> float:
+    """
+    Return a usable positive frequency for downstream sine fitting.
+
+    FFT estimation can legitimately fail or return 0 for flat/noisy tracks.
+    In that case, fall back to one cycle across the visible track duration,
+    then clamp to configured frequency bounds when present.
+    """
+    try:
+        freq = float(frequency)
+    except Exception:
+        freq = float("nan")
+
+    if not np.isfinite(freq) or freq <= 0:
+        fallback = float("nan")
+        if frame is not None:
+            frames = np.asarray(frame, dtype=float)
+            finite = frames[np.isfinite(frames)]
+            if finite.size >= 2 and sampling_rate and sampling_rate > 0:
+                frame_span = float(np.nanmax(finite) - np.nanmin(finite))
+                if frame_span > 0:
+                    fallback = float(sampling_rate) / frame_span
+        if not np.isfinite(fallback) or fallback <= 0:
+            try:
+                min_freq_value = float(min_freq) if min_freq is not None else float("nan")
+            except Exception:
+                min_freq_value = float("nan")
+            fallback = min_freq_value if np.isfinite(min_freq_value) and min_freq_value > 0 else 1.0
+        freq = fallback
+
+    try:
+        min_freq_value = float(min_freq) if min_freq is not None else float("nan")
+    except Exception:
+        min_freq_value = float("nan")
+    try:
+        max_freq_value = float(max_freq) if max_freq is not None else float("nan")
+    except Exception:
+        max_freq_value = float("nan")
+    if np.isfinite(min_freq_value) and min_freq_value > 0:
+        freq = max(freq, min_freq_value)
+    if np.isfinite(max_freq_value) and max_freq_value > 0:
+        freq = min(freq, max_freq_value)
+    return float(freq)
+
+
 def estimate_period_from_residual(
     residual: np.ndarray,
     sampling_rate: float = 1.0,
