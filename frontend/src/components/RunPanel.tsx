@@ -12,6 +12,9 @@ export function RunPanel(props: {
   cancelDisabled?: boolean;
   onResume?: () => void;
   onNewRun?: () => void;
+  onDownloadWaves?: () => void;
+  onDownloadHeatmap?: () => void;
+  heatmapDownloadDisabled?: boolean;
 }) {
   const {
     file,
@@ -27,6 +30,9 @@ export function RunPanel(props: {
     cancelDisabled,
     onResume,
     onNewRun,
+    onDownloadWaves,
+    onDownloadHeatmap,
+    heatmapDownloadDisabled,
   } = props;
   const canRun = Boolean(file);
   const isCancelled = status === "cancelled";
@@ -86,6 +92,16 @@ export function RunPanel(props: {
 
         {jobId ? (
           <div className="button-row run-actions">
+            {onDownloadWaves ? (
+              <button className="ghost-btn download-btn" onClick={onDownloadWaves}>
+                Waves CSV
+              </button>
+            ) : null}
+            {onDownloadHeatmap ? (
+              <button className="ghost-btn download-btn" onClick={onDownloadHeatmap} disabled={heatmapDownloadDisabled}>
+                Heatmap
+              </button>
+            ) : null}
             {isCancelled && onResume ? (
               <button className="ghost-btn" onClick={onResume}>
                 Resume
