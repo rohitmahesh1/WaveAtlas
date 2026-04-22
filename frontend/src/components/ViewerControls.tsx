@@ -1,4 +1,3 @@
-import React from "react";
 export function ViewerControls(props: {
   overlayColor: string;
   onOverlayColorChange: (value: string) => void;
