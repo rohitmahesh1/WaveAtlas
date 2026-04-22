@@ -1,6 +1,34 @@
 // src/api.ts
 export const API_BASE = import.meta.env.VITE_API_BASE || ""; // "" => same origin
 
+export function apiUrl(pathOrUrl: string) {
+  if (/^https?:\/\//i.test(pathOrUrl)) return pathOrUrl;
+  if (pathOrUrl.startsWith("/") && API_BASE) return `${API_BASE}${pathOrUrl}`;
+  return pathOrUrl;
+}
+
+export class ApiError extends Error {
+  status: number;
+  statusText: string;
+  body: string;
+
+  constructor(response: Response, body: string) {
+    super(body || `${response.status} ${response.statusText}`);
+    this.name = "ApiError";
+    this.status = response.status;
+    this.statusText = response.statusText;
+    this.body = body;
+  }
+}
+
+export function isApiError(error: unknown, status?: number): error is ApiError {
+  return error instanceof ApiError && (status === undefined || error.status === status);
+}
+
+async function throwApiError(response: Response): Promise<never> {
+  throw new ApiError(response, await response.text());
+}
+
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 export type JobProgress = Record<string, JsonValue>;
@@ -58,7 +86,7 @@ export async function createJob(runName = "mvp", config: unknown = {}): Promise<
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ run_name: runName, config }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) await throwApiError(res);
   return res.json();
 }
 
@@ -67,7 +95,7 @@ export async function startJob(jobId: string): Promise<JobRead> {
     method: "POST",
     credentials: "include",
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) await throwApiError(res);
   return res.json();
 }
 
@@ -84,7 +112,7 @@ export async function listArtifacts(
     method: "GET",
     credentials: "include",
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) await throwApiError(res);
   return res.json();
 }
 
@@ -93,8 +121,21 @@ export async function listJobs(limit = 50, offset = 0): Promise<JobRead[]> {
     method: "GET",
     credentials: "include",
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) await throwApiError(res);
   return res.json();
+}
+
+export async function getJob(jobId: string): Promise<JobRead> {
+  const res = await fetch(`${API_BASE}/api/jobs/${jobId}`, {
+    method: "GET",
+    credentials: "include",
+  });
+  if (!res.ok) await throwApiError(res);
+  return res.json();
+}
+
+export function jobWavesCsvUrl(jobId: string) {
+  return apiUrl(`/api/jobs/${jobId}/waves.csv`);
 }
 
 export async function cancelJob(jobId: string): Promise<JobRead> {
@@ -102,7 +143,7 @@ export async function cancelJob(jobId: string): Promise<JobRead> {
     method: "POST",
     credentials: "include",
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) await throwApiError(res);
   return res.json();
 }
 
@@ -111,7 +152,7 @@ export async function deleteJob(jobId: string): Promise<{ ok: boolean; deleted?:
     method: "DELETE",
     credentials: "include",
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) await throwApiError(res);
   return res.json();
 }
 
@@ -120,7 +161,7 @@ export async function resumeJob(jobId: string): Promise<JobRead> {
     method: "POST",
     credentials: "include",
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) await throwApiError(res);
   return res.json();
 }
 
@@ -131,7 +172,7 @@ export async function updateJobName(jobId: string, runName: string): Promise<Job
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ run_name: runName }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) await throwApiError(res);
   return res.json();
 }
 
@@ -153,7 +194,7 @@ export async function getTrackDetail(
       signal: opts?.signal,
     }
   );
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) await throwApiError(res);
   return res.json();
 }
 
@@ -166,7 +207,7 @@ export async function uploadViaApi(jobId: string, file: File): Promise<unknown> 
     credentials: "include",
     body: fd,
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) await throwApiError(res);
   return res.json();
 }
 
@@ -180,7 +221,7 @@ export async function createUploadSession(jobId: string, file: File) {
     method: "POST",
     credentials: "include",
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) await throwApiError(res);
   return res.json() as Promise<{ upload_url: string; blob_path: string; content_type: string }>;
 }
 
@@ -196,7 +237,7 @@ export async function uploadComplete(jobId: string, blobPath: string, file: File
       byte_size: file.size,
     }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) await throwApiError(res);
   return res.json();
 }
 
