@@ -3,12 +3,13 @@ import AdvancedViewerPage from "./pages/AdvancedViewerPage";
 import AdvancedConfigPage from "./pages/AdvancedConfigPage";
 import RunsPage from "./pages/RunsPage";
 import ConfigDocsPage from "./pages/ConfigDocsPage";
+import { JobSessionProvider } from "./context/JobSessionProvider";
 
 export default function App() {
   const [page, setPage] = useState<"viewer" | "advanced" | "runs" | "docs">("viewer");
 
   return (
-    <>
+    <JobSessionProvider>
       <nav className="app-nav">
         <button
           className={`nav-btn ${page === "viewer" ? "nav-active" : ""}`}
@@ -41,6 +42,6 @@ export default function App() {
       <div className={`page ${page === "docs" ? "page-active" : ""}`}>
         <ConfigDocsPage />
       </div>
-    </>
+    </JobSessionProvider>
   );
 }
