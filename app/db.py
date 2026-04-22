@@ -7,6 +7,8 @@ from typing import Any, Dict, Optional
 from sqlmodel import SQLModel, create_engine
 from sqlalchemy.engine import Engine
 
+DEFAULT_DATABASE_URL = "sqlite:///./data/waveatlas.local.sqlite"
+
 
 def _env_int(name: str, default: int) -> int:
     try:
@@ -25,13 +27,13 @@ def _env_bool(name: str, default: bool = False) -> bool:
 def get_database_url() -> str:
     """
     Set DATABASE_URL to:
-      - sqlite:///./dev.db   (local)
+      - sqlite:///./data/waveatlas.local.sqlite   (local)
       - postgresql+psycopg2://user:pass@host:5432/dbname   (prod)
     """
     url = os.getenv("DATABASE_URL")
     if url and url.strip():
         return url.strip()
-    return "sqlite:///./dev.db"
+    return DEFAULT_DATABASE_URL
 
 
 def build_engine(database_url: Optional[str] = None) -> Engine:
