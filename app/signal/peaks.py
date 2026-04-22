@@ -81,6 +81,64 @@ def detect_peaks(
     return peaks, properties
 
 
+def ensure_minimum_peaks(
+    signal: np.ndarray,
+    peaks: np.ndarray,
+    properties: Optional[dict] = None,
+    *,
+    minimum: int = 1,
+) -> Tuple[np.ndarray, dict]:
+    """
+    Ensure a non-empty signal has at least one peak.
+
+    If threshold-based detection misses everything, use the strongest finite
+    residual sample as a conservative fallback anchor. This keeps downstream
+    wave and regression extraction peak-centered instead of silently dropping
+    the whole track.
+    """
+    sig = np.asarray(signal, dtype=float)
+    p = np.asarray(peaks, dtype=int)
+    props = dict(properties or {})
+    if minimum <= 0 or p.size >= minimum or sig.size == 0:
+        return p, props
+
+    finite = np.isfinite(sig)
+    if np.any(finite):
+        fallback_idx = int(np.argmax(np.where(finite, sig, -np.inf)))
+        fallback_prominence = float(sig[fallback_idx] - np.nanmedian(sig[finite]))
+    else:
+        fallback_idx = int(sig.size // 2)
+        fallback_prominence = np.nan
+
+    if p.size and fallback_idx in set(int(i) for i in p.tolist()):
+        return p, props
+
+    p = np.sort(np.append(p, fallback_idx).astype(int))
+    fallback_pos = int(np.where(p == fallback_idx)[0][0])
+
+    padded: dict = {}
+    for key, values in props.items():
+        arr = np.asarray(values)
+        if arr.ndim == 1 and arr.shape[0] == p.size - 1:
+            out = np.full(p.shape[0], np.nan, dtype=float)
+            out[np.arange(p.shape[0]) != fallback_pos] = arr.astype(float, copy=False)
+            padded[key] = out
+        else:
+            padded[key] = values
+
+    if "prominences" not in padded:
+        padded["prominences"] = np.full(p.shape[0], np.nan, dtype=float)
+    if np.asarray(padded["prominences"]).ndim == 1 and len(padded["prominences"]) == p.shape[0]:
+        prominences = np.asarray(padded["prominences"], dtype=float)
+        prominences[fallback_pos] = fallback_prominence if np.isfinite(fallback_prominence) else np.nan
+        padded["prominences"] = prominences
+
+    fallback_mask = np.zeros(p.shape[0], dtype=bool)
+    fallback_mask[fallback_pos] = True
+    padded["fallback_peak"] = fallback_mask
+    return p, padded
+
+
 def detect_peaks_adaptive(
     signal: np.ndarray,
     *,
