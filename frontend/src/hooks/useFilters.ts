@@ -29,58 +29,58 @@ export function useFilters(tracks: OverlayTrackEvent[], fields: FieldDef[]) {
 
   const clearFilters = () => setFilters([]);
 
-  const matchRule = (t: OverlayTrackEvent, rule: FilterRule) => {
-    const def = fieldMap.get(rule.field);
-    if (!def) return true;
-    const raw = def.get(t);
-    if (def.type === "number") {
-      const v = Number(raw);
-      if (!Number.isFinite(v)) return false;
-      const hasVal = rule.value !== undefined && rule.value !== "";
-      const hasVal2 = rule.value2 !== undefined && rule.value2 !== "";
-      const n1 = Number(rule.value);
-      const n2 = Number(rule.value2);
-      if (!hasVal && rule.op !== "between") return true;
+  const filteredTracks = useMemo(() => {
+    const matchRule = (t: OverlayTrackEvent, rule: FilterRule) => {
+      const def = fieldMap.get(rule.field);
+      if (!def) return true;
+      const raw = def.get(t);
+      if (def.type === "number") {
+        const v = Number(raw);
+        if (!Number.isFinite(v)) return false;
+        const hasVal = rule.value !== undefined && rule.value !== "";
+        const hasVal2 = rule.value2 !== undefined && rule.value2 !== "";
+        const n1 = Number(rule.value);
+        const n2 = Number(rule.value2);
+        if (!hasVal && rule.op !== "between") return true;
+        switch (rule.op) {
+          case ">":
+            return Number.isFinite(n1) ? v > n1 : true;
+          case "<":
+            return Number.isFinite(n1) ? v < n1 : true;
+          case ">=":
+            return Number.isFinite(n1) ? v >= n1 : true;
+          case "<=":
+            return Number.isFinite(n1) ? v <= n1 : true;
+          case "==":
+            return Number.isFinite(n1) ? v === n1 : true;
+          case "!=":
+            return Number.isFinite(n1) ? v !== n1 : true;
+          case "between":
+            if (!hasVal || !hasVal2 || !Number.isFinite(n1) || !Number.isFinite(n2)) return true;
+            return v >= Math.min(n1, n2) && v <= Math.max(n1, n2);
+          default:
+            return true;
+        }
+      }
+
+      const s = String(raw ?? "");
+      const q = String(rule.value ?? "").toLowerCase();
+      if (q === "") return true;
       switch (rule.op) {
-        case ">":
-          return Number.isFinite(n1) ? v > n1 : true;
-        case "<":
-          return Number.isFinite(n1) ? v < n1 : true;
-        case ">=":
-          return Number.isFinite(n1) ? v >= n1 : true;
-        case "<=":
-          return Number.isFinite(n1) ? v <= n1 : true;
+        case "contains":
+          return s.toLowerCase().includes(q);
         case "==":
-          return Number.isFinite(n1) ? v === n1 : true;
+          return s.toLowerCase() === q;
         case "!=":
-          return Number.isFinite(n1) ? v !== n1 : true;
-        case "between":
-          if (!hasVal || !hasVal2 || !Number.isFinite(n1) || !Number.isFinite(n2)) return true;
-          return v >= Math.min(n1, n2) && v <= Math.max(n1, n2);
+          return s.toLowerCase() !== q;
         default:
           return true;
       }
-    }
+    };
 
-    const s = String(raw ?? "");
-    const q = String(rule.value ?? "").toLowerCase();
-    if (q === "") return true;
-    switch (rule.op) {
-      case "contains":
-        return s.toLowerCase().includes(q);
-      case "==":
-        return s.toLowerCase() === q;
-      case "!=":
-        return s.toLowerCase() !== q;
-      default:
-        return true;
-    }
-  };
-
-  const filteredTracks = useMemo(() => {
     if (filters.length === 0) return tracks;
     return tracks.filter((t) => filters.every((r) => matchRule(t, r)));
-  }, [tracks, filters, matchRule]);
+  }, [tracks, filters, fieldMap]);
 
   const filteredStats = useMemo<SummaryStats>(() => {
     if (!filteredTracks.length) {
