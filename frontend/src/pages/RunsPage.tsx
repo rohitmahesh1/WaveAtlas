@@ -1,13 +1,13 @@
 // src/pages/RunsPage.tsx
 import { PastRunsPanel } from "../components/PastRunsPanel";
 import { useJobHistory } from "../hooks/useJobHistory";
-import { useJobSession } from "../hooks/useJobSession";
 import { cancelJob, deleteJob, resumeJob, updateJobName } from "../api";
+import { useSharedJobSession } from "../hooks/useSharedJobSession";
 
 export default function RunsPage(props: { onOpenViewer: () => void }) {
   const { onOpenViewer } = props;
   const { jobs, loading, error, refresh } = useJobHistory();
-  const { jobId, loadJob, clearSession } = useJobSession();
+  const { jobId, loadJob, clearSession } = useSharedJobSession();
 
   return (
     <div className="app-shell">
