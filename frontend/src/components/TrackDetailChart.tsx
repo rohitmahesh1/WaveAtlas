@@ -1,9 +1,10 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import type { TrackDetail } from "../api";
+import type { TrackDetail, TrackPeakRegression } from "../api";
 
 type ChartPoint = { x: number; y: number };
 type ChartSize = { width: number; height: number };
 type LoadedImageSize = { src: string; width: number; height: number };
+type ChartSeries = { name: string; xs: number[]; ys: number[]; color: string; dash?: string };
 
 const MIN_H = 180;
 const MAX_H = 520;
@@ -99,41 +100,68 @@ export function TrackDetailChart({
   debugImageUrl?: string | null;
   debugOpacity?: number;
 }) {
-  const xs = detail.time_index ?? [];
-  const ys = detail.position ?? [];
-  const hasUsableTrack = xs.length >= 2 && ys.length >= 2 && xs.length === ys.length;
+  const frames = detail.time_index ?? [];
+  const positions = detail.position ?? [];
+  const hasUsableTrack = frames.length >= 2 && positions.length >= 2 && frames.length === positions.length;
+  const regressions = detail.peak_regressions ?? [];
 
-  const [showAxes, setShowAxes] = useState<boolean>(false);
+  const [showAxes, setShowAxes] = useState<boolean>(true);
   const [showBase, setShowBase] = useState<boolean>(false);
+  const [showRaw, setShowRaw] = useState<boolean>(true);
+  const [showFit, setShowFit] = useState<boolean>(false);
+  const [showSine, setShowSine] = useState<boolean>(true);
+  const [showPeaks, setShowPeaks] = useState<boolean>(true);
+  const [selectedPeak, setSelectedPeak] = useState<{ trackIndex: number; peakI: number } | null>(null);
   const [hover, setHover] = useState<{ x: number; y: number; cx: number; cy: number } | null>(null);
   const [baseImg, setBaseImg] = useState<LoadedImageSize | null>(null);
   const [overlayImg, setOverlayImg] = useState<LoadedImageSize | null>(null);
+
+  const selectedPeakI = selectedPeak?.trackIndex === detail.track_index ? selectedPeak.peakI : null;
+  const defaultRegression = regressions.find((r) => r.peak_i === detail.strongest_peak_idx || r.is_strongest);
+  const selectedRegression: TrackPeakRegression | null =
+    regressions.find((r) => r.peak_i === selectedPeakI) ?? defaultRegression ?? regressions[0] ?? null;
+  const activeSineFit = selectedRegression?.sine_fit ?? detail.sine_fit ?? null;
+  const displaySineFit =
+    activeSineFit && selectedRegression
+      ? activeSineFit.map((value, sliceIdx) => {
+          const sliceStart = selectedRegression.slice_index != null ? selectedRegression.peak_i - selectedRegression.slice_index : 0;
+          const sourceIdx = sliceStart + sliceIdx;
+          const fitLo = Number(selectedRegression.fit_window_lo);
+          const fitHi = Number(selectedRegression.fit_window_hi);
+          return Number.isFinite(fitLo) && Number.isFinite(fitHi) && sourceIdx >= fitLo && sourceIdx <= fitHi
+            ? value
+            : Number.NaN;
+        })
+      : activeSineFit;
 
   let minX = Infinity;
   let maxX = -Infinity;
   let minY = Infinity;
   let maxY = -Infinity;
 
-  const series: { name: string; ys: number[]; color: string; dash?: string }[] = [
-    { name: "Raw", ys, color: "#1b242a" },
-    { name: "Fit", ys: detail.baseline ?? [], color: "#117a65" },
-  ];
-  if (hasUsableTrack && detail.sine_fit && detail.sine_fit.length === ys.length) {
-    series.push({ name: "Sine", ys: detail.sine_fit, color: "#d56b00", dash: "4 4" });
+  const series: ChartSeries[] = [];
+  if (showRaw) {
+    series.push({ name: "Raw", xs: positions, ys: frames, color: "#1b242a" });
+  }
+  if (showFit && detail.baseline?.length === positions.length) {
+    series.push({ name: "Fit", xs: detail.baseline, ys: frames, color: "#117a65" });
+  }
+  if (showSine && hasUsableTrack && displaySineFit && displaySineFit.length === positions.length) {
+    series.push({ name: "Sine", xs: displaySineFit, ys: frames, color: "#d56b00", dash: "4 4" });
   }
 
   if (hasUsableTrack) {
-    for (const v of xs) {
-      if (!Number.isFinite(v)) continue;
-      minX = Math.min(minX, v);
-      maxX = Math.max(maxX, v);
-    }
-
-    for (const s of series) {
-      for (const v of s.ys) {
-        if (!Number.isFinite(v)) continue;
-        minY = Math.min(minY, v);
-        maxY = Math.max(maxY, v);
+    const rangeSeries = series.length ? series : [{ name: "Raw", xs: positions, ys: frames, color: "#1b242a" }];
+    for (const s of rangeSeries) {
+      for (const x of s.xs) {
+        if (!Number.isFinite(x)) continue;
+        minX = Math.min(minX, x);
+        maxX = Math.max(maxX, x);
+      }
+      for (const y of s.ys) {
+        if (!Number.isFinite(y)) continue;
+        minY = Math.min(minY, y);
+        maxY = Math.max(maxY, y);
       }
     }
   }
@@ -220,31 +248,85 @@ export function TrackDetailChart({
     name: s.name,
     color: s.name === "Raw" ? overlayColor : s.color,
     dash: s.dash,
-    points: buildPolyline(xs, s.ys, scale),
+    points: buildPolyline(s.xs, s.ys, scale),
   }));
 
-  const peakIndices = detail.peaks_in_slice?.length ? detail.peaks_in_slice : detail.peaks ?? [];
-  const peakPoints: ChartPoint[] = [];
-  for (const idx of peakIndices) {
-    const i = Number(idx);
-    if (!Number.isFinite(i) || i < 0 || i >= ys.length) continue;
-    const x = xs[i];
-    const y = ys[i];
-    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-    peakPoints.push({ x, y });
+  const peakPoints: (ChartPoint & { peak_i?: number })[] = [];
+  if (detail.peak_points?.length) {
+    for (const peak of detail.peak_points) {
+      if (peak.in_slice === false) continue;
+      if (!Number.isFinite(peak.position) || !Number.isFinite(peak.frame)) continue;
+      peakPoints.push({ x: peak.position, y: peak.frame, peak_i: peak.peak_i });
+    }
+  } else {
+    const peakIndices = detail.peaks_in_slice?.length ? detail.peaks_in_slice : detail.peaks ?? [];
+    for (const idx of peakIndices) {
+      const i = Number(idx);
+      if (!Number.isFinite(i) || i < 0 || i >= positions.length) continue;
+      const x = positions[i];
+      const y = frames[i];
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      peakPoints.push({ x, y, peak_i: i });
+    }
   }
 
   return (
     <div className="mini-chart">
       <div className="mini-controls">
-        <label className="mini-toggle">
-          <input type="checkbox" checked={showAxes} onChange={(e) => setShowAxes(e.target.checked)} />
-          Axes
-        </label>
-        <label className="mini-toggle">
-          <input type="checkbox" checked={showBase} onChange={(e) => setShowBase(e.target.checked)} />
-          Base + overlay
-        </label>
+        {regressions.length > 1 ? (
+          <label className="peak-regression-picker">
+            Regression
+            <select
+              className="mini-select"
+              value={selectedRegression?.peak_i ?? ""}
+              onChange={(e) => setSelectedPeak({ trackIndex: detail.track_index, peakI: Number(e.target.value) })}
+            >
+              {regressions.map((r) => (
+                <option key={r.peak_i} value={r.peak_i}>
+                  Peak {r.peak_index} - frame {formatTick(r.frame)} - x {formatTick(r.position)}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+        {selectedRegression ? (
+          <span className="mini-fit-meta">
+            Peak {selectedRegression.peak_index} regression - frame {formatTick(selectedRegression.frame)} - x{" "}
+            {formatTick(selectedRegression.position)}
+          </span>
+        ) : null}
+        <div className="mini-layer-strip" aria-label="Track preview layers">
+          <span>Layers</span>
+          <label className={showAxes ? "mini-layer-chip active" : "mini-layer-chip"}>
+            <input type="checkbox" checked={showAxes} onChange={(e) => setShowAxes(e.target.checked)} />
+            Axes
+          </label>
+          <label className={showRaw ? "mini-layer-chip active" : "mini-layer-chip"}>
+            <input type="checkbox" checked={showRaw} onChange={(e) => setShowRaw(e.target.checked)} />
+            Raw
+          </label>
+          <label className={showFit ? "mini-layer-chip active" : "mini-layer-chip"}>
+            <input type="checkbox" checked={showFit} onChange={(e) => setShowFit(e.target.checked)} />
+            Fit
+          </label>
+          <label className={showSine ? "mini-layer-chip active" : "mini-layer-chip"}>
+            <input
+              type="checkbox"
+              checked={showSine}
+              onChange={(e) => setShowSine(e.target.checked)}
+              disabled={!activeSineFit}
+            />
+            Sine
+          </label>
+          <label className={showPeaks ? "mini-layer-chip active" : "mini-layer-chip"}>
+            <input type="checkbox" checked={showPeaks} onChange={(e) => setShowPeaks(e.target.checked)} />
+            Peaks
+          </label>
+          <label className={showBase ? "mini-layer-chip active" : "mini-layer-chip"}>
+            <input type="checkbox" checked={showBase} onChange={(e) => setShowBase(e.target.checked)} />
+            Base
+          </label>
+        </div>
       </div>
       <div
         ref={wrapRef}
@@ -390,36 +472,45 @@ export function TrackDetailChart({
               strokeLinecap="round"
             />
           ))}
-          {peakPoints.map((p, i) => {
+          {showPeaks ? peakPoints.map((p, i) => {
             const scaled = toCanvas(p, scale);
-            return <circle key={`peak-${i}`} cx={scaled.x} cy={scaled.y} r={2.6} className="mini-peak" />;
-          })}
+            const selected = selectedRegression != null && p.peak_i === selectedRegression.peak_i;
+            return (
+              <circle
+                key={`peak-${p.peak_i ?? i}`}
+                cx={scaled.x}
+                cy={scaled.y}
+                r={selected ? 4 : 2.6}
+                className={selected ? "mini-peak selected" : "mini-peak"}
+              />
+            );
+          }) : null}
         </svg>
         {hover ? (
           <div className="mini-tooltip" style={{ left: hover.cx + 10, top: hover.cy + 10 }}>
-            x {hover.x.toFixed(1)}, y {hover.y.toFixed(1)}
+            x {hover.x.toFixed(1)}, frame {hover.y.toFixed(1)}
           </div>
         ) : null}
       </div>
       <div className="mini-legend">
-        <span className="legend-item">
+        {showRaw ? <span className="legend-item">
           <span className="legend-swatch swatch-raw" />
           Raw
-        </span>
-        <span className="legend-item">
+        </span> : null}
+        {showFit ? <span className="legend-item">
           <span className="legend-swatch swatch-fit" />
           Fit
-        </span>
-        {detail.sine_fit ? (
+        </span> : null}
+        {showSine && displaySineFit ? (
           <span className="legend-item">
             <span className="legend-swatch swatch-sine" />
             Sine
           </span>
         ) : null}
-        <span className="legend-item">
+        {showPeaks ? <span className="legend-item">
           <span className="legend-swatch swatch-peak" />
           Peaks
-        </span>
+        </span> : null}
       </div>
     </div>
   );
