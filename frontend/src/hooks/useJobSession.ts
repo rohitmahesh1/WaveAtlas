@@ -377,8 +377,8 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
             setStageDetail(detail);
             setEtaText(eta);
             lastStageRef.current = stage;
-            if (jobId && stage === "kymo_done") {
-              refreshDebugOverlays(jobId);
+            if (stage === "kymo_done") {
+              refreshDebugOverlays(id);
             }
           }
           return;
@@ -550,3 +550,5 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     setStatus,
   };
 }
+
+export type JobSessionState = ReturnType<typeof useJobSession>;
