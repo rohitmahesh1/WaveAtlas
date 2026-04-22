@@ -1,5 +1,4 @@
 // src/pages/RunsPage.tsx
-import React from "react";
 import { PastRunsPanel } from "../components/PastRunsPanel";
 import { useJobHistory } from "../hooks/useJobHistory";
 import { useJobSession } from "../hooks/useJobSession";
