@@ -52,6 +52,7 @@ export function OverlayCanvas(props: {
   tracks: OverlayTrackEvent[];
   overlayColor?: string;
   hideBaseImage?: boolean;
+  hideTracks?: boolean;
   selectedTrackId?: string | number | null;
   onClickTrack?: (track: OverlayTrackEvent | null) => void;
   onHoverTrack?: (track: OverlayTrackEvent | null) => void;
@@ -66,6 +67,7 @@ export function OverlayCanvas(props: {
     tracks,
     overlayColor = "rgba(0,140,90,0.85)",
     hideBaseImage = false,
+    hideTracks = false,
     selectedTrackId = null,
     onClickTrack,
     onHoverTrack,
@@ -104,6 +106,11 @@ export function OverlayCanvas(props: {
       ctx.clearRect(0, 0, w, h);
 
       ctx.save();
+
+      if (hideTracks) {
+        ctx.restore();
+        return;
+      }
 
       // draw tracks
       ctx.lineWidth = 2;
@@ -159,10 +166,15 @@ export function OverlayCanvas(props: {
     return () => {
       cancelled = true;
     };
-  }, [imageUrl, tracks, filterFn, colorOverrideFn, selectedTrackId, overlayColor]);
+  }, [imageUrl, tracks, filterFn, colorOverrideFn, selectedTrackId, overlayColor, hideTracks]);
 
   // Rebuild hit cache when tracks or transforms change
   useEffect(() => {
+    if (hideTracks) {
+      hitCacheRef.current = [];
+      return;
+    }
+
     const img = imgRef.current;
     if (!img) return;
 
@@ -207,7 +219,7 @@ export function OverlayCanvas(props: {
     }
 
     buildCache();
-  }, [tracks, filterFn, imageUrl]);
+  }, [tracks, filterFn, imageUrl, hideTracks]);
 
   const findNearestTrack = (cx: number, cy: number): OverlayTrackEvent | null => {
     const entries = hitCacheRef.current;
@@ -337,7 +349,7 @@ export function OverlayCanvas(props: {
               width: "100%",
               height: "100%",
               pointerEvents: "auto",
-              cursor: "crosshair",
+              cursor: hideTracks ? "default" : "crosshair",
             }}
             onPointerMove={handlePointerMove}
             onPointerLeave={handlePointerLeave}
