@@ -241,6 +241,18 @@ body {
   font-weight: 600;
 }
 
+.panel-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.panel-title-row .panel-title {
+  margin-bottom: 0;
+}
+
 .panel-body {
   display: flex;
   flex-direction: column;
@@ -354,6 +366,22 @@ body {
   padding: 6px 12px;
   cursor: pointer;
   color: #1f2a2e;
+}
+
+.ghost-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.download-btn {
+  border-color: #b9d6cd;
+  color: var(--accent-strong);
+  background: rgba(232, 247, 243, 0.55);
+}
+
+.compact-btn {
+  padding: 4px 9px;
+  font-size: 12px;
 }
 
 .icon-btn {
