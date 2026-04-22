@@ -1,8 +1,9 @@
-import React, { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { TrackDetail } from "../api";
 
 type ChartPoint = { x: number; y: number };
 type ChartSize = { width: number; height: number };
+type LoadedImageSize = { src: string; width: number; height: number };
 
 const MIN_H = 180;
 const MAX_H = 520;
@@ -100,49 +101,51 @@ export function TrackDetailChart({
 }) {
   const xs = detail.time_index ?? [];
   const ys = detail.position ?? [];
-  if (xs.length < 2 || ys.length < 2 || xs.length !== ys.length) {
-    return <div className="empty-text">Track detail unavailable.</div>;
-  }
+  const hasUsableTrack = xs.length >= 2 && ys.length >= 2 && xs.length === ys.length;
 
   const [showAxes, setShowAxes] = useState<boolean>(false);
   const [showBase, setShowBase] = useState<boolean>(false);
   const [hover, setHover] = useState<{ x: number; y: number; cx: number; cy: number } | null>(null);
-  const [baseImg, setBaseImg] = useState<HTMLImageElement | null>(null);
-  const [overlayImg, setOverlayImg] = useState<HTMLImageElement | null>(null);
+  const [baseImg, setBaseImg] = useState<LoadedImageSize | null>(null);
+  const [overlayImg, setOverlayImg] = useState<LoadedImageSize | null>(null);
 
   let minX = Infinity;
   let maxX = -Infinity;
   let minY = Infinity;
   let maxY = -Infinity;
 
-  for (const v of xs) {
-    if (!Number.isFinite(v)) continue;
-    minX = Math.min(minX, v);
-    maxX = Math.max(maxX, v);
-  }
-
   const series: { name: string; ys: number[]; color: string; dash?: string }[] = [
     { name: "Raw", ys, color: "#1b242a" },
     { name: "Fit", ys: detail.baseline ?? [], color: "#117a65" },
   ];
-  if (detail.sine_fit && detail.sine_fit.length === ys.length) {
+  if (hasUsableTrack && detail.sine_fit && detail.sine_fit.length === ys.length) {
     series.push({ name: "Sine", ys: detail.sine_fit, color: "#d56b00", dash: "4 4" });
   }
 
-  for (const s of series) {
-    for (const v of s.ys) {
+  if (hasUsableTrack) {
+    for (const v of xs) {
       if (!Number.isFinite(v)) continue;
-      minY = Math.min(minY, v);
-      maxY = Math.max(maxY, v);
+      minX = Math.min(minX, v);
+      maxX = Math.max(maxX, v);
+    }
+
+    for (const s of series) {
+      for (const v of s.ys) {
+        if (!Number.isFinite(v)) continue;
+        minY = Math.min(minY, v);
+        maxY = Math.max(maxY, v);
+      }
     }
   }
 
-  if (!Number.isFinite(minX + maxX + minY + maxY)) {
-    return <div className="empty-text">Track detail unavailable.</div>;
-  }
+  const hasValidRange = hasUsableTrack && Number.isFinite(minX + maxX + minY + maxY);
+  const safeMinX = hasValidRange ? minX : 0;
+  const safeMaxX = hasValidRange ? maxX : 1;
+  const safeMinY = hasValidRange ? minY : 0;
+  const safeMaxY = hasValidRange ? maxY : 1;
 
-  const spanX = Math.max(1, maxX - minX);
-  const spanY = Math.max(1, maxY - minY);
+  const spanX = Math.max(1, safeMaxX - safeMinX);
+  const spanY = Math.max(1, safeMaxY - safeMinY);
   const pad = 12;
 
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -157,33 +160,29 @@ export function TrackDetailChart({
       const h = clamp(Math.round(w / Math.max(0.001, ar)), MIN_H, MAX_H);
       setChartSize({ width: w, height: h });
     };
-    update();
     const ro = new ResizeObserver(update);
     ro.observe(el);
     return () => ro.disconnect();
   }, [spanX, spanY]);
 
   const scale = useMemo(
-    () => buildScale(chartSize.width, chartSize.height, pad, minX, maxX, minY, maxY),
-    [chartSize.width, chartSize.height, pad, minX, maxX, minY, maxY]
+    () => buildScale(chartSize.width, chartSize.height, pad, safeMinX, safeMaxX, safeMinY, safeMaxY),
+    [chartSize.width, chartSize.height, pad, safeMinX, safeMaxX, safeMinY, safeMaxY]
   );
   const effW = spanX * scale.scale;
   const effH = spanY * scale.scale;
   const clipId = useId();
 
   useEffect(() => {
-    if (!showBase || !baseImageUrl) {
-      setBaseImg(null);
-      return;
-    }
+    if (!showBase || !baseImageUrl) return;
     let cancelled = false;
     const im = new Image();
     im.crossOrigin = "anonymous";
     im.onload = () => {
-      if (!cancelled) setBaseImg(im);
+      if (!cancelled) setBaseImg({ src: baseImageUrl, width: im.naturalWidth, height: im.naturalHeight });
     };
     im.onerror = () => {
-      if (!cancelled) setBaseImg(null);
+      if (!cancelled) setBaseImg({ src: baseImageUrl, width: 0, height: 0 });
     };
     im.src = baseImageUrl;
     return () => {
@@ -192,24 +191,30 @@ export function TrackDetailChart({
   }, [showBase, baseImageUrl]);
 
   useEffect(() => {
-    if (!showBase || !debugImageUrl) {
-      setOverlayImg(null);
-      return;
-    }
+    if (!showBase || !debugImageUrl) return;
     let cancelled = false;
     const im = new Image();
     im.crossOrigin = "anonymous";
     im.onload = () => {
-      if (!cancelled) setOverlayImg(im);
+      if (!cancelled) setOverlayImg({ src: debugImageUrl, width: im.naturalWidth, height: im.naturalHeight });
     };
     im.onerror = () => {
-      if (!cancelled) setOverlayImg(null);
+      if (!cancelled) setOverlayImg({ src: debugImageUrl, width: 0, height: 0 });
     };
     im.src = debugImageUrl;
     return () => {
       cancelled = true;
     };
   }, [showBase, debugImageUrl]);
+
+  if (!hasValidRange) {
+    return <div className="empty-text">Track detail unavailable.</div>;
+  }
+
+  const activeBaseImg =
+    showBase && baseImageUrl && baseImg?.src === baseImageUrl && baseImg.width > 0 ? baseImg : null;
+  const activeOverlayImg =
+    showBase && debugImageUrl && overlayImg?.src === debugImageUrl && overlayImg.width > 0 ? overlayImg : null;
 
   const polylines = series.map((s) => ({
     name: s.name,
@@ -262,8 +267,8 @@ export function TrackDetailChart({
               setHover(null);
               return;
             }
-            const x = minX + (cx - scale.offX) / scale.scale;
-            const y = minY + (cy - scale.offY) / scale.scale;
+            const x = safeMinX + (cx - scale.offX) / scale.scale;
+            const y = safeMinY + (cy - scale.offY) / scale.scale;
             setHover({ x, y, cx, cy });
           }}
         >
@@ -272,25 +277,25 @@ export function TrackDetailChart({
               <rect x={scale.offX} y={scale.offY} width={effW} height={effH} />
             </clipPath>
           </defs>
-          {showBase && baseImg ? (
+          {activeBaseImg ? (
             <image
               href={baseImageUrl ?? ""}
-              x={scale.offX - minX * scale.scale}
-              y={scale.offY - minY * scale.scale}
-              width={baseImg.naturalWidth * scale.scale}
-              height={baseImg.naturalHeight * scale.scale}
+              x={scale.offX - safeMinX * scale.scale}
+              y={scale.offY - safeMinY * scale.scale}
+              width={activeBaseImg.width * scale.scale}
+              height={activeBaseImg.height * scale.scale}
               preserveAspectRatio="none"
               opacity={0.7}
               clipPath={`url(#${clipId})`}
             />
           ) : null}
-          {showBase && overlayImg ? (
+          {activeOverlayImg ? (
             <image
               href={debugImageUrl ?? ""}
-              x={scale.offX - minX * scale.scale}
-              y={scale.offY - minY * scale.scale}
-              width={overlayImg.naturalWidth * scale.scale}
-              height={overlayImg.naturalHeight * scale.scale}
+              x={scale.offX - safeMinX * scale.scale}
+              y={scale.offY - safeMinY * scale.scale}
+              width={activeOverlayImg.width * scale.scale}
+              height={activeOverlayImg.height * scale.scale}
               preserveAspectRatio="none"
               opacity={debugOpacity}
               clipPath={`url(#${clipId})`}
@@ -310,14 +315,14 @@ export function TrackDetailChart({
               {(() => {
                 const maxXTicks = clamp(Math.floor(effW / 80), 2, 6);
                 const maxYTicks = clamp(Math.floor(effH / 60), 2, 6);
-                const xt = niceTicks(minX, maxX, maxXTicks);
-                const yt = niceTicks(minY, maxY, maxYTicks);
+                const xt = niceTicks(safeMinX, safeMaxX, maxXTicks);
+                const yt = niceTicks(safeMinY, safeMaxY, maxYTicks);
                 const xStep = xt.length >= 2 ? Math.abs(xt[1] - xt[0]) : undefined;
                 const yStep = yt.length >= 2 ? Math.abs(yt[1] - yt[0]) : undefined;
                 return (
                   <>
                     {xt.map((v) => {
-                      const cx = scale.offX + (v - minX) * scale.scale;
+                      const cx = scale.offX + (v - safeMinX) * scale.scale;
                       return (
                         <g key={`xt-${v}`}>
                           <line
@@ -343,7 +348,7 @@ export function TrackDetailChart({
                       );
                     })}
                     {yt.map((v) => {
-                      const cy = scale.offY + (v - minY) * scale.scale;
+                      const cy = scale.offY + (v - safeMinY) * scale.scale;
                       return (
                         <g key={`yt-${v}`}>
                           <line
