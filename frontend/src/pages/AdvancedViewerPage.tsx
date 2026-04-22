@@ -11,12 +11,12 @@ import { SelectionPanel } from "../components/SelectionPanel";
 import { SummaryPanel } from "../components/SummaryPanel";
 import { ActivityPanel } from "../components/ActivityPanel";
 import { ViewerControls } from "../components/ViewerControls";
-import { useJobSession } from "../hooks/useJobSession";
 import { useFilters } from "../hooks/useFilters";
 import { useTrackDetail } from "../hooks/useTrackDetail";
 import { useJobHistory } from "../hooks/useJobHistory";
 import { PastRunsPanel } from "../components/PastRunsPanel";
 import { cancelJob, deleteJob, resumeJob, updateJobName } from "../api";
+import { useSharedJobSession } from "../hooks/useSharedJobSession";
 
 const NUMERIC_OPS: FilterOp[] = [">", "<", ">=", "<=", "==", "!=", "between"];
 const STRING_OPS: FilterOp[] = ["contains", "==", "!="];
@@ -72,7 +72,7 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
     cancelCurrentJob,
     loadJob,
     clearSession,
-  } = useJobSession();
+  } = useSharedJobSession();
 
   const { jobs, loading: jobsLoading, error: jobsError, refresh: refreshJobs } = useJobHistory();
 
