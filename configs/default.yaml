@@ -22,6 +22,8 @@ detrend:
   random_state: 42
 
 peaks:
+  adaptive: false
+  minimum_per_track: 1
   prominence: 3.0
   width: 2
   distance: 8
