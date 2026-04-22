@@ -1,5 +1,6 @@
 // src/pages/ConfigDocsPage.tsx
-import React, { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { API_BASE } from "../api";
 
 type Block =
@@ -78,7 +79,7 @@ function parseMarkdown(md: string): Block[] {
 
 function renderInline(text: string) {
   const parts = text.split(/`/g);
-  const out: React.ReactNode[] = [];
+  const out: ReactNode[] = [];
 
   const pushEmphasis = (chunk: string, keyPrefix: string) => {
     let i = 0;
@@ -139,7 +140,7 @@ export default function ConfigDocsPage() {
         if (!res.ok) throw new Error(await res.text());
         const text = await res.text();
         if (!cancelled) setContent(text);
-      } catch (err: any) {
+      } catch {
         if (!cancelled) setError("Failed to load config docs.");
       } finally {
         if (!cancelled) setLoading(false);
@@ -186,13 +187,16 @@ export default function ConfigDocsPage() {
                         </ul>
                       );
                     }
-                    return (
+                    if (block.type === "ol") {
+                      return (
                       <ol key={idx}>
                         {block.items.map((item, i) => (
                           <li key={i}>{renderInline(item)}</li>
                         ))}
                       </ol>
-                    );
+                      );
+                    }
+                    return null;
                   })}
                 </div>
               ) : null}
