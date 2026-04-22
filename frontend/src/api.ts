@@ -1,7 +1,11 @@
 // src/api.ts
 export const API_BASE = import.meta.env.VITE_API_BASE || ""; // "" => same origin
 
-export type Job = { id: string; status: string; progress: any };
+export type JsonPrimitive = string | number | boolean | null;
+export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+export type JobProgress = Record<string, JsonValue>;
+
+export type Job = { id: string; status: string; progress: JobProgress | null };
 export type JobRead = {
   id: string;
   owner_session_id: string;
@@ -14,7 +18,7 @@ export type JobRead = {
   started_at?: string | null;
   finished_at?: string | null;
   updated_at: string;
-  progress: any;
+  progress: JobProgress | null;
   tracks_total?: number | null;
   tracks_done: number;
   waves_done: number;
@@ -47,7 +51,7 @@ export type TrackDetail = {
   };
 };
 
-export async function createJob(runName = "mvp", config: any = {}) {
+export async function createJob(runName = "mvp", config: unknown = {}): Promise<JobRead> {
   const res = await fetch(`${API_BASE}/api/jobs`, {
     method: "POST",
     credentials: "include",
@@ -58,7 +62,7 @@ export async function createJob(runName = "mvp", config: any = {}) {
   return res.json();
 }
 
-export async function startJob(jobId: string) {
+export async function startJob(jobId: string): Promise<JobRead> {
   const res = await fetch(`${API_BASE}/api/jobs/${jobId}/start`, {
     method: "POST",
     credentials: "include",
@@ -102,7 +106,7 @@ export async function cancelJob(jobId: string): Promise<JobRead> {
   return res.json();
 }
 
-export async function deleteJob(jobId: string): Promise<{ ok: boolean; deleted?: any; blob_errors?: string[] }> {
+export async function deleteJob(jobId: string): Promise<{ ok: boolean; deleted?: unknown; blob_errors?: string[] }> {
   const res = await fetch(`${API_BASE}/api/jobs/${jobId}`, {
     method: "DELETE",
     credentials: "include",
@@ -154,7 +158,7 @@ export async function getTrackDetail(
 }
 
 // Small/dev upload (goes through backend)
-export async function uploadViaApi(jobId: string, file: File) {
+export async function uploadViaApi(jobId: string, file: File): Promise<unknown> {
   const fd = new FormData();
   fd.append("file", file);
   const res = await fetch(`${API_BASE}/api/jobs/${jobId}/upload`, {
@@ -180,7 +184,7 @@ export async function createUploadSession(jobId: string, file: File) {
   return res.json() as Promise<{ upload_url: string; blob_path: string; content_type: string }>;
 }
 
-export async function uploadComplete(jobId: string, blobPath: string, file: File) {
+export async function uploadComplete(jobId: string, blobPath: string, file: File): Promise<unknown> {
   const res = await fetch(`${API_BASE}/api/jobs/${jobId}/upload-complete`, {
     method: "POST",
     credentials: "include",
