@@ -1,5 +1,6 @@
 // src/OverlayCanvas.tsx
-import React, { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { MouseEvent, PointerEvent } from "react";
 
 export type OverlayTrackEvent = {
   id?: string | number;
@@ -15,13 +16,19 @@ export type OverlayTrackEvent = {
   };
 };
 
-function applyCanvasTransform(ctx: CanvasRenderingContext2D) {
-  // No-op: transforms removed from UI, keep coords in native space.
-  return;
-}
-
 function transformPoint(x: number, y: number) {
   return { x, y };
+}
+
+function withAlpha(color: string, alpha: number) {
+  const hex = color.trim();
+  if (/^#([0-9a-fA-F]{6})$/.test(hex)) {
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  }
+  return color;
 }
 
 type HitEntry = {
@@ -74,41 +81,29 @@ export function OverlayCanvas(props: {
   const hoverRaf = useRef<number | null>(null);
   const [hoverPoint, setHoverPoint] = useState<HoverPoint | null>(null);
 
-  const withAlpha = (color: string, alpha: number) => {
-    const hex = color.trim();
-    if (/^#([0-9a-fA-F]{6})$/.test(hex)) {
-      const r = parseInt(hex.slice(1, 3), 16);
-      const g = parseInt(hex.slice(3, 5), 16);
-      const b = parseInt(hex.slice(5, 7), 16);
-      return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-    }
-    return color;
-  };
-
   // Draw whenever tracks change, transform changes, or image loads
   useEffect(() => {
-    const img = imgRef.current;
-    const canvas = canvasRef.current;
-    if (!img || !canvas) return;
+    const image = imgRef.current;
+    const drawingCanvas = canvasRef.current;
+    if (!image || !drawingCanvas) return;
 
     let cancelled = false;
 
-    function draw() {
+    function draw(currentImage: HTMLImageElement, currentCanvas: HTMLCanvasElement) {
       if (cancelled) return;
 
-      const w = img.naturalWidth || 1;
-      const h = img.naturalHeight || 1;
+      const w = currentImage.naturalWidth || 1;
+      const h = currentImage.naturalHeight || 1;
 
-      canvas.width = w;
-      canvas.height = h;
+      currentCanvas.width = w;
+      currentCanvas.height = h;
 
-      const ctx = canvas.getContext("2d");
+      const ctx = currentCanvas.getContext("2d");
       if (!ctx) return;
 
       ctx.clearRect(0, 0, w, h);
 
       ctx.save();
-      applyCanvasTransform(ctx);
 
       // draw tracks
       ctx.lineWidth = 2;
@@ -151,20 +146,20 @@ export function OverlayCanvas(props: {
     }
 
     // If image not loaded yet, wait
-    if (!img.complete || img.naturalWidth === 0) {
-      const onLoad = () => draw();
-      img.addEventListener("load", onLoad);
+    if (!image.complete || image.naturalWidth === 0) {
+      const onLoad = () => draw(image, drawingCanvas);
+      image.addEventListener("load", onLoad);
       return () => {
         cancelled = true;
-        img.removeEventListener("load", onLoad);
+        image.removeEventListener("load", onLoad);
       };
     }
 
-    draw();
+    draw(image, drawingCanvas);
     return () => {
       cancelled = true;
     };
-  }, [imageUrl, tracks, filterFn, colorOverrideFn, selectedTrackId]);
+  }, [imageUrl, tracks, filterFn, colorOverrideFn, selectedTrackId, overlayColor]);
 
   // Rebuild hit cache when tracks or transforms change
   useEffect(() => {
@@ -238,7 +233,7 @@ export function OverlayCanvas(props: {
     return bestDist <= hitRadiusPx ? best : null;
   };
 
-  const handlePointerMove = (ev: React.PointerEvent<HTMLCanvasElement>) => {
+  const handlePointerMove = (ev: PointerEvent<HTMLCanvasElement>) => {
     if (hoverRaf.current) cancelAnimationFrame(hoverRaf.current);
     hoverRaf.current = requestAnimationFrame(() => {
       const canvas = canvasRef.current;
@@ -279,7 +274,7 @@ export function OverlayCanvas(props: {
     setHoverPoint(null);
   };
 
-  const handleClick = (ev: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleClick = (ev: MouseEvent<HTMLCanvasElement>) => {
     if (!onClickTrack) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
