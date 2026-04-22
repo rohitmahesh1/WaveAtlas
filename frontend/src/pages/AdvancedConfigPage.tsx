@@ -1,10 +1,11 @@
 // src/pages/AdvancedConfigPage.tsx
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { stageLabel } from "../utils/format";
-import { API_BASE, resumeJob } from "../api";
+import { API_BASE, jobWavesCsvUrl, resumeJob } from "../api";
 import { RunPanel } from "../components/RunPanel";
 import { ActivityPanel } from "../components/ActivityPanel";
 import { useSharedJobSession } from "../hooks/useSharedJobSession";
+import { downloadFromUrl } from "../utils/download";
 
 const DEFAULT_CONFIG_TEXT = `# Loading config...`;
 
@@ -57,6 +58,7 @@ export default function AdvancedConfigPage() {
   const {
     jobId,
     status,
+    baseImageUrl,
     activity,
     currentStage,
     stageDetail,
@@ -89,6 +91,26 @@ export default function AdvancedConfigPage() {
   const stageText = stageDetail ? `${stageLabel(currentStage)} — ${stageDetail}` : stageLabel(currentStage);
   const statusLabel = String(status).replace(/_/g, " ");
   const showSpinner = !["completed", "failed", "cancelled", "idle"].includes(String(status));
+
+  const runStem = jobId ? `waveatlas_${jobId.slice(0, 8)}` : "waveatlas";
+
+  const downloadWaves = async () => {
+    if (!jobId) return;
+    try {
+      await downloadFromUrl(jobWavesCsvUrl(jobId), `${runStem}_waves.csv`);
+    } catch {
+      window.alert("Could not download waves CSV for this run.");
+    }
+  };
+
+  const downloadHeatmap = async () => {
+    if (!baseImageUrl) return;
+    try {
+      await downloadFromUrl(baseImageUrl, `${runStem}_base_heatmap.png`);
+    } catch {
+      window.alert("Could not download the base heatmap.");
+    }
+  };
 
   const loadDefaultConfig = useCallback(
     async (force = false) => {
@@ -160,6 +182,9 @@ export default function AdvancedConfigPage() {
             totalCount={tracks.length}
             onCancel={cancelCurrentJob}
             cancelDisabled={!jobId || ["completed", "failed", "cancelled"].includes(status)}
+            onDownloadWaves={jobId ? downloadWaves : undefined}
+            onDownloadHeatmap={downloadHeatmap}
+            heatmapDownloadDisabled={!baseImageUrl}
             onResume={async () => {
               if (!jobId || status !== "cancelled") return;
               try {
