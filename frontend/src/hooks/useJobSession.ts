@@ -7,9 +7,11 @@ import {
   createUploadSession,
   uploadToResumableUrl,
   uploadComplete,
+  getJob,
   wsUrl,
   cancelJob,
   API_BASE,
+  isApiError,
 } from "../api";
 import type { OverlayTrackEvent } from "../OverlayCanvas";
 import type { LogEntry } from "../types";
@@ -120,8 +122,10 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
   const lastStageRef = useRef<string>("");
   const pollTokenRef = useRef<number>(0);
   const resumeStartedRef = useRef<boolean>(false);
+  const jobIdRef = useRef<string | null>(initialSession?.jobId ?? null);
   const pollForBaseHeatmapRef = useRef<(id: string) => void>(() => undefined);
   const connectWsWithRetryRef = useRef<(id: string, afterSeq: number) => void>(() => undefined);
+  const resumeSavedJobRef = useRef<(id: string) => void>(() => undefined);
 
   const addActivity = (message: string, level: "info" | "warn" | "error" = "info", stage?: string) => {
     const ts = new Date().toLocaleTimeString();
@@ -158,6 +162,26 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     return url;
   }
 
+  function clearMissingJobSession(id: string) {
+    if (jobIdRef.current !== id) return;
+
+    closeWs("missing-job");
+    pollTokenRef.current += 1;
+    localStorage.removeItem(SESSION_KEY);
+    jobIdRef.current = null;
+    setJobId(null);
+    setStatus("idle");
+    setTracks([]);
+    setBaseImageUrl(null);
+    lastSeqRef.current = 0;
+    setCurrentStage("idle");
+    setStageDetail(null);
+    setEtaText(null);
+    setDebugOverlays([]);
+    setActivity([]);
+    addActivity("Saved run is no longer available; cleared session", "warn", "resume");
+  }
+
   async function refreshDebugOverlays(id: string) {
     try {
       const overlayArts = await listArtifacts(id, { kind: "overlay", limit: 2000 });
@@ -181,8 +205,10 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
           .sort((a, b) => a.label.localeCompare(b.label));
         setDebugOverlays(list);
       }
-    } catch {
-      // ignore
+    } catch (error) {
+      if (isApiError(error, 404)) {
+        clearMissingJobSession(id);
+      }
     }
   }
 
@@ -220,8 +246,12 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
         if (base?.download_url) {
           setBaseImageUrl(base.download_url);
         }
-      } catch {
-        // Keep polling quietly; user log stays clean.
+      } catch (error) {
+        if (isApiError(error, 404)) {
+          clearMissingJobSession(id);
+          return;
+        }
+        // Keep polling transient failures quietly; user log stays clean.
       }
       await new Promise((r) => setTimeout(r, 1000));
     }
@@ -396,7 +426,12 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
 
         if (reconnectRef.current.stop) return;
 
-        if (ev.code === 4401 || ev.code === 4404) {
+        if (ev.code === 4404) {
+          clearMissingJobSession(id);
+          return;
+        }
+
+        if (ev.code === 4401) {
           addActivity("Live updates unavailable (auth/ownership)", "warn");
           return;
         }
@@ -427,6 +462,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
 
     const safeName = (runName || "").trim() || "untitled";
     const job = await createJob(safeName, configOverride ?? {});
+    jobIdRef.current = job.id;
     setJobId(job.id);
 
     lastSeqRef.current = 0;
@@ -470,6 +506,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
   }
 
   function loadJob(id: string) {
+    jobIdRef.current = id;
     setJobId(id);
     setStatus("resuming…");
     setTracks([]);
@@ -484,6 +521,23 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     connectWsWithRetry(id, 0);
   }
 
+  async function resumeSavedJob(id: string) {
+    try {
+      await getJob(id);
+    } catch (error) {
+      if (isApiError(error, 404)) {
+        clearMissingJobSession(id);
+        return;
+      }
+      // For transient startup/network failures, keep the old retry path alive.
+    }
+
+    lastSeqRef.current = 0;
+    saveSession(id, 0);
+    pollForBaseHeatmapRef.current(id);
+    connectWsWithRetryRef.current(id, 0);
+  }
+
   function reconnect() {
     if (!jobId) return;
     addActivity("Reconnecting to live updates");
@@ -495,6 +549,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     closeWs("clear-session");
     pollTokenRef.current += 1;
     localStorage.removeItem(SESSION_KEY);
+    jobIdRef.current = null;
     setJobId(null);
     setStatus("idle");
     setTracks([]);
@@ -509,19 +564,24 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
   }
 
   useEffect(() => {
+    jobIdRef.current = jobId;
+  }, [jobId]);
+
+  useEffect(() => {
     pollForBaseHeatmapRef.current = pollForBaseHeatmap;
     connectWsWithRetryRef.current = connectWsWithRetry;
+    resumeSavedJobRef.current = (id: string) => {
+      void resumeSavedJob(id);
+    };
   });
 
   useEffect(() => {
     if (!initialSession || resumeStartedRef.current) return;
 
     resumeStartedRef.current = true;
-    lastSeqRef.current = 0;
-    saveSession(initialSession.jobId, 0);
-
-    pollForBaseHeatmapRef.current(initialSession.jobId);
-    connectWsWithRetryRef.current(initialSession.jobId, 0);
+    const id = initialSession.jobId;
+    const timeout = window.setTimeout(() => resumeSavedJobRef.current(id), 0);
+    return () => window.clearTimeout(timeout);
   }, [initialSession]);
 
   useEffect(() => {
