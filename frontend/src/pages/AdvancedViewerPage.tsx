@@ -1,5 +1,5 @@
 // src/pages/AdvancedViewerPage.tsx
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { OverlayCanvas } from "../OverlayCanvas";
 import type { OverlayTrackEvent } from "../OverlayCanvas";
@@ -111,19 +111,25 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
     setFilters,
   } = useFilters(tracks, FILTER_FIELDS);
 
-  const { trackDetail, trackDetailLoading, trackDetailError, resetTrackDetail } = useTrackDetail(
-    jobId,
-    selectedTrackId
-  );
-
   const stageText = stageDetail ? `${stageLabel(currentStage)} — ${stageDetail}` : stageLabel(currentStage);
   const statusLabel = String(status).replace(/_/g, " ");
   const showSpinner = !["completed", "failed", "cancelled", "idle"].includes(String(status));
 
-  const selectedTrack = useMemo(() => {
+  const activeSelectedTrackId = useMemo(() => {
     if (selectedTrackId == null) return null;
-    return tracks.find((t) => String(t.id ?? t.track_index) === String(selectedTrackId)) ?? null;
-  }, [tracks, selectedTrackId]);
+    const visible = filteredTracks.some((t) => String(t.id ?? t.track_index) === String(selectedTrackId));
+    return visible ? selectedTrackId : null;
+  }, [filteredTracks, selectedTrackId]);
+
+  const { trackDetail, trackDetailLoading, trackDetailError, resetTrackDetail } = useTrackDetail(
+    jobId,
+    activeSelectedTrackId
+  );
+
+  const selectedTrack = useMemo(() => {
+    if (activeSelectedTrackId == null) return null;
+    return filteredTracks.find((t) => String(t.id ?? t.track_index) === String(activeSelectedTrackId)) ?? null;
+  }, [filteredTracks, activeSelectedTrackId]);
 
   const hoverColorFn = useMemo(() => {
     if (hoveredTrackId == null) return undefined;
@@ -131,22 +137,15 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
       String(t.id ?? t.track_index) === String(hoveredTrackId) ? "rgba(255,215,0,0.9)" : undefined;
   }, [hoveredTrackId]);
 
+  const activeDebugLabel = useMemo(() => {
+    if (selectedDebugLabel === "none") return "none";
+    return debugOverlays.some((o) => o.label === selectedDebugLabel) ? selectedDebugLabel : "none";
+  }, [debugOverlays, selectedDebugLabel]);
+
   const debugImageUrl = useMemo(() => {
-    if (selectedDebugLabel === "none") return null;
-    return debugOverlays.find((o) => o.label === selectedDebugLabel)?.url ?? null;
-  }, [debugOverlays, selectedDebugLabel]);
-
-  useEffect(() => {
-    if (selectedDebugLabel === "none") return;
-    const exists = debugOverlays.some((o) => o.label === selectedDebugLabel);
-    if (!exists) setSelectedDebugLabel("none");
-  }, [debugOverlays, selectedDebugLabel]);
-
-  useEffect(() => {
-    if (selectedTrackId == null) return;
-    const visible = filteredTracks.some((t) => String(t.id ?? t.track_index) === String(selectedTrackId));
-    if (!visible) setSelectedTrackId(null);
-  }, [filteredTracks, selectedTrackId]);
+    if (activeDebugLabel === "none") return null;
+    return debugOverlays.find((o) => o.label === activeDebugLabel)?.url ?? null;
+  }, [debugOverlays, activeDebugLabel]);
 
   return (
     <div className="app-shell">
@@ -321,7 +320,7 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
               hideBaseImage={hideBaseImage}
               onHideBaseImageChange={setHideBaseImage}
               debugOverlays={debugOverlays}
-              selectedDebugLabel={selectedDebugLabel}
+              selectedDebugLabel={activeDebugLabel}
               onDebugLabelChange={setSelectedDebugLabel}
               debugOpacity={debugOpacity}
               onDebugOpacityChange={setDebugOpacity}
@@ -336,7 +335,7 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
               tracks={filteredTracks}
               overlayColor={overlayColor}
               hideBaseImage={hideBaseImage}
-              selectedTrackId={selectedTrackId}
+              selectedTrackId={activeSelectedTrackId}
               onClickTrack={(t) => setSelectedTrackId(t ? (t.id ?? t.track_index) : null)}
               onHoverTrack={(t) => setHoveredTrackId(t ? (t.id ?? t.track_index) : null)}
               colorOverrideFn={hoverColorFn}
