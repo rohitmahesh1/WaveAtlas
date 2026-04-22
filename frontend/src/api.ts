@@ -61,6 +61,31 @@ export type ArtifactView = {
   content_type?: string | null;
 };
 
+export type TrackPeakPoint = {
+  peak_index: number;
+  peak_i: number;
+  frame: number;
+  position: number;
+  amplitude?: number | null;
+  in_slice?: boolean;
+  slice_index?: number | null;
+  is_strongest?: boolean;
+};
+
+export type TrackPeakRegression = TrackPeakPoint & {
+  sine_fit?: number[] | null;
+  fit_amp_A?: number | null;
+  fit_phase_phi?: number | null;
+  fit_offset_c?: number | null;
+  fit_freq_hz?: number | null;
+  fit_error_vnmse?: number | null;
+  fit_window_lo?: number | null;
+  fit_window_hi?: number | null;
+  fit_peak_value?: number | null;
+  fit_peak_error?: number | null;
+  fit_passes_peak?: boolean | null;
+};
+
 export type TrackDetail = {
   track_index: number;
   time_index: number[];
@@ -70,6 +95,8 @@ export type TrackDetail = {
   sine_fit?: number[] | null;
   peaks: number[];
   peaks_in_slice: number[];
+  peak_points?: TrackPeakPoint[];
+  peak_regressions?: TrackPeakRegression[];
   strongest_peak_idx?: number | null;
   metrics: {
     dominant_frequency?: number | null;
