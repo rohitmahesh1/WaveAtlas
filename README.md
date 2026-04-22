@@ -32,11 +32,19 @@ bash ./scripts/fetch-samples.sh
 
 ## Local Development
 
+Apply database migrations:
+
+```bash
+alembic upgrade head
+```
+
 Start the backend:
 
 ```bash
 bash ./scripts/dev-backend.sh
 ```
+
+The dev backend script applies migrations automatically and defaults to an ignored local SQLite database at `data/waveatlas.local.sqlite` unless `DATABASE_URL` is set.
 
 Start the frontend:
 
@@ -44,4 +52,10 @@ Start the frontend:
 cd frontend
 npm install
 npm run dev
+```
+
+Create a new migration after changing `app/models.py`:
+
+```bash
+alembic revision --autogenerate -m "Describe the schema change"
 ```
