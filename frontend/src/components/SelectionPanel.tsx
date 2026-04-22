@@ -1,4 +1,3 @@
-import React from "react";
 import type { TrackDetail } from "../api";
 import type { OverlayTrackEvent } from "../OverlayCanvas";
 import { TrackDetailChart } from "./TrackDetailChart";
