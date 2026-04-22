@@ -40,11 +40,13 @@ Used when removing baseline trends from track signals (RANSAC + polynomial fit).
 
 ## peaks
 Used for peak detection on the detrended residual.
+- `peaks.adaptive` (bool): Use period-aware adaptive peak thresholds instead of the explicit prominence/width/distance values. Change when: tracks vary enough that fixed thresholds miss peaks or over-detect noise.
+- `peaks.minimum_per_track` (int): Minimum peak anchors required for each non-empty track. The default keeps one fallback anchor when thresholds miss every peak.
 - `peaks.prominence` (number): Minimum peak prominence for detection. Change when: you’re getting too many weak peaks (increase) or missing real peaks (decrease).
 - `peaks.width` (number): Minimum peak width (in samples). Change when: peaks are too narrow/wide relative to your signal.
 - `peaks.distance` (int): Minimum distance between peaks (in samples). Change when: peaks are too clustered (increase) or too sparse (decrease).
 Notes:
-- The pipeline also supports adaptive peak detection keys (for example `adaptive`, `distance_frac`, `width_frac`). Those are not in the default file but can be supplied if needed.
+- When `peaks.adaptive` is `true`, the pipeline also accepts period-aware keys such as `distance_frac`, `width_frac`, `rel_mad_k`, and `abs_min_prom_px`.
 
 ## period
 Used for dominant frequency estimation and period calculation.
@@ -70,6 +72,8 @@ Controls derived metrics and wave classification.
 - `features.classify.ripple_max_deg` (number): Max angle (degrees) to classify a wave as ripple-like. Change when: ripple classification is too strict/lenient.
 - `features.classify.surf_min_deg` (number): Min angle (degrees) to classify a wave as surf-like. Change when: surf classification is too strict/lenient.
 - `features.classify.prominence_min_px` (number): Minimum peak prominence (in pixels) required for ripple classification. Change when: weak peaks are being misclassified.
+Notes:
+- Wave rows are peak-centered: each detected peak creates one wave row, with frame windows estimated from neighboring peaks or the global period.
 
 ## service
 Service and pipeline runtime settings.
