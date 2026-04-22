@@ -1,13 +1,22 @@
 // src/pages/RunsPage.tsx
 import { PastRunsPanel } from "../components/PastRunsPanel";
 import { useJobHistory } from "../hooks/useJobHistory";
-import { cancelJob, deleteJob, resumeJob, updateJobName } from "../api";
+import { cancelJob, deleteJob, jobWavesCsvUrl, resumeJob, updateJobName } from "../api";
 import { useSharedJobSession } from "../hooks/useSharedJobSession";
+import { downloadFromUrl } from "../utils/download";
 
 export default function RunsPage(props: { onOpenViewer: () => void }) {
   const { onOpenViewer } = props;
   const { jobs, loading, error, refresh } = useJobHistory();
   const { jobId, loadJob, clearSession } = useSharedJobSession();
+
+  const downloadWaves = async (id: string) => {
+    try {
+      await downloadFromUrl(jobWavesCsvUrl(id), `waveatlas_${id.slice(0, 8)}_waves.csv`);
+    } catch {
+      window.alert("Could not download waves CSV for this run.");
+    }
+  };
 
   return (
     <div className="app-shell">
@@ -48,6 +57,7 @@ export default function RunsPage(props: { onOpenViewer: () => void }) {
                 // no-op
               }
             }}
+            onDownload={downloadWaves}
             onDelete={async (id) => {
               const ok = window.confirm("Delete this run and its artifacts? This cannot be undone.");
               if (!ok) return;
