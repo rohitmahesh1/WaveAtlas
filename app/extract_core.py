@@ -9,8 +9,8 @@ from uuid import UUID
 import numpy as np
 
 from .signal.detrend import detrend_residual
-from .signal.peaks import detect_peaks, detect_peaks_adaptive
-from .signal.period import estimate_dominant_frequency, frequency_to_period
+from .signal.peaks import detect_peaks, detect_peaks_adaptive, ensure_minimum_peaks
+from .signal.period import estimate_dominant_frequency, frequency_to_period, resolve_positive_frequency
 from .features import build_wave_rows, build_peak_rows
 
 
@@ -231,19 +231,29 @@ def process_track(
     features_cfg = (config.get("features") or {})
     overlay_cfg = (config.get("overlay") or {})
 
-    x, y = _load_track_xy(track_path, order=track_xy_order)
+    frame, position = _load_track_frame_position(track_path, order=track_xy_order)
 
-    residual = detrend_residual(x, y, **detrend_cfg)
+    residual = detrend_residual(frame, position, **detrend_cfg)
 
-    freq_hz = float(estimate_dominant_frequency(residual, **period_cfg))
+    try:
+        estimated_freq_hz = float(estimate_dominant_frequency(residual, **period_cfg))
+    except Exception:
+        estimated_freq_hz = float("nan")
+    freq_hz = resolve_positive_frequency(
+        estimated_freq_hz,
+        frame=frame,
+        sampling_rate=float(period_cfg.get("sampling_rate", 1.0)),
+        min_freq=period_cfg.get("min_freq"),
+        max_freq=period_cfg.get("max_freq"),
+    )
     period_s = float(frequency_to_period(freq_hz))
     frames_per_period = (sampling_rate / freq_hz) if (np.isfinite(freq_hz) and freq_hz > 0) else None
 
     peaks_idx, peak_props = _detect_peaks(residual, peaks_cfg, frames_per_period)
 
     wave_rows = build_wave_rows(
-        x=x,
-        y=y,
+        frame=frame,
+        position=position,
         residual=residual,
         peaks_idx=peaks_idx,
         peak_props=peak_props,
@@ -256,8 +266,8 @@ def process_track(
     )
 
     peak_rows = build_peak_rows(
-        x=x,
-        y=y,
+        frame=frame,
+        position=position,
         residual=residual,
         peaks_idx=peaks_idx,
         peak_props=peak_props,
@@ -276,8 +286,8 @@ def process_track(
         "amplitude": float(np.nanmean(amps)) if amps.size else None,
         "frequency": float(freq_hz) if np.isfinite(freq_hz) else None,
         "error": None,
-        "x0": int(x[0]) if x.size else None,
-        "y0": int(y[0]) if y.size else None,
+        "x0": int(position[0]) if position.size else None,
+        "y0": int(frame[0]) if frame.size else None,
         "metrics": {
             "num_peaks": int(len(peaks_idx)),
             "period": float(period_s) if np.isfinite(period_s) else None,
@@ -291,8 +301,8 @@ def process_track(
     overlay_track_event = _build_overlay_track_event(
         job_id=job_id,
         track_index=track_index,
-        x=x,
-        y=y,
+        frame=frame,
+        position=position,
         residual=residual,
         peaks_idx=peaks_idx,
         freq_hz=freq_hz,
@@ -305,12 +315,17 @@ def process_track(
     return track_row, wave_rows, peak_rows, overlay_track_event
 
 
-def _load_track_xy(track_path: Path, *, order: str = "xy") -> Tuple[np.ndarray, np.ndarray]:
+def _load_track_frame_position(track_path: Path, *, order: str = "xy") -> Tuple[np.ndarray, np.ndarray]:
     data = np.load(track_path)
     if data.ndim == 2 and data.shape[1] >= 2:
         if order == "yx":
-            return data[:, 1].astype(float, copy=False), data[:, 0].astype(float, copy=False)
-        return data[:, 0].astype(float, copy=False), data[:, 1].astype(float, copy=False)
+            frame = data[:, 0].astype(float, copy=False)
+            position = data[:, 1].astype(float, copy=False)
+        else:
+            position = data[:, 0].astype(float, copy=False)
+            frame = data[:, 1].astype(float, copy=False)
+        order_idx = np.argsort(frame, kind="stable")
+        return frame[order_idx], position[order_idx]
     if data.ndim == 1:
         return np.arange(data.shape[0], dtype=float), data.astype(float, copy=False)
     raise ValueError(f"Unsupported track array shape: {data.shape}")
@@ -321,8 +336,8 @@ def _detect_peaks(
     peaks_cfg: Dict[str, Any],
     frames_per_period: Optional[float],
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
-    if bool(peaks_cfg.get("adaptive", True)):
-        return detect_peaks_adaptive(
+    if bool(peaks_cfg.get("adaptive", False)):
+        peaks, props = detect_peaks_adaptive(
             residual,
             frames_per_period=frames_per_period,
             distance_frac=float(peaks_cfg.get("distance_frac", 0.6)),
@@ -332,13 +347,15 @@ def _detect_peaks(
             nms_enable=bool(peaks_cfg.get("nms_enable", True)),
             nms_dominance_frac=float(peaks_cfg.get("nms_dominance_frac", 0.55)),
         )
+        return ensure_minimum_peaks(residual, peaks, props, minimum=int(peaks_cfg.get("minimum_per_track", 1)))
     legacy_kwargs: Dict[str, Any] = {
         "prominence": float(peaks_cfg.get("prominence", 1.0)),
         "width": float(peaks_cfg.get("width", 1.0)),
     }
     if peaks_cfg.get("distance", None) is not None:
         legacy_kwargs["distance"] = int(peaks_cfg["distance"])
-    return detect_peaks(residual, **legacy_kwargs)
+    peaks, props = detect_peaks(residual, **legacy_kwargs)
+    return ensure_minimum_peaks(residual, peaks, props, minimum=int(peaks_cfg.get("minimum_per_track", 1)))
 
 
 def _infer_sample(track_path: Path) -> str:
@@ -352,8 +369,8 @@ def _build_overlay_track_event(
     *,
     job_id: UUID,
     track_index: int,
-    x: np.ndarray,
-    y: np.ndarray,
+    frame: np.ndarray,
+    position: np.ndarray,
     residual: np.ndarray,
     peaks_idx: np.ndarray,
     freq_hz: float,
@@ -363,12 +380,19 @@ def _build_overlay_track_event(
     sample: str,
 ) -> Dict[str, Any]:
     max_points = int(cfg.get("max_points", 300))
-    xs, ys = _decimate_polyline(x, y, max_points=max_points)
+    xs, ys = _decimate_polyline(position, frame, max_points=max_points)
 
     peak_pts: List[Dict[str, Any]] = []
     for i in peaks_idx.tolist():
-        if 0 <= i < len(x):
-            peak_pts.append({"i": int(i), "x": float(x[i]), "y": float(y[i]), "amp": float(residual[i])})
+        if 0 <= i < len(frame):
+            peak_pts.append({
+                "i": int(i),
+                "x": float(position[i]),
+                "y": float(frame[i]),
+                "frame": float(frame[i]),
+                "position": float(position[i]),
+                "amp": float(residual[i]),
+            })
 
     return {
         "job_id": str(job_id),
