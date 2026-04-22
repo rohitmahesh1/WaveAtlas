@@ -4,8 +4,9 @@ set -e
 # ---------------------------
 # Database
 # ---------------------------
-export DATABASE_URL="sqlite:///./dev.db"
-export DB_CREATE_ALL=1
+export DATABASE_URL="${DATABASE_URL:-sqlite:///./data/waveatlas.local.sqlite}"
+export DB_CREATE_ALL=0
+mkdir -p ./data
 
 # ---------------------------
 # Artifact storage (local only)
@@ -47,6 +48,8 @@ export PIPELINE_CONFIG_PATH="./configs/default.yaml"
 # ---------------------------
 # Run API
 # ---------------------------
+alembic upgrade head
+
 uvicorn app.main:app \
   --reload \
   --host 0.0.0.0 \
