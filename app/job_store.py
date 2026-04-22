@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError, NoResultFound
-from sqlalchemy import func
+from sqlalchemy import func, update
 from sqlmodel import Session, select
 
 from .models import (
@@ -122,6 +122,81 @@ class JobStore:
             self.append_event(job_id, EventType.status, payload)
 
         return job
+
+    def claim_start(
+        self,
+        job_id: UUID,
+        *,
+        config: Optional[Dict[str, Any]] = None,
+        emit_event: bool = True,
+    ) -> tuple[Job, bool]:
+        """
+        Atomically claim a queued job for one background worker.
+
+        Returns (job, claimed). If claimed is False, another request/worker has
+        already moved the job out of the startable state and callers should not
+        enqueue duplicate work.
+        """
+        now = datetime.utcnow()
+        values: Dict[str, Any] = {
+            "status": JobStatus.in_progress,
+            "started_at": now,
+            "finished_at": None,
+            "updated_at": now,
+        }
+        if config is not None:
+            values["config"] = dict(config)
+
+        result = self.session.execute(
+            update(Job)
+            .where(Job.id == job_id, Job.status == JobStatus.queued, Job.cancel_requested.is_(False))
+            .values(**values)
+        )
+        claimed = (result.rowcount or 0) == 1
+        self.session.commit()
+
+        job = self.get_job(job_id)
+        if claimed and emit_event:
+            self.append_event(job_id, EventType.status, {"status": JobStatus.in_progress})
+        return job, claimed
+
+    def claim_resume(
+        self,
+        job_id: UUID,
+        *,
+        config: Optional[Dict[str, Any]] = None,
+        emit_event: bool = True,
+    ) -> tuple[Job, bool]:
+        """
+        Atomically claim a failed/cancelled job for one resume worker.
+
+        Active or completed jobs are returned unchanged with claimed=False, so
+        repeated resume calls are safe no-ops.
+        """
+        now = datetime.utcnow()
+        values: Dict[str, Any] = {
+            "status": JobStatus.in_progress,
+            "cancel_requested": False,
+            "finished_at": None,
+            "error": None,
+            "error_code": None,
+            "updated_at": now,
+        }
+        if config is not None:
+            values["config"] = dict(config)
+
+        result = self.session.execute(
+            update(Job)
+            .where(Job.id == job_id, Job.status.in_((JobStatus.failed, JobStatus.cancelled)))
+            .values(**values)
+        )
+        claimed = (result.rowcount or 0) == 1
+        self.session.commit()
+
+        job = self.get_job(job_id)
+        if claimed and emit_event:
+            self.append_event(job_id, EventType.status, {"status": JobStatus.in_progress})
+        return job, claimed
 
     def request_cancel(self, job_id: UUID, *, emit_event: bool = True) -> Job:
         job = self.get_job(job_id)
