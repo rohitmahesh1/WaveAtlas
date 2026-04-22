@@ -46,6 +46,14 @@ bash ./scripts/dev-backend.sh
 
 The dev backend script applies migrations automatically and defaults to an ignored local SQLite database at `data/waveatlas.local.sqlite` unless `DATABASE_URL` is set.
 
+Start with a blank local backend state:
+
+```bash
+bash ./scripts/dev-backend.sh --reset-local-data
+```
+
+This clears ignored local data in `data/` and the scratch directory before applying migrations.
+
 Start the frontend:
 
 ```bash
