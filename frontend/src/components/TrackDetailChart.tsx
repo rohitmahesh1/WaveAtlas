@@ -111,6 +111,7 @@ export function TrackDetailChart({
   const [showFit, setShowFit] = useState<boolean>(false);
   const [showSine, setShowSine] = useState<boolean>(true);
   const [showPeaks, setShowPeaks] = useState<boolean>(true);
+  const [showRegressionWindowOnly, setShowRegressionWindowOnly] = useState<boolean>(false);
   const [selectedPeak, setSelectedPeak] = useState<{ trackIndex: number; peakI: number } | null>(null);
   const [hover, setHover] = useState<{ x: number; y: number; cx: number; cy: number } | null>(null);
   const [baseImg, setBaseImg] = useState<LoadedImageSize | null>(null);
@@ -120,11 +121,13 @@ export function TrackDetailChart({
   const defaultRegression = regressions.find((r) => r.peak_i === detail.strongest_peak_idx || r.is_strongest);
   const selectedRegression: TrackPeakRegression | null =
     regressions.find((r) => r.peak_i === selectedPeakI) ?? defaultRegression ?? regressions[0] ?? null;
+
   const activeSineFit = selectedRegression?.sine_fit ?? detail.sine_fit ?? null;
-  const displaySineFit =
+  const regressionWindowedSineFit =
     activeSineFit && selectedRegression
       ? activeSineFit.map((value, sliceIdx) => {
-          const sliceStart = selectedRegression.slice_index != null ? selectedRegression.peak_i - selectedRegression.slice_index : 0;
+          const sliceStart =
+            selectedRegression.slice_index != null ? selectedRegression.peak_i - selectedRegression.slice_index : 0;
           const sourceIdx = sliceStart + sliceIdx;
           const fitLo = Number(selectedRegression.fit_window_lo);
           const fitHi = Number(selectedRegression.fit_window_hi);
@@ -133,6 +136,7 @@ export function TrackDetailChart({
             : Number.NaN;
         })
       : activeSineFit;
+  const displaySineFit = showRegressionWindowOnly ? regressionWindowedSineFit : activeSineFit;
 
   let minX = Infinity;
   let maxX = -Infinity;
@@ -200,6 +204,14 @@ export function TrackDetailChart({
   const effW = spanX * scale.scale;
   const effH = spanY * scale.scale;
   const clipId = useId();
+  const regressionSelectId = useId();
+
+  const canToggleRegressionPeriod = Boolean(activeSineFit && selectedRegression);
+  const periodToggleTitle = !canToggleRegressionPeriod
+    ? "No regression period toggle is available for this track."
+    : showRegressionWindowOnly
+      ? "Showing only the regression fit window. Click to show the full fitted period."
+      : "Showing the full fitted period. Click to limit the sine overlay to the regression fit window.";
 
   useEffect(() => {
     if (!showBase || !baseImageUrl) return;
@@ -272,11 +284,23 @@ export function TrackDetailChart({
 
   return (
     <div className="mini-chart">
-      <div className="mini-controls">
+      <div
+        className="mini-controls"
+        style={{
+          display: "grid",
+          gridTemplateColumns: "max-content 1fr",
+          columnGap: 8,
+          rowGap: 8,
+          alignItems: "center",
+        }}
+      >
         {regressions.length > 1 ? (
-          <label className="peak-regression-picker">
-            Regression
+          <>
+            <label htmlFor={regressionSelectId} style={{ whiteSpace: "nowrap" }}>
+              Regression
+            </label>
             <select
+              id={regressionSelectId}
               className="mini-select"
               value={selectedRegression?.peak_i ?? ""}
               onChange={(e) => setSelectedPeak({ trackIndex: detail.track_index, peakI: Number(e.target.value) })}
@@ -287,16 +311,11 @@ export function TrackDetailChart({
                 </option>
               ))}
             </select>
-          </label>
+          </>
         ) : null}
-        {selectedRegression ? (
-          <span className="mini-fit-meta">
-            Peak {selectedRegression.peak_index} regression - frame {formatTick(selectedRegression.frame)} - x{" "}
-            {formatTick(selectedRegression.position)}
-          </span>
-        ) : null}
+
+        <span style={{ whiteSpace: "nowrap" }}>Layers</span>
         <div className="mini-layer-strip" aria-label="Track preview layers">
-          <span>Layers</span>
           <label className={showAxes ? "mini-layer-chip active" : "mini-layer-chip"}>
             <input type="checkbox" checked={showAxes} onChange={(e) => setShowAxes(e.target.checked)} />
             Axes
@@ -328,6 +347,7 @@ export function TrackDetailChart({
           </label>
         </div>
       </div>
+
       <div
         ref={wrapRef}
         className="mini-chart-canvas"
@@ -359,6 +379,7 @@ export function TrackDetailChart({
               <rect x={scale.offX} y={scale.offY} width={effW} height={effH} />
             </clipPath>
           </defs>
+
           {activeBaseImg ? (
             <image
               href={baseImageUrl ?? ""}
@@ -371,6 +392,7 @@ export function TrackDetailChart({
               clipPath={`url(#${clipId})`}
             />
           ) : null}
+
           {activeOverlayImg ? (
             <image
               href={debugImageUrl ?? ""}
@@ -383,6 +405,7 @@ export function TrackDetailChart({
               clipPath={`url(#${clipId})`}
             />
           ) : null}
+
           {showAxes ? (
             <>
               <rect
@@ -401,6 +424,7 @@ export function TrackDetailChart({
                 const yt = niceTicks(safeMinY, safeMaxY, maxYTicks);
                 const xStep = xt.length >= 2 ? Math.abs(xt[1] - xt[0]) : undefined;
                 const yStep = yt.length >= 2 ? Math.abs(yt[1] - yt[0]) : undefined;
+
                 return (
                   <>
                     {xt.map((v) => {
@@ -429,6 +453,7 @@ export function TrackDetailChart({
                         </g>
                       );
                     })}
+
                     {yt.map((v) => {
                       const cy = scale.offY + (v - safeMinY) * scale.scale;
                       return (
@@ -460,6 +485,7 @@ export function TrackDetailChart({
               })()}
             </>
           ) : null}
+
           {polylines.map((s) => (
             <polyline
               key={s.name}
@@ -472,45 +498,91 @@ export function TrackDetailChart({
               strokeLinecap="round"
             />
           ))}
-          {showPeaks ? peakPoints.map((p, i) => {
-            const scaled = toCanvas(p, scale);
-            const selected = selectedRegression != null && p.peak_i === selectedRegression.peak_i;
-            return (
-              <circle
-                key={`peak-${p.peak_i ?? i}`}
-                cx={scaled.x}
-                cy={scaled.y}
-                r={selected ? 4 : 2.6}
-                className={selected ? "mini-peak selected" : "mini-peak"}
-              />
-            );
-          }) : null}
+
+          {showPeaks
+            ? peakPoints.map((p, i) => {
+                const scaled = toCanvas(p, scale);
+                const selected = selectedRegression != null && p.peak_i === selectedRegression.peak_i;
+                return (
+                  <circle
+                    key={`peak-${p.peak_i ?? i}`}
+                    cx={scaled.x}
+                    cy={scaled.y}
+                    r={selected ? 4 : 2.6}
+                    className={selected ? "mini-peak selected" : "mini-peak"}
+                  />
+                );
+              })
+            : null}
         </svg>
+
         {hover ? (
           <div className="mini-tooltip" style={{ left: hover.cx + 10, top: hover.cy + 10 }}>
             x {hover.x.toFixed(1)}, frame {hover.y.toFixed(1)}
           </div>
         ) : null}
       </div>
-      <div className="mini-legend">
-        {showRaw ? <span className="legend-item">
-          <span className="legend-swatch swatch-raw" />
-          Raw
-        </span> : null}
-        {showFit ? <span className="legend-item">
-          <span className="legend-swatch swatch-fit" />
-          Fit
-        </span> : null}
-        {showSine && displaySineFit ? (
-          <span className="legend-item">
-            <span className="legend-swatch swatch-sine" />
-            Sine
-          </span>
-        ) : null}
-        {showPeaks ? <span className="legend-item">
-          <span className="legend-swatch swatch-peak" />
-          Peaks
-        </span> : null}
+
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 12,
+        }}
+      >
+        <div className="mini-legend">
+          {showRaw ? (
+            <span className="legend-item">
+              <span className="legend-swatch swatch-raw" />
+              Raw
+            </span>
+          ) : null}
+
+          {showFit ? (
+            <span className="legend-item">
+              <span className="legend-swatch swatch-fit" />
+              Fit
+            </span>
+          ) : null}
+
+          {showSine && displaySineFit ? (
+            <span className="legend-item">
+              <span className="legend-swatch swatch-sine" />
+              Sine
+            </span>
+          ) : null}
+
+          {showPeaks ? (
+            <span className="legend-item">
+              <span className="legend-swatch swatch-peak" />
+              Peaks
+            </span>
+          ) : null}
+        </div>
+
+        <button
+          type="button"
+          aria-pressed={showRegressionWindowOnly}
+          disabled={!canToggleRegressionPeriod}
+          onClick={() => setShowRegressionWindowOnly((value) => !value)}
+          title={periodToggleTitle}
+          style={{
+            marginLeft: "auto",
+            padding: "4px 10px",
+            borderRadius: 999,
+            border: "1px solid rgba(148,163,184,0.28)",
+            background: "rgba(15,23,42,0.75)",
+            color: "rgba(226,232,240,0.92)",
+            fontSize: 12,
+            lineHeight: 1.2,
+            cursor: canToggleRegressionPeriod ? "pointer" : "not-allowed",
+            opacity: canToggleRegressionPeriod ? 1 : 0.5,
+            whiteSpace: "nowrap",
+          }}
+        >
+          {showRegressionWindowOnly ? "Full period" : "Fit window"}
+        </button>
       </div>
     </div>
   );
