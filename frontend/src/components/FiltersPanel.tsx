@@ -1,4 +1,3 @@
-import React from "react";
 import type { FieldDef, FilterField, FilterOp, FilterRule } from "../types";
 
 export function FiltersPanel(props: {
