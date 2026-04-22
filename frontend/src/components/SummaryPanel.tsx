@@ -1,9 +1,22 @@
 import type { SummaryStats } from "../types";
 
-export function SummaryPanel({ stats }: { stats: SummaryStats }) {
+export function SummaryPanel(props: {
+  stats: SummaryStats;
+  onDownloadTracks?: () => void;
+  downloadDisabled?: boolean;
+}) {
+  const { stats, onDownloadTracks, downloadDisabled } = props;
+
   return (
     <section className="panel">
-      <div className="panel-title">Summary</div>
+      <div className="panel-title-row">
+        <div className="panel-title">Summary</div>
+        {onDownloadTracks ? (
+          <button className="ghost-btn download-btn compact-btn" onClick={onDownloadTracks} disabled={downloadDisabled}>
+            Tracks CSV
+          </button>
+        ) : null}
+      </div>
       <div className="panel-body stats-grid">
         <div>
           Count
