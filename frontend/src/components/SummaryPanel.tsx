@@ -1,4 +1,3 @@
-import React from "react";
 import type { SummaryStats } from "../types";
 
 export function SummaryPanel({ stats }: { stats: SummaryStats }) {
