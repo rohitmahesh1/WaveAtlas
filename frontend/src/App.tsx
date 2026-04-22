@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import { useState } from "react";
 import AdvancedViewerPage from "./pages/AdvancedViewerPage";
 import AdvancedConfigPage from "./pages/AdvancedConfigPage";
 import RunsPage from "./pages/RunsPage";
