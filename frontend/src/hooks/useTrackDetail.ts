@@ -2,32 +2,28 @@ import { useEffect, useState } from "react";
 import { getTrackDetail } from "../api";
 import type { TrackDetail } from "../api";
 
+type TrackDetailResult = {
+  requestKey: string;
+  detail: TrackDetail | null;
+  error: string | null;
+};
+
+function isAbortError(err: unknown) {
+  return err instanceof DOMException && err.name === "AbortError";
+}
+
 export function useTrackDetail(jobId: string | null, selectedTrackId: string | number | null) {
-  const [trackDetail, setTrackDetail] = useState<TrackDetail | null>(null);
-  const [trackDetailLoading, setTrackDetailLoading] = useState<boolean>(false);
-  const [trackDetailError, setTrackDetailError] = useState<string | null>(null);
+  const [result, setResult] = useState<TrackDetailResult | null>(null);
+  const rawTrackIndex = selectedTrackId == null ? null : Number(selectedTrackId);
+  const trackIndex = rawTrackIndex != null && Number.isFinite(rawTrackIndex) ? rawTrackIndex : null;
+  const invalidSelection = jobId && selectedTrackId != null && trackIndex == null ? "Invalid track id" : null;
+  const requestKey = jobId && trackIndex != null ? `${jobId}:${trackIndex}` : null;
 
   useEffect(() => {
-    if (!jobId || selectedTrackId == null) {
-      setTrackDetail(null);
-      setTrackDetailLoading(false);
-      setTrackDetailError(null);
-      return;
-    }
-
-    const trackIndex = Number(selectedTrackId);
-    if (!Number.isFinite(trackIndex)) {
-      setTrackDetail(null);
-      setTrackDetailLoading(false);
-      setTrackDetailError("Invalid track id");
-      return;
-    }
+    if (!jobId || trackIndex == null || !requestKey) return;
 
     const controller = new AbortController();
     let active = true;
-    setTrackDetail(null);
-    setTrackDetailLoading(true);
-    setTrackDetailError(null);
 
     getTrackDetail(jobId, trackIndex, {
       include_sine: true,
@@ -36,29 +32,28 @@ export function useTrackDetail(jobId: string | null, selectedTrackId: string | n
     })
       .then((detail) => {
         if (!active) return;
-        setTrackDetail(detail);
+        setResult({ requestKey, detail, error: null });
       })
       .catch((err) => {
         if (!active) return;
-        if (err?.name === "AbortError") return;
-        setTrackDetailError("Track detail unavailable");
-      })
-      .finally(() => {
-        if (!active) return;
-        setTrackDetailLoading(false);
+        if (isAbortError(err)) return;
+        setResult({ requestKey, detail: null, error: "Track detail unavailable" });
       });
 
     return () => {
       active = false;
       controller.abort();
     };
-  }, [jobId, selectedTrackId]);
+  }, [jobId, trackIndex, requestKey]);
 
   const resetTrackDetail = () => {
-    setTrackDetail(null);
-    setTrackDetailLoading(false);
-    setTrackDetailError(null);
+    setResult(null);
   };
+
+  const currentResult = result?.requestKey === requestKey ? result : null;
+  const trackDetail = currentResult?.detail ?? null;
+  const trackDetailError = invalidSelection ?? currentResult?.error ?? null;
+  const trackDetailLoading = Boolean(requestKey && !currentResult && !invalidSelection);
 
   return {
     trackDetail,
