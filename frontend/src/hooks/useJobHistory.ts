@@ -13,7 +13,7 @@ export function useJobHistory() {
     try {
       const data = await listJobs(50, 0);
       setJobs(data);
-    } catch (err: any) {
+    } catch {
       setError("Failed to load jobs");
     } finally {
       setLoading(false);
