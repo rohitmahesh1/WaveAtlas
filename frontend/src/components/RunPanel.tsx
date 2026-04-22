@@ -1,5 +1,3 @@
-import React from "react";
-
 export function RunPanel(props: {
   file: File | null;
   onFileChange: (file: File | null) => void;
