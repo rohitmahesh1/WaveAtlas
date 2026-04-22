@@ -4,6 +4,8 @@ export function ViewerControls(props: {
   onOverlayColorReset: () => void;
   hideBaseImage: boolean;
   onHideBaseImageChange: (value: boolean) => void;
+  hideTracks: boolean;
+  onHideTracksChange: (value: boolean) => void;
   debugOverlays: { label: string; url: string }[];
   selectedDebugLabel: string;
   onDebugLabelChange: (value: string) => void;
@@ -16,6 +18,8 @@ export function ViewerControls(props: {
     onOverlayColorReset,
     hideBaseImage,
     onHideBaseImageChange,
+    hideTracks,
+    onHideTracksChange,
     debugOverlays,
     selectedDebugLabel,
     onDebugLabelChange,
@@ -42,6 +46,10 @@ export function ViewerControls(props: {
       <label className="toggle">
         <input type="checkbox" checked={hideBaseImage} onChange={(e) => onHideBaseImageChange(e.target.checked)} />
         Hide base
+      </label>
+      <label className="toggle">
+        <input type="checkbox" checked={hideTracks} onChange={(e) => onHideTracksChange(e.target.checked)} />
+        Hide tracks
       </label>
       <label>
         Debug overlay
