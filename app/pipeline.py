@@ -515,7 +515,7 @@ def run_job(
 
             # print("Processed track #", track_row, " Wave", wave_rows)
 
-            job_store.upsert_track_by_index(
+            track = job_store.upsert_track_by_index(
                 job_id,
                 track_index,
                 processed_at=datetime.utcnow(),
@@ -527,6 +527,11 @@ def run_job(
                 metrics=track_row.get("metrics") or {},
                 overlay=track_row.get("overlay") or {},
             )
+
+            for row in wave_rows or []:
+                row["track_id"] = track.id
+            for row in peak_rows or []:
+                row["track_id"] = track.id
 
             waves_buf.extend(wave_rows or [])
             peaks_buf.extend(peak_rows or [])
