@@ -11,13 +11,37 @@ export function SelectionPanel(props: {
   baseImageUrl?: string | null;
   debugImageUrl?: string | null;
   debugOpacity?: number;
+  onDownloadTrackDetail?: () => void;
 }) {
-  const { selectedTrack, trackDetail, trackDetailLoading, trackDetailError, overlayColor, baseImageUrl, debugImageUrl, debugOpacity } =
-    props;
+  const {
+    selectedTrack,
+    trackDetail,
+    trackDetailLoading,
+    trackDetailError,
+    overlayColor,
+    baseImageUrl,
+    debugImageUrl,
+    debugOpacity,
+    onDownloadTrackDetail,
+  } = props;
+  const detailReady = Boolean(
+    selectedTrack && trackDetail && trackDetail.track_index === selectedTrack.track_index
+  );
 
   return (
     <section className="panel">
-      <div className="panel-title">Selection</div>
+      <div className="panel-title-row">
+        <div className="panel-title">Selection</div>
+        {selectedTrack && onDownloadTrackDetail ? (
+          <button
+            className="ghost-btn download-btn compact-btn"
+            onClick={onDownloadTrackDetail}
+            disabled={!detailReady}
+          >
+            Track JSON
+          </button>
+        ) : null}
+      </div>
       <div className="panel-body">
         {selectedTrack ? (
           <>
