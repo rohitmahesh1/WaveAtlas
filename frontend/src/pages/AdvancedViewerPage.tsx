@@ -60,6 +60,7 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
   const runCounterRef = useRef<number>(1);
 
   const [hideBaseImage, setHideBaseImage] = useState<boolean>(false);
+  const [hideTracks, setHideTracks] = useState<boolean>(false);
   const defaultOverlayColor = "#008c5a";
   const [overlayColor, setOverlayColor] = useState<string>(defaultOverlayColor);
 
@@ -383,6 +384,8 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
               onOverlayColorReset={() => setOverlayColor(defaultOverlayColor)}
               hideBaseImage={hideBaseImage}
               onHideBaseImageChange={setHideBaseImage}
+              hideTracks={hideTracks}
+              onHideTracksChange={setHideTracks}
               debugOverlays={debugOverlays}
               selectedDebugLabel={activeDebugLabel}
               onDebugLabelChange={setSelectedDebugLabel}
@@ -399,6 +402,7 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
               tracks={filteredTracks}
               overlayColor={overlayColor}
               hideBaseImage={hideBaseImage}
+              hideTracks={hideTracks}
               selectedTrackId={activeSelectedTrackId}
               onClickTrack={(t) => setSelectedTrackId(t ? (t.id ?? t.track_index) : null)}
               onHoverTrack={(t) => setHoveredTrackId(t ? (t.id ?? t.track_index) : null)}
