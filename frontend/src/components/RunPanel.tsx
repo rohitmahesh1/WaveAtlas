@@ -35,19 +35,57 @@ export function RunPanel(props: {
     heatmapDownloadDisabled,
   } = props;
   const canRun = Boolean(file);
-  const isCancelled = status === "cancelled";
+  const normalizedStatus = String(status ?? "");
+  const isCancelled = normalizedStatus === "cancelled";
+  const isPausePending = normalizedStatus === "cancel_requested";
+  const canPause = ["queued", "in_progress"].includes(normalizedStatus);
+  const canResume = isCancelled && Boolean(onResume);
+  const showTransport = Boolean(jobId && (((canPause || isPausePending) && onCancel) || canResume));
+  const transportMode = canResume ? "play" : "pause";
+  const transportLabel = canResume ? "Resume run" : isPausePending ? "Stopping run" : "Pause run";
+  const transportDisabled = canResume ? false : !canPause || Boolean(cancelDisabled);
+  const handleTransport = () => {
+    if (canResume) {
+      onResume?.();
+      return;
+    }
+    if (canPause && !cancelDisabled) onCancel?.();
+  };
   const tracksLabel =
     totalCount > 0
       ? `${filteredCount}/${totalCount}`
       : jobId
-      ? ["completed", "failed", "cancelled"].includes(String(status))
+      ? ["completed", "failed", "cancelled"].includes(normalizedStatus)
         ? "No tracks found"
         : "Waiting for tracks"
       : "—";
 
   return (
     <section className="panel run-panel">
-      <div className="panel-title">Run</div>
+      <div className="panel-title-row run-title-row">
+        <div className="panel-title">Run</div>
+        {showTransport || onNewRun ? (
+          <div className="run-title-actions">
+            {showTransport ? (
+              <button
+                className={`transport-btn transport-${transportMode}`}
+                onClick={handleTransport}
+                disabled={transportDisabled}
+                title={transportLabel}
+                aria-label={transportLabel}
+              >
+                <span className={`transport-icon ${transportMode}`} aria-hidden="true" />
+                <span>{canResume ? "Resume" : "Pause"}</span>
+              </button>
+            ) : null}
+            {jobId && onNewRun ? (
+              <button className="ghost-btn compact-btn" onClick={onNewRun}>
+                New
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
       <div className="panel-body">
         <label className="run-name-label">
           Run name
@@ -91,30 +129,31 @@ export function RunPanel(props: {
         </div>
 
         {jobId ? (
-          <div className="button-row run-actions">
-            {onDownloadWaves ? (
-              <button className="ghost-btn download-btn" onClick={onDownloadWaves}>
-                Waves CSV
-              </button>
+          <div className="run-secondary-row">
+            <div className="run-transport-note">
+              {canResume ? "Stopped. Resume from saved artifacts." : isPausePending ? "Stop requested..." : "Run outputs"}
+            </div>
+            {onDownloadWaves || onDownloadHeatmap ? (
+              <details className="run-download-menu">
+                <summary>Downloads</summary>
+                <div className="run-download-popover">
+                  {onDownloadWaves ? (
+                    <button className="ghost-btn download-btn compact-btn" onClick={onDownloadWaves}>
+                      Waves CSV
+                    </button>
+                  ) : null}
+                  {onDownloadHeatmap ? (
+                    <button
+                      className="ghost-btn download-btn compact-btn"
+                      onClick={onDownloadHeatmap}
+                      disabled={heatmapDownloadDisabled}
+                    >
+                      Heatmap
+                    </button>
+                  ) : null}
+                </div>
+              </details>
             ) : null}
-            {onDownloadHeatmap ? (
-              <button className="ghost-btn download-btn" onClick={onDownloadHeatmap} disabled={heatmapDownloadDisabled}>
-                Heatmap
-              </button>
-            ) : null}
-            {isCancelled && onResume ? (
-              <button className="ghost-btn" onClick={onResume}>
-                Resume
-              </button>
-            ) : null}
-            {onCancel ? (
-              <button className="ghost-btn danger-btn" onClick={onCancel} disabled={cancelDisabled}>
-                Cancel
-              </button>
-            ) : null}
-            <button className="ghost-btn" onClick={onNewRun}>
-              New run
-            </button>
           </div>
         ) : null}
       </div>
