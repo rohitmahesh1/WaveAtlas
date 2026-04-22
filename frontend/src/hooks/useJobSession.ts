@@ -16,13 +16,27 @@ import type { LogEntry } from "../types";
 import { formatEta } from "../utils/format";
 
 type WsMsg =
-  | { type: "snapshot"; payload: any; seq: number; job_id?: string }
-  | { type: "overlay_track"; payload: any; seq: number; job_id?: string }
-  | { type: "status"; payload: any; seq: number; job_id?: string }
-  | { type: "progress"; payload: any; seq: number; job_id?: string }
-  | { type: "user_log"; payload: any; seq: number; job_id?: string }
-  | { type: "ping"; payload: any; seq: number; job_id?: string }
-  | { type: string; payload: any; seq: number; job_id?: string };
+  | { type: "snapshot"; payload?: unknown; seq?: number; job_id?: string }
+  | { type: "overlay_track"; payload?: unknown; seq?: number; job_id?: string }
+  | { type: "status"; payload?: unknown; seq?: number; job_id?: string }
+  | { type: "progress"; payload?: unknown; seq?: number; job_id?: string }
+  | { type: "user_log"; payload?: unknown; seq?: number; job_id?: string }
+  | { type: "ping"; payload?: unknown; seq?: number; job_id?: string }
+  | { type: string; payload?: unknown; seq?: number; job_id?: string };
+
+type UnknownRecord = Record<string, unknown>;
+type OverlayPeak = NonNullable<OverlayTrackEvent["peaks"]>[number];
+
+function asRecord(value: unknown): UnknownRecord | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as UnknownRecord)
+    : null;
+}
+
+function finiteNumber(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
 
 const SESSION_KEY = "waveatlas:lastSession";
 
@@ -42,51 +56,72 @@ function saveSession(jobId: string, lastSeq: number) {
   localStorage.setItem(SESSION_KEY, JSON.stringify({ jobId, lastSeq }));
 }
 
-function normalizeOverlayTrack(payload: any): OverlayTrackEvent | null {
-  if (!payload) return null;
+function normalizeOverlayTrack(payload: unknown): OverlayTrackEvent | null {
+  const data = asRecord(payload);
+  if (!data) return null;
 
-  const idx = Number(payload.track_index);
+  const idx = Number(data.track_index);
   if (!Number.isFinite(idx)) return null;
 
-  const peaks = Array.isArray(payload.peaks)
-    ? payload.peaks.map((x: any) => ({ x: x.x, y: x.y, amp: x.amp }))
+  const peaks: OverlayPeak[] = Array.isArray(data.peaks)
+    ? data.peaks.flatMap((entry) => {
+        const peak = asRecord(entry);
+        if (!peak) return [];
+        const x = finiteNumber(peak.x);
+        const y = finiteNumber(peak.y);
+        if (x == null || y == null) return [];
+        const amp = finiteNumber(peak.amp);
+        return [{ x, y, ...(amp != null ? { amp } : {}) }];
+      })
     : [];
   const ampVals = peaks.map((p) => Number(p.amp)).filter((v) => Number.isFinite(v));
   const meanAmp = ampVals.length ? ampVals.reduce((a, b) => a + b, 0) / ampVals.length : null;
+  const poly = Array.isArray(data.poly)
+    ? data.poly.flatMap((entry) => {
+        const point = asRecord(entry);
+        if (!point) return [];
+        const x = finiteNumber(point.x);
+        const y = finiteNumber(point.y);
+        return x != null && y != null ? [{ x, y }] : [];
+      })
+    : [];
 
   return {
     id: idx,
-    sample: payload.sample,
+    sample: typeof data.sample === "string" ? data.sample : undefined,
     track_index: idx,
-    poly: Array.isArray(payload.poly) ? payload.poly : [],
+    poly,
     peaks,
     metrics: {
       mean_amplitude: meanAmp,
-      dominant_frequency: Number.isFinite(payload.freq_hz) ? Number(payload.freq_hz) : null,
-      period: Number.isFinite(payload.period) ? Number(payload.period) : null,
+      dominant_frequency: finiteNumber(data.freq_hz),
+      period: finiteNumber(data.period),
       num_peaks: peaks.length,
     },
   };
 }
 
 export function useJobSession(options?: { resumeOnMount?: boolean }) {
-  const resumeOnMount = options?.resumeOnMount ?? false;
-  const [jobId, setJobId] = useState<string | null>(null);
-  const [status, setStatus] = useState<string>("idle");
+  const [initialSession] = useState(() => (options?.resumeOnMount ? loadSession() : null));
+  const [jobId, setJobId] = useState<string | null>(initialSession?.jobId ?? null);
+  const [status, setStatus] = useState<string>(initialSession ? "resuming…" : "idle");
   const [baseImageUrl, setBaseImageUrl] = useState<string | null>(null);
   const [tracks, setTracks] = useState<OverlayTrackEvent[]>([]);
   const [activity, setActivity] = useState<LogEntry[]>([]);
-  const [currentStage, setCurrentStage] = useState<string>("idle");
+  const [currentStage, setCurrentStage] = useState<string>(initialSession ? "resuming" : "idle");
   const [stageDetail, setStageDetail] = useState<string | null>(null);
   const [etaText, setEtaText] = useState<string | null>(null);
   const [debugOverlays, setDebugOverlays] = useState<{ label: string; url: string }[]>([]);
 
   const wsRef = useRef<WebSocket | null>(null);
-  const lastSeqRef = useRef<number>(0);
+  const lastSeqRef = useRef<number>(initialSession?.lastSeq ?? 0);
   const wsTokenRef = useRef<number>(0);
   const reconnectRef = useRef<{ stop: boolean; tries: number }>({ stop: false, tries: 0 });
   const lastStageRef = useRef<string>("");
   const pollTokenRef = useRef<number>(0);
+  const resumeStartedRef = useRef<boolean>(false);
+  const pollForBaseHeatmapRef = useRef<(id: string) => void>(() => undefined);
+  const connectWsWithRetryRef = useRef<(id: string, afterSeq: number) => void>(() => undefined);
 
   const addActivity = (message: string, level: "info" | "warn" | "error" = "info", stage?: string) => {
     const ts = new Date().toLocaleTimeString();
@@ -185,7 +220,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
         if (base?.download_url) {
           setBaseImageUrl(base.download_url);
         }
-      } catch (e: any) {
+      } catch {
         // Keep polling quietly; user log stays clean.
       }
       await new Promise((r) => setTimeout(r, 1000));
@@ -239,7 +274,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
       ws.onmessage = (ev) => {
         if (myToken !== wsTokenRef.current) return;
 
-        const msg: WsMsg = JSON.parse(ev.data);
+        const msg = JSON.parse(ev.data) as WsMsg;
 
         if (typeof msg.seq === "number") {
           lastSeqRef.current = Math.max(lastSeqRef.current, msg.seq);
@@ -247,9 +282,10 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
         }
 
         if (msg.type === "snapshot") {
-          const st = msg.payload?.status;
+          const payload = asRecord(msg.payload);
+          const st = payload?.status;
           if (st) setStatus(String(st));
-          const prog = msg.payload?.progress;
+          const prog = asRecord(payload?.progress);
           if (prog?.stage) {
             const stage = String(prog.stage);
             setCurrentStage(stage);
@@ -260,7 +296,8 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
         }
 
         if (msg.type === "status") {
-          const st = msg.payload?.status;
+          const payload = asRecord(msg.payload);
+          const st = payload?.status;
           if (st) {
             setStatus(String(st));
           }
@@ -268,10 +305,13 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
         }
 
         if (msg.type === "user_log") {
-          const message = String(msg.payload?.message || "");
+          const payload = asRecord(msg.payload);
+          const message = String(payload?.message || "");
           if (message) {
-            const level = (msg.payload?.level as "info" | "warn" | "error") || "info";
-            const stage = msg.payload?.stage ? String(msg.payload.stage) : undefined;
+            const rawLevel = payload?.level;
+            const level =
+              rawLevel === "warn" || rawLevel === "error" || rawLevel === "info" ? rawLevel : "info";
+            const stage = payload?.stage ? String(payload.stage) : undefined;
             addActivity(message, level, stage);
           }
           return;
@@ -284,10 +324,11 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
         }
 
         if (msg.type === "overlay_ready") {
-          const art = msg.payload?.artifact || {};
-          const label = typeof art.label === "string" ? normalizeOverlayLabel(art.label) : "";
-          const url = typeof art.download_url === "string" ? normalizeOverlayUrl(art.download_url) : "";
-          const contentType = typeof art.content_type === "string" ? art.content_type : "";
+          const payload = asRecord(msg.payload);
+          const art = asRecord(payload?.artifact);
+          const label = typeof art?.label === "string" ? normalizeOverlayLabel(art.label) : "";
+          const url = typeof art?.download_url === "string" ? normalizeOverlayUrl(art.download_url) : "";
+          const contentType = typeof art?.content_type === "string" ? art.content_type : "";
           if (!label || !url) return;
           if (label.endsWith(":stats") || label === "stats") return;
           if (contentType && !contentType.startsWith("image/")) return;
@@ -296,30 +337,35 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
         }
 
         if (msg.type === "progress") {
-          const p = msg.payload || {};
-          if (p.stage) {
+          const p = asRecord(msg.payload);
+          if (p?.stage) {
             const stage = String(p.stage);
             let detail: string | null = p.detail ? String(p.detail) : null;
             let eta: string | null = null;
-            if (Number.isFinite(p.eta_secs) && Number(p.eta_secs) > 0) {
-              eta = formatEta(Number(p.eta_secs));
+            const etaSecs = finiteNumber(p.eta_secs);
+            if (etaSecs != null && etaSecs > 0) {
+              eta = formatEta(etaSecs);
             }
-            if (stage === "processing_tracks" && Number.isFinite(p.total) && Number(p.total) > 0) {
-              detail = `${Number(p.processed || 0)}/${Number(p.total)} tracks`;
+            const total = finiteNumber(p.total);
+            const processed = finiteNumber(p.processed) ?? 0;
+            if (stage === "processing_tracks" && total != null && total > 0) {
+              detail = `${processed}/${total} tracks`;
               if (eta) {
                 detail += ` · ETA ${eta}`;
               }
             }
             if (stage === "kymo_tracking") {
               const parts: string[] = [];
-              if (Number.isFinite(p.pct)) {
-                parts.push(`${Math.round(Number(p.pct) * 100)}%`);
+              const pct = finiteNumber(p.pct);
+              if (pct != null) {
+                parts.push(`${Math.round(pct * 100)}%`);
               }
               if (eta) {
                 parts.push(`ETA ${eta}`);
               }
-              if (Number.isFinite(p.tracks_found) && Number(p.tracks_found) > 0) {
-                parts.push(`${Number(p.tracks_found)} tracks`);
+              const tracksFound = finiteNumber(p.tracks_found);
+              if (tracksFound != null && tracksFound > 0) {
+                parts.push(`${tracksFound} tracks`);
               }
               if (parts.length > 0) {
                 detail = parts.join(" · ");
@@ -398,7 +444,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
       setStatus("finalizing upload…");
       await uploadComplete(job.id, sess.blob_path, file);
       addActivity("Upload complete");
-    } catch (e: any) {
+    } catch {
       addActivity("Resumable upload unavailable, using direct upload", "warn");
       setStatus("uploading via api…");
       await uploadViaApi(job.id, file);
@@ -418,7 +464,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     try {
       await cancelJob(jobId);
       addActivity("Cancel requested", "warn", "cancel");
-    } catch (err: any) {
+    } catch {
       addActivity("Cancel failed", "error", "cancel");
     }
   }
@@ -463,24 +509,20 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
   }
 
   useEffect(() => {
-    if (!resumeOnMount) return;
-    const sess = loadSession();
-    if (!sess) return;
+    pollForBaseHeatmapRef.current = pollForBaseHeatmap;
+    connectWsWithRetryRef.current = connectWsWithRetry;
+  });
 
-    setJobId(sess.jobId);
-    setStatus("resuming…");
-    setTracks([]);
-    setBaseImageUrl(null);
-    setCurrentStage("resuming");
-    setStageDetail(null);
-    setEtaText(null);
+  useEffect(() => {
+    if (!initialSession || resumeStartedRef.current) return;
 
+    resumeStartedRef.current = true;
     lastSeqRef.current = 0;
-    saveSession(sess.jobId, 0);
+    saveSession(initialSession.jobId, 0);
 
-    pollForBaseHeatmap(sess.jobId);
-    connectWsWithRetry(sess.jobId, 0);
-  }, []);
+    pollForBaseHeatmapRef.current(initialSession.jobId);
+    connectWsWithRetryRef.current(initialSession.jobId, 0);
+  }, [initialSession]);
 
   useEffect(() => {
     return () => {
