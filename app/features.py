@@ -142,20 +142,35 @@ def bulge_from_props(
 # Anchored sine fit (around a peak)
 # -----------------------
 
-def _fit_anchored_sine(residual: np.ndarray, t: np.ndarray, freq: float, center_idx: int) -> Tuple[np.ndarray, float, float, float]:
+def _fit_anchored_sine(
+    residual: np.ndarray,
+    t: np.ndarray,
+    freq: float,
+    sampling_rate: float,
+    center_idx: int,
+    fit_lo: int,
+    fit_hi: int,
+) -> Tuple[np.ndarray, float, float, float]:
     """
-    Fit y ≈ A*sin(ω t + phi) + c with phi chosen so sin() is maximized at center_idx.
-    Solve least squares for (A, c).
+    Fit y ~= A*sin(omega t + phi) + c with the sine maximum anchored at
+    center_idx and constrained to pass through the detected peak.
     """
-    omega = 2.0 * np.pi * float(freq)
+    omega = 2.0 * np.pi * float(freq) / float(sampling_rate)
     t0 = float(t[int(center_idx)])
     phi = (np.pi / 2.0) - omega * t0
     s = np.sin(omega * t + phi).astype(np.float64)
-    X = np.vstack([s, np.ones_like(s)]).T
-    y = residual.astype(np.float64)
-    beta, *_ = np.linalg.lstsq(X, y, rcond=None)
-    A = float(beta[0])
-    c = float(beta[1])
+
+    peak_value = float(residual[int(center_idx)])
+    lo = int(max(0, fit_lo))
+    hi = int(min(len(t) - 1, fit_hi))
+    z = s[lo : hi + 1] - 1.0
+    target = residual[lo : hi + 1].astype(np.float64) - peak_value
+    denom = float(np.dot(z, z))
+    if denom > 0 and np.isfinite(denom):
+        A = float(np.dot(z, target) / denom)
+    else:
+        A = peak_value
+    c = float(peak_value - A)
     yfit = (A * s + c).astype(np.float64)
     return yfit, float(A), float(phi), float(c)
 
@@ -177,15 +192,23 @@ def anchored_sine_params(
         "fit_window_lo": np.nan,
         "fit_window_hi": np.nan,
     }
-    if sampling_rate is None or freq is None or freq <= 0 or center_idx < 0 or center_idx >= len(x):
+    if sampling_rate is None or sampling_rate <= 0 or freq is None or freq <= 0 or center_idx < 0 or center_idx >= len(x):
         return out
-
-    yfit_res, A, phi, c = _fit_anchored_sine(residual=residual, t=x, freq=float(freq), center_idx=int(center_idx))
 
     frames_per_period = sampling_rate / float(freq)
     half_span = max(1, int(round((period_frac * frames_per_period) / 2.0)))
     lo = max(0, int(center_idx) - half_span)
     hi = min(len(x) - 1, int(center_idx) + half_span)
+
+    yfit_res, A, phi, c = _fit_anchored_sine(
+        residual=residual,
+        t=x,
+        freq=float(freq),
+        sampling_rate=sampling_rate,
+        center_idx=int(center_idx),
+        fit_lo=lo,
+        fit_hi=hi,
+    )
 
     y_slice = residual[lo : hi + 1]
     y_fit = yfit_res[lo : hi + 1]
@@ -201,6 +224,9 @@ def anchored_sine_params(
         "fit_error_vnmse": float(vnmse),
         "fit_window_lo": float(lo),
         "fit_window_hi": float(hi),
+        "fit_peak_value": float(residual[int(center_idx)]),
+        "fit_peak_error": float(yfit_res[int(center_idx)] - residual[int(center_idx)]),
+        "fit_passes_peak": True,
     })
     return out
 
@@ -230,24 +256,40 @@ def classify_wave_type(angle_deg: float, prominence_px: float, cfg: Optional[dic
 # Row builders
 # -----------------------
 
-def _local_period_frames_from_peaks(peaks_idx: np.ndarray, k: int) -> Optional[float]:
+def _local_period_frames_from_peaks(peaks_idx: np.ndarray, k: int, frame: Optional[np.ndarray] = None) -> Optional[float]:
     p = np.asarray(peaks_idx, dtype=int)
     if p.size == 0 or k < 0 or k >= p.size:
         return None
+    frame_values = np.asarray(frame, dtype=float) if frame is not None else None
+
+    def peak_frame(idx: int) -> float:
+        if frame_values is None:
+            return float(p[idx])
+        return float(frame_values[p[idx]])
+
     gaps: List[float] = []
     if k - 1 >= 0:
-        gaps.append(float(p[k] - p[k - 1]))
+        gaps.append(abs(peak_frame(k) - peak_frame(k - 1)))
     if k + 1 < p.size:
-        gaps.append(float(p[k + 1] - p[k]))
+        gaps.append(abs(peak_frame(k + 1) - peak_frame(k)))
     if not gaps:
         return None
     return float(np.median(gaps))
 
 
+def _interp_position_at_frame(frame: np.ndarray, position: np.ndarray, target_frame: float) -> float:
+    if not np.isfinite(target_frame) or frame.size == 0:
+        return np.nan
+    order = np.argsort(frame, kind="stable")
+    frame_sorted = np.asarray(frame, dtype=float)[order]
+    position_sorted = np.asarray(position, dtype=float)[order]
+    return float(np.interp(float(target_frame), frame_sorted, position_sorted))
+
+
 def build_peak_rows(
     *,
-    x: np.ndarray,
-    y: np.ndarray,
+    frame: np.ndarray,
+    position: np.ndarray,
     residual: np.ndarray,
     peaks_idx: np.ndarray,
     peak_props: dict,
@@ -271,11 +313,11 @@ def build_peak_rows(
     global_fpp = (sampling_rate / float(global_freq_hz)) if (sampling_rate and global_freq_hz and global_freq_hz > 0) else None
 
     for idx_in_list, peak_i in enumerate(p):
-        frame = float(x[peak_i])
-        pos_px = float(y[peak_i])
+        frame_value = float(frame[peak_i])
+        pos_px = float(position[peak_i])
         amp = float(residual[peak_i])
 
-        local_fpp = _local_period_frames_from_peaks(p, idx_in_list)
+        local_fpp = _local_period_frames_from_peaks(p, idx_in_list, frame)
         frames_per_period = local_fpp if (local_fpp and local_fpp > 0) else (global_fpp if (global_fpp and global_fpp > 0) else np.nan)
         period_frames = float(frames_per_period) if np.isfinite(frames_per_period) else np.nan
         period_s = (period_frames / sampling_rate) if (sampling_rate and np.isfinite(period_frames)) else np.nan
@@ -285,7 +327,7 @@ def build_peak_rows(
 
         fit = anchored_sine_params(
             residual=residual,
-            x=x,
+            x=frame,
             sampling_rate=sampling_rate,
             freq=freq_hz if (np.isfinite(freq_hz) and freq_hz > 0) else (global_freq_hz or np.nan),
             center_idx=int(peak_i),
@@ -295,13 +337,13 @@ def build_peak_rows(
         lo = fit.get("fit_window_lo", np.nan)
         hi = fit.get("fit_window_hi", np.nan)
         if np.isfinite(lo) and np.isfinite(hi):
-            i0, i1 = int(max(0, lo)), int(min(len(x) - 1, hi))
-            ang_mean, ang_std = orientation_deg(x[i0 : i1 + 1], y[i0 : i1 + 1])
+            i0, i1 = int(max(0, lo)), int(min(len(frame) - 1, hi))
+            ang_mean, ang_std = orientation_deg(frame[i0 : i1 + 1], position[i0 : i1 + 1])
         else:
             ang_mean, ang_std = (np.nan, np.nan)
 
         x_px = int(round(pos_px)) if np.isfinite(pos_px) else None
-        y_px = int(round(frame)) if np.isfinite(frame) else None
+        y_px = int(round(frame_value)) if np.isfinite(frame_value) else None
 
         metrics = {
             "sample": sample,
@@ -310,7 +352,7 @@ def build_peak_rows(
             "track_id_hint": int(maybe_track_id) if maybe_track_id is not None else None,
             "peak_index": int(idx_in_list + 1),
             "peak_i": int(peak_i),
-            "frame": frame,
+            "frame": frame_value,
             "pos_px": pos_px,
             "x_px": x_px,
             "y_px": y_px,
@@ -324,7 +366,7 @@ def build_peak_rows(
         }
 
         rows.append({
-            "pos": frame,                         # Peak.pos
+            "pos": frame_value,                   # Peak.pos
             "value": amp,                         # Peak.value
             "metrics": json_sanitize(metrics),    # Peak.metrics (JSONB)
         })
@@ -334,8 +376,8 @@ def build_peak_rows(
 
 def build_wave_rows(
     *,
-    x: np.ndarray,
-    y: np.ndarray,
+    frame: np.ndarray,
+    position: np.ndarray,
     residual: np.ndarray,
     peaks_idx: np.ndarray,
     peak_props: dict,
@@ -350,42 +392,80 @@ def build_wave_rows(
     rows: List[dict] = []
 
     p = np.asarray(peaks_idx, dtype=int)
-    if p.size < 2:
+    if p.size == 0:
         return rows
 
     sample_id = sample_id_from_name(sample)
     maybe_track_id = coerce_track_id(track_stem)
+    global_fpp = (sampling_rate / float(freq_hz)) if (sampling_rate and freq_hz and freq_hz > 0) else None
+    frame_min = float(np.nanmin(frame)) if frame.size else np.nan
+    frame_max = float(np.nanmax(frame)) if frame.size else np.nan
 
-    for k in range(p.size - 1):
-        i, j = int(p[k]), int(p[k + 1])
+    for k, peak_i_raw in enumerate(p):
+        peak_i = int(peak_i_raw)
+        prev_i = int(p[k - 1]) if k - 1 >= 0 else None
+        next_i = int(p[k + 1]) if k + 1 < p.size else None
 
-        frame1 = float(x[i])
-        frame2 = float(x[j])
+        peak_frame = float(frame[peak_i])
+        peak_pos = float(position[peak_i])
+        period_est = _local_period_frames_from_peaks(p, k, frame)
+        if not (period_est and period_est > 0) and global_fpp and global_fpp > 0:
+            period_est = float(global_fpp)
+
+        if period_est and np.isfinite(period_est) and period_est > 0:
+            if prev_i is not None:
+                frame1 = (float(frame[prev_i]) + peak_frame) / 2.0
+            else:
+                frame1 = peak_frame - (float(period_est) / 2.0)
+
+            if next_i is not None:
+                frame2 = (peak_frame + float(frame[next_i])) / 2.0
+            else:
+                frame2 = peak_frame + (float(period_est) / 2.0)
+        else:
+            frame1 = peak_frame
+            frame2 = peak_frame
+
+        if frame2 < frame1:
+            frame1, frame2 = frame2, frame1
 
         period_frames = frame2 - frame1
         period_s = (period_frames / sampling_rate) if sampling_rate else float("nan")
         freq = (1.0 / period_s) if (np.isfinite(period_s) and period_s > 0) else (float(freq_hz) if (freq_hz and freq_hz > 0) else np.nan)
 
-        pos1 = float(y[i])
-        pos2 = float(y[j])
+        pos1 = _interp_position_at_frame(frame, position, frame1)
+        pos2 = _interp_position_at_frame(frame, position, frame2)
 
-        amp = float(residual[i])
+        amp = float(residual[peak_i])
 
         dpos = pos2 - pos1
         vel = (dpos / period_s) if (np.isfinite(period_s) and period_s != 0) else float("nan")
         wavelength = float(abs(dpos))
 
-        xmin, xmax, ymin, ymax = segment_bbox(x, y, i, j)
-        ang_mean, ang_std = orientation_deg(x[min(i, j) : max(i, j) + 1], y[min(i, j) : max(i, j) + 1])
+        mask = (frame >= frame1) & (frame <= frame2)
+        if int(np.count_nonzero(mask)) >= 2:
+            ang_mean, ang_std = orientation_deg(frame[mask], position[mask])
+            frame_seg = frame[mask]
+            pos_seg = position[mask]
+        else:
+            lo_i = max(0, peak_i - 1)
+            hi_i = min(len(frame) - 1, peak_i + 1)
+            ang_mean, ang_std = orientation_deg(frame[lo_i : hi_i + 1], position[lo_i : hi_i + 1])
+            frame_seg = frame[lo_i : hi_i + 1]
+            pos_seg = position[lo_i : hi_i + 1]
+        xmin = float(np.nanmin(pos_seg)) if pos_seg.size else np.nan
+        xmax = float(np.nanmax(pos_seg)) if pos_seg.size else np.nan
+        ymin = float(np.nanmin(frame_seg)) if frame_seg.size else np.nan
+        ymax = float(np.nanmax(frame_seg)) if frame_seg.size else np.nan
 
-        bulge = bulge_from_props(i, p, peak_props or {}, sampling_rate)
+        bulge = bulge_from_props(peak_i, p, peak_props or {}, sampling_rate)
 
         fit = anchored_sine_params(
             residual=residual,
-            x=x,
+            x=frame,
             sampling_rate=sampling_rate,
             freq=freq if np.isfinite(freq) else (freq_hz or np.nan),
-            center_idx=i,
+            center_idx=peak_i,
             period_frac=float(features_cfg.get("fit_window_period_frac", period_frac_for_fit)),
         )
 
@@ -395,13 +475,19 @@ def build_wave_rows(
             cfg=features_cfg.get("classify", {}),
         )
 
-        # Click point in heatmap coords (x_px = column, y_px = row)
-        x_px = int(round((pos1 + pos2) / 2.0)) if (np.isfinite(pos1) and np.isfinite(pos2)) else None
-        y_px = int(round((frame1 + frame2) / 2.0)) if (np.isfinite(frame1) and np.isfinite(frame2)) else None
+        # Click point in heatmap coords (x_px = column, y_px = row).
+        x_px = int(round(peak_pos)) if np.isfinite(peak_pos) else None
+        y_px = int(round(peak_frame)) if np.isfinite(peak_frame) else None
 
         # Time window for this wave (best-effort)
         t_start = (frame1 / sampling_rate) if (sampling_rate and np.isfinite(frame1)) else None
         t_end = (frame2 / sampling_rate) if (sampling_rate and np.isfinite(frame2)) else None
+        seconds_delta = (t_end - t_start) if (t_start is not None and t_end is not None) else float("nan")
+        boundary_extrapolated = bool(
+            np.isfinite(frame_min)
+            and np.isfinite(frame_max)
+            and (frame1 < frame_min or frame2 > frame_max)
+        )
 
         metrics = {
             "sample": sample,
@@ -409,17 +495,28 @@ def build_wave_rows(
             "track_stem": track_stem,
             "track_id_hint": int(maybe_track_id) if maybe_track_id is not None else None,
             "wave_index": int(k + 1),
-            "peak_i": int(i),
-            "peak_j": int(j),
+            "peak_i": int(peak_i),
+            "peak_index": int(k + 1),
+            "peak_count": 1,
+            "has_peak": True,
+            "previous_peak_i": int(prev_i) if prev_i is not None else None,
+            "next_peak_i": int(next_i) if next_i is not None else None,
+            "peak_frame_y_axis": peak_frame,
+            "peak_position_x_axis": peak_pos,
             "frame1": frame1,
             "frame2": frame2,
             "period_frames": period_frames,
+            "period_s": period_s,
+            "frequency_hz": freq,
             "pos1_px": pos1,
             "pos2_px": pos2,
+            "amplitude_px": amp,
             "delta_pos_px": dpos,
+            "seconds_delta": seconds_delta,
             "velocity_px_per_s": vel,
             "wavelength_px": wavelength,
             "bbox": {"xmin": xmin, "xmax": xmax, "ymin": ymin, "ymax": ymax},
+            "boundary_extrapolated": boundary_extrapolated,
             "orientation_deg": ang_mean,
             "orientation_std_deg": ang_std,
             "wave_type": wlabel,
@@ -438,6 +535,11 @@ def build_wave_rows(
                 "Pixel position 1": pos1,
                 "Pixel position 2": pos2,
                 "Amplitude (pixels)": amp,
+                "Peak frame": peak_frame,
+                "Peak position": peak_pos,
+                "Frame 1 (seconds)": t_start,
+                "Frame 2 (seconds)": t_end,
+                "Seconds 2 - Seconds 1": seconds_delta,
                 "Δposition (px)": dpos,
                 "Velocity (px/s)": vel,
                 "Wavelength (px)": wavelength,
