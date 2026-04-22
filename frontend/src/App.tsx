@@ -42,6 +42,13 @@ export default function App() {
       <div className={`page ${page === "docs" ? "page-active" : ""}`}>
         <ConfigDocsPage />
       </div>
+      <footer className="app-footer">
+        <span>Rohit Mahesh</span>
+        <a href="mailto:rm4336@columbia.edu">rm4336@columbia.edu</a>
+        <a href="https://github.com/rohitmahesh1/WaveAtlas" target="_blank" rel="noreferrer">
+          github.com/rohitmahesh1/WaveAtlas
+        </a>
+      </footer>
     </JobSessionProvider>
   );
 }
