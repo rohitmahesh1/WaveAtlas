@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import { useState } from "react";
 import type { JobRead } from "../api";
 
 function fmtTime(ts?: string | null) {
