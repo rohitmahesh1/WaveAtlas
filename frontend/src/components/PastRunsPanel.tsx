@@ -25,6 +25,7 @@ export function PastRunsPanel(props: {
   onLoad: (id: string) => void;
   onCancel: (id: string) => void;
   onResume?: (id: string) => void;
+  onDownload?: (id: string) => void;
   onDelete: (id: string) => void;
   onRename?: (id: string, name: string) => void;
 }) {
@@ -41,6 +42,7 @@ export function PastRunsPanel(props: {
     onLoad,
     onCancel,
     onResume,
+    onDownload,
     onDelete,
     onRename,
   } = props;
@@ -109,6 +111,11 @@ export function PastRunsPanel(props: {
                     <button className="ghost-btn" onClick={() => onCancel(job.id)} disabled={!canCancel}>
                       Cancel
                     </button>
+                    {onDownload ? (
+                      <button className="ghost-btn download-btn" onClick={() => onDownload(job.id)}>
+                        Waves CSV
+                      </button>
+                    ) : null}
                     {onResume && canResume ? (
                       <button className="ghost-btn" onClick={() => onResume(job.id)}>
                         Resume
