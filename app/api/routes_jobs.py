@@ -124,20 +124,17 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
 
 def _pipeline_config_from_env() -> Dict[str, Any]:
     """
-    Read YAML config from PIPELINE_CONFIG_PATH (if set).
-    Returns {} if missing/empty.
+    Read YAML config from PIPELINE_CONFIG_PATH or configs/default.yaml.
+    Returns {} if the config file is empty.
     """
-    raw_path = os.getenv("PIPELINE_CONFIG_PATH", "").strip()
-    if not raw_path:
-        return {}
-    p = Path(raw_path)
+    p = _pipeline_config_path()
     if not p.exists():
-        raise HTTPException(status_code=500, detail=f"PIPELINE_CONFIG_PATH not found: {raw_path}")
+        raise HTTPException(status_code=500, detail=f"Pipeline config not found: {p}")
     data = yaml.safe_load(p.read_text())
     if data is None:
         return {}
     if not isinstance(data, dict):
-        raise HTTPException(status_code=500, detail="PIPELINE_CONFIG_PATH must point to a YAML mapping")
+        raise HTTPException(status_code=500, detail="Pipeline config must be a YAML mapping")
     return data
 
 
@@ -170,6 +167,17 @@ def _parse_config_value(config_value: Any) -> Dict[str, Any]:
     if not isinstance(config_value, dict):
         raise HTTPException(status_code=400, detail="Config must be an object or YAML mapping")
     return config_value
+
+
+def _effective_pipeline_config(job: Job) -> Dict[str, Any]:
+    """
+    Resolve the exact config a job should run with.
+
+    The stored job config starts as user overrides. When a job is claimed for
+    execution, routes persist this merged snapshot back to job.config so detail
+    views and resumed work use the same settings the pipeline used.
+    """
+    return _deep_merge(_pipeline_config_from_env(), dict(job.config or {}))
 
 
 def _artifact_prefix() -> str:
@@ -399,15 +407,13 @@ def get_default_config_text() -> Response:
     try:
         raw = path.read_text()
         parsed = yaml.safe_load(raw)
-        if parsed is None:
-            text = ""
-        elif not isinstance(parsed, dict):
+        if parsed is not None and not isinstance(parsed, dict):
             raise HTTPException(status_code=500, detail="Default config must be a YAML mapping")
-        else:
-            text = yaml.safe_dump(parsed, sort_keys=False)
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to read config: {exc}") from exc
-    return Response(content=text, media_type="text/plain")
+    return Response(content=raw, media_type="text/plain")
 
 
 @router.get("/docs/config")
@@ -613,17 +619,18 @@ def start_job(
     artifact_store: ArtifactStore = Depends(get_artifact_store),
 ) -> JobRead:
     job = _get_job_owned(session, job_id, owner_session_id)
+    store = JobStore(session=session)
 
-    if job.status in (JobStatus.in_progress, JobStatus.completed):
+    if job.status != JobStatus.queued:
         return _job_read_with_filename(session, job)
 
-    store = JobStore(session=session)
     _ensure_upload_exists(store, job_id)
-
     settings = _pipeline_settings_from_env()
-    # Merge env YAML config (base) with per-job config (overrides).
-    env_cfg = _pipeline_config_from_env()
-    config = _deep_merge(env_cfg, dict(job.config or {}))
+    config = _effective_pipeline_config(job)
+
+    job, claimed = store.claim_start(job_id, config=config)
+    if not claimed:
+        return _job_read_with_filename(session, job)
 
     def _run() -> None:
         with Session(engine) as bg_session:
@@ -650,19 +657,18 @@ def resume_job(
     artifact_store: ArtifactStore = Depends(get_artifact_store),
 ) -> JobRead:
     job = _get_job_owned(session, job_id, owner_session_id)
-
-    if job.status in (JobStatus.in_progress, JobStatus.queued, JobStatus.cancel_requested):
-        raise HTTPException(status_code=409, detail="Job is currently running or queued")
-
     store = JobStore(session=session)
+
+    if job.status in (JobStatus.queued, JobStatus.in_progress, JobStatus.cancel_requested, JobStatus.completed):
+        return _job_read_with_filename(session, job)
+
     _ensure_upload_exists(store, job_id)
-
-    # Clear cancel flag + move to queued
-    store.clear_cancel(job_id, emit_event=True)
-
     settings = _pipeline_settings_from_env()
-    env_cfg = _pipeline_config_from_env()
-    config = _deep_merge(env_cfg, dict(job.config or {}))
+    config = _effective_pipeline_config(job)
+
+    job, claimed = store.claim_resume(job_id, config=config)
+    if not claimed:
+        return _job_read_with_filename(session, job)
 
     def _run() -> None:
         with Session(engine) as bg_session:
@@ -677,7 +683,7 @@ def resume_job(
             )
 
     background.add_task(_run)
-    return _job_read_with_filename(session, store.get_job(job_id))
+    return _job_read_with_filename(session, job)
 
 
 @router.post("/jobs/{job_id}/cancel", response_model=JobRead)
@@ -743,7 +749,7 @@ def get_track_detail(
     track_bytes = artifact_store.get_bytes(arts[0].blob_path)
 
     job = store.get_job(job_id)
-    config = dict(job.config or {})
+    config = _effective_pipeline_config(job)
     order = _track_xy_order_from_config(config)
     x, y = _load_track_xy_from_bytes(track_bytes, order=order)
 
