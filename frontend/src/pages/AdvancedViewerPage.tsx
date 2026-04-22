@@ -15,8 +15,9 @@ import { useFilters } from "../hooks/useFilters";
 import { useTrackDetail } from "../hooks/useTrackDetail";
 import { useJobHistory } from "../hooks/useJobHistory";
 import { PastRunsPanel } from "../components/PastRunsPanel";
-import { cancelJob, deleteJob, resumeJob, updateJobName } from "../api";
+import { cancelJob, deleteJob, jobWavesCsvUrl, resumeJob, updateJobName } from "../api";
 import { useSharedJobSession } from "../hooks/useSharedJobSession";
+import { downloadCsv, downloadFromUrl, downloadJson } from "../utils/download";
 
 const NUMERIC_OPS: FilterOp[] = [">", "<", ">=", "<=", "==", "!=", "between"];
 const STRING_OPS: FilterOp[] = ["contains", "==", "!="];
@@ -42,6 +43,10 @@ const FILTER_FIELDS: FieldDef[] = [
   { key: "period", label: "Period", type: "number", ops: NUMERIC_OPS, get: (t) => t.metrics?.period ?? null },
   { key: "sample", label: "Sample", type: "string", ops: STRING_OPS, get: (t) => t.sample ?? "" },
 ];
+
+function runStem(id: string | null) {
+  return id ? `waveatlas_${id.slice(0, 8)}` : "waveatlas";
+}
 
 export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }) {
   const { onViewAllRuns } = props;
@@ -147,6 +152,56 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
     return debugOverlays.find((o) => o.label === activeDebugLabel)?.url ?? null;
   }, [debugOverlays, activeDebugLabel]);
 
+  const downloadWaves = async (id: string) => {
+    try {
+      await downloadFromUrl(jobWavesCsvUrl(id), `${runStem(id)}_waves.csv`);
+    } catch {
+      window.alert("Could not download waves CSV for this run.");
+    }
+  };
+
+  const downloadHeatmap = async () => {
+    if (!baseImageUrl) return;
+    try {
+      await downloadFromUrl(baseImageUrl, `${runStem(jobId)}_base_heatmap.png`);
+    } catch {
+      window.alert("Could not download the base heatmap.");
+    }
+  };
+
+  const downloadVisibleTracks = () => {
+    const rows = filteredTracks.map((track) => ({
+      track_index: track.track_index,
+      sample: track.sample ?? "",
+      points: track.poly?.length ?? 0,
+      peaks: track.metrics?.num_peaks ?? track.peaks?.length ?? 0,
+      mean_amplitude: track.metrics?.mean_amplitude ?? "",
+      dominant_frequency: track.metrics?.dominant_frequency ?? "",
+      period: track.metrics?.period ?? "",
+      poly: track.poly ?? [],
+      peak_points: track.peaks ?? [],
+    }));
+    downloadCsv(`${runStem(jobId)}_visible_tracks.csv`, rows, [
+      "track_index",
+      "sample",
+      "points",
+      "peaks",
+      "mean_amplitude",
+      "dominant_frequency",
+      "period",
+      "poly",
+      "peak_points",
+    ]);
+  };
+
+  const downloadSelectedTrack = () => {
+    if (!selectedTrack || !trackDetail || trackDetail.track_index !== selectedTrack.track_index) return;
+    downloadJson(`${runStem(jobId)}_track_${selectedTrack.track_index}.json`, {
+      track: selectedTrack,
+      detail: trackDetail,
+    });
+  };
+
   return (
     <div className="app-shell">
       <header className="app-header">
@@ -188,6 +243,9 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
             totalCount={tracks.length}
             onCancel={cancelCurrentJob}
             cancelDisabled={!jobId || ["completed", "failed", "cancelled"].includes(status)}
+            onDownloadWaves={jobId ? () => downloadWaves(jobId) : undefined}
+            onDownloadHeatmap={downloadHeatmap}
+            heatmapDownloadDisabled={!baseImageUrl}
             onResume={async () => {
               if (!jobId || status !== "cancelled") return;
               try {
@@ -221,6 +279,7 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
               baseImageUrl={baseImageUrl}
               debugImageUrl={debugImageUrl}
               debugOpacity={debugOpacity}
+              onDownloadTrackDetail={downloadSelectedTrack}
             />
           ) : null}
 
@@ -256,6 +315,7 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
                 // no-op for now
               }
             }}
+            onDownload={downloadWaves}
             onDelete={async (id) => {
               const ok = window.confirm("Delete this run and its artifacts? This cannot be undone.");
               if (!ok) return;
@@ -292,7 +352,11 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
             onRemove={removeFilterRule}
           />
 
-          <SummaryPanel stats={filteredStats} />
+          <SummaryPanel
+            stats={filteredStats}
+            onDownloadTracks={downloadVisibleTracks}
+            downloadDisabled={filteredTracks.length === 0}
+          />
 
           <ActivityPanel activity={activity} />
         </aside>
