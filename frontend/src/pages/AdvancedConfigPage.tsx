@@ -4,7 +4,7 @@ import { stageLabel } from "../utils/format";
 import { API_BASE, resumeJob } from "../api";
 import { RunPanel } from "../components/RunPanel";
 import { ActivityPanel } from "../components/ActivityPanel";
-import { useJobSession } from "../hooks/useJobSession";
+import { useSharedJobSession } from "../hooks/useSharedJobSession";
 
 const DEFAULT_CONFIG_TEXT = `# Loading config...`;
 
@@ -65,7 +65,7 @@ export default function AdvancedConfigPage() {
     cancelCurrentJob,
     loadJob,
     clearSession,
-  } = useJobSession();
+  } = useSharedJobSession();
 
   const buildDefaultRunName = (file: File) => {
     const raw = file.name || "run";
