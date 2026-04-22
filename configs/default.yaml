@@ -79,11 +79,11 @@ kymo:
     seg_size: 256
     force_mode: bi
     fuse_uni_into_bi: true
-    fuse_uni_weight: 0.6          # ↓ less weight on UNI to reduce fuzzy fill
+    fuse_uni_weight: 0.6
 
     thresholds:
       thr_default: 0.20
-      thr_bi: 0.19                # ↑ slightly stricter to thin mask a touch
+      thr_bi: 0.19
       thr_uni: 0.20
     auto_threshold:
       enabled: true
@@ -92,28 +92,28 @@ kymo:
       trigger_pct: [5.0, 35.0]
     hysteresis:
       enabled: true
-      low: 0.09                   # ↑ require stronger support for weak pixels
+      low: 0.09
       high: 0.18
 
     morphology:
       mode: directional
       directional:
-        kv: 4                      # ↓ a bit gentler closing to avoid over-bridging
+        kv: 4
         kh: 4
-        diag_bridge: false         # ↓ disable diagonal bridging (common source of hair)
+        diag_bridge: false
       classic:
         kernel: 3
 
     components:
-      min_px: 9                    # ↑ drop more tiny blobs
-      min_rows: 7                  # ↑ require taller components
+      min_px: 9
+      min_rows: 7
 
     skeleton:
       method: thin
-      prune_iters: 1               # ↑ trim short stubs post-thinning
-      keep_ratio: 0.65             # ↑ protect against over-pruning
-      keep_min_px: 2500            # ↑ absolute floor
-      prob_floor_min: 0.09         # ↑ raise corridor floor to shave wisps
+      prune_iters: 1
+      keep_ratio: 0.65
+      keep_min_px: 2500
+      prob_floor_min: 0.09
       prob_floor_max: 0.10
 
     tracking:
@@ -124,16 +124,16 @@ kymo:
     postproc:
       extend_rows: 22
       dx_win: 4
-      prob_min: 0.12               # ↑ be pickier when extending ends
-      max_gap_rows: 11             # ↓ merge across slightly smaller gaps
-      max_dx: 5                    # ↓ require closer alignment
-      prob_bridge_min: 0.12        # ↑ need stronger bridge evidence
+      prob_min: 0.12
+      max_gap_rows: 11
+      max_dx: 5
+      prob_bridge_min: 0.12
       dedupe:
         enabled: true
         min_rows: 30
-        min_score: 0.12            # ↑ remove low-quality dupes
-        overlap_iou: 0.85          # ↑ stricter duplicate definition
-        dx_tol: 2.0                # ↓ tracks must align tighter
+        min_score: 0.12
+        overlap_iou: 0.85
+        dx_tol: 2.0
 
     debug:
       save_debug_images: true
