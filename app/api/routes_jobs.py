@@ -44,8 +44,8 @@ from ..models import (
 )
 from ..pipeline import PipelineSettings, run_job
 from ..signal.detrend import fit_baseline_ransac
-from ..signal.peaks import detect_peaks, detect_peaks_adaptive
-from ..signal.period import estimate_dominant_frequency, frequency_to_period
+from ..signal.peaks import detect_peaks, detect_peaks_adaptive, ensure_minimum_peaks
+from ..signal.period import estimate_dominant_frequency, frequency_to_period, resolve_positive_frequency
 
 from .deps import get_artifact_store, get_db_session, get_owner_session_id
 
@@ -222,12 +222,17 @@ def _track_xy_order_from_config(config: Dict[str, Any]) -> str:
     return order
 
 
-def _load_track_xy_from_bytes(data: bytes, *, order: str) -> tuple[np.ndarray, np.ndarray]:
+def _load_track_frame_position_from_bytes(data: bytes, *, order: str) -> tuple[np.ndarray, np.ndarray]:
     arr = np.load(io.BytesIO(data), allow_pickle=False)
     if arr.ndim == 2 and arr.shape[1] >= 2:
         if order == "yx":
-            return arr[:, 1].astype(float, copy=False), arr[:, 0].astype(float, copy=False)
-        return arr[:, 0].astype(float, copy=False), arr[:, 1].astype(float, copy=False)
+            frame = arr[:, 0].astype(float, copy=False)
+            position = arr[:, 1].astype(float, copy=False)
+        else:
+            position = arr[:, 0].astype(float, copy=False)
+            frame = arr[:, 1].astype(float, copy=False)
+        order_idx = np.argsort(frame, kind="stable")
+        return frame[order_idx], position[order_idx]
     if arr.ndim == 1:
         return np.arange(arr.shape[0], dtype=float), arr.astype(float, copy=False)
     raise HTTPException(status_code=500, detail="Unsupported track array shape")
@@ -251,8 +256,8 @@ def _detect_peaks_for_detail(
     peaks_cfg: Dict[str, Any],
     frames_per_period: Optional[float],
 ) -> tuple[np.ndarray, Dict[str, Any]]:
-    if bool(peaks_cfg.get("adaptive", True)):
-        return detect_peaks_adaptive(
+    if bool(peaks_cfg.get("adaptive", False)):
+        peaks, props = detect_peaks_adaptive(
             residual,
             frames_per_period=frames_per_period,
             distance_frac=float(peaks_cfg.get("distance_frac", 0.6)),
@@ -262,13 +267,15 @@ def _detect_peaks_for_detail(
             nms_enable=bool(peaks_cfg.get("nms_enable", True)),
             nms_dominance_frac=float(peaks_cfg.get("nms_dominance_frac", 0.55)),
         )
+        return ensure_minimum_peaks(residual, peaks, props, minimum=int(peaks_cfg.get("minimum_per_track", 1)))
     legacy_kwargs: Dict[str, Any] = {
         "prominence": float(peaks_cfg.get("prominence", 1.0)),
         "width": float(peaks_cfg.get("width", 1.0)),
     }
     if peaks_cfg.get("distance", None) is not None:
         legacy_kwargs["distance"] = int(peaks_cfg["distance"])
-    return detect_peaks(residual, **legacy_kwargs)
+    peaks, props = detect_peaks(residual, **legacy_kwargs)
+    return ensure_minimum_peaks(residual, peaks, props, minimum=int(peaks_cfg.get("minimum_per_track", 1)))
 
 
 def _fit_anchored_sine(
@@ -276,22 +283,50 @@ def _fit_anchored_sine(
     t: np.ndarray,
     freq: float,
     center_idx: Optional[int],
-) -> Optional[np.ndarray]:
+    *,
+    sampling_rate: float = 1.0,
+    period_frac: float = 0.5,
+) -> Optional[tuple[np.ndarray, Dict[str, Any]]]:
     if center_idx is None or center_idx < 0 or center_idx >= len(t):
         return None
     if not (isinstance(freq, float) and math.isfinite(freq) and freq > 0):
         return None
-    omega = 2.0 * math.pi * float(freq)
+    if sampling_rate <= 0:
+        return None
+    omega = 2.0 * math.pi * float(freq) / float(sampling_rate)
     t0 = float(t[int(center_idx)])
     phi = (math.pi / 2.0) - omega * t0
     s = np.sin(omega * t + phi).astype(np.float64)
-    X = np.vstack([s, np.ones_like(s)]).T
-    y = residual.astype(np.float64)
-    beta, *_ = np.linalg.lstsq(X, y, rcond=None)
-    A = float(beta[0])
-    c = float(beta[1])
+
+    frames_per_period = (float(sampling_rate) / float(freq)) if sampling_rate else (1.0 / float(freq))
+    half_span = max(1, int(round((float(period_frac) * frames_per_period) / 2.0)))
+    lo = max(0, int(center_idx) - half_span)
+    hi = min(len(t) - 1, int(center_idx) + half_span)
+    peak_value = float(residual[int(center_idx)])
+    z = s[lo : hi + 1] - 1.0
+    y_slice = residual[lo : hi + 1].astype(np.float64)
+    target = y_slice - peak_value
+    denom = float(np.dot(z, z))
+    A = float(np.dot(z, target) / denom) if denom > 0 and math.isfinite(denom) else peak_value
+    c = float(peak_value - A)
     yfit = (A * s + c).astype(np.float64)
-    return yfit
+    y_fit = yfit[lo : hi + 1]
+    if y_slice.size >= 2 and float(np.var(y_slice)) > 0:
+        vnmse = float(np.mean((y_slice - y_fit) ** 2) / np.var(y_slice))
+    else:
+        vnmse = float("nan")
+    return yfit, {
+        "fit_amp_A": A,
+        "fit_phase_phi": phi,
+        "fit_offset_c": c,
+        "fit_freq_hz": float(freq),
+        "fit_error_vnmse": vnmse if math.isfinite(vnmse) else None,
+        "fit_window_lo": lo,
+        "fit_window_hi": hi,
+        "fit_peak_value": peak_value,
+        "fit_peak_error": float(yfit[int(center_idx)] - peak_value),
+        "fit_passes_peak": True,
+    }
 
 
 # -----------------------------
@@ -751,13 +786,13 @@ def get_track_detail(
     job = store.get_job(job_id)
     config = _effective_pipeline_config(job)
     order = _track_xy_order_from_config(config)
-    x, y = _load_track_xy_from_bytes(track_bytes, order=order)
+    frame, position = _load_track_frame_position_from_bytes(track_bytes, order=order)
 
     detrend_cfg = (config.get("detrend") or {}).copy()
     degree = int(detrend_cfg.pop("degree", 1))
-    model = fit_baseline_ransac(x, y, degree=degree, **detrend_cfg)
-    baseline = model.predict(x.reshape(-1, 1)).astype(float)
-    residual = (y - baseline).astype(float)
+    model = fit_baseline_ransac(frame, position, degree=degree, **detrend_cfg)
+    baseline = model.predict(frame.reshape(-1, 1)).astype(float)
+    residual = (position - baseline).astype(float)
 
     peaks_cfg = (config.get("peaks") or {})
     period_cfg = dict(config.get("period") or {})
@@ -769,11 +804,22 @@ def get_track_detail(
         freq = float(estimate_dominant_frequency(residual, **period_cfg))
     except Exception:
         freq = float("nan")
+    freq = resolve_positive_frequency(
+        freq,
+        frame=frame,
+        sampling_rate=sampling_rate,
+        min_freq=period_cfg.get("min_freq"),
+        max_freq=period_cfg.get("max_freq"),
+    )
     period = float(frequency_to_period(freq)) if (isinstance(freq, float) and math.isfinite(freq) and freq > 0) else float("nan")
 
     frames_per_period = (sampling_rate / float(freq)) if (sampling_rate and math.isfinite(freq) and freq > 0) else None
     peaks_idx, _props = _detect_peaks_for_detail(residual, peaks_cfg, frames_per_period)
     peaks_idx = np.asarray(peaks_idx, dtype=int)
+
+    lo, hi = 0, len(frame) - 1
+    if index_range:
+        lo, hi = _parse_index_range(index_range, len(frame))
 
     strongest_peak_idx: Optional[int] = None
     if peaks_idx.size > 0:
@@ -782,17 +828,47 @@ def get_track_detail(
         except Exception:
             strongest_peak_idx = int(peaks_idx[0])
 
+    def peak_point(ordinal: int, peak_i: int) -> Dict[str, Any]:
+        in_slice = bool(lo <= peak_i <= hi)
+        return {
+            "peak_index": int(ordinal),
+            "peak_i": int(peak_i),
+            "frame": float(frame[peak_i]),
+            "position": float(position[peak_i]),
+            "amplitude": float(residual[peak_i]),
+            "in_slice": in_slice,
+            "slice_index": int(peak_i - lo) if in_slice else None,
+            "is_strongest": bool(strongest_peak_idx is not None and int(peak_i) == strongest_peak_idx),
+        }
+
+    peak_points = [peak_point(i + 1, int(peak_i)) for i, peak_i in enumerate(peaks_idx.tolist())]
+    peak_regressions: List[Dict[str, Any]] = []
     sine_fit = None
     if include_sine:
-        yfit_res = _fit_anchored_sine(residual, x, float(freq) if math.isfinite(freq) else float("nan"), strongest_peak_idx)
-        if yfit_res is not None:
-            sine_fit = (baseline + yfit_res).astype(float)
+        fit_freq = float(freq) if math.isfinite(freq) else float("nan")
+        period_frac = float((config.get("features") or {}).get("fit_window_period_frac", 0.5))
+        for point in peak_points:
+            peak_i = int(point["peak_i"])
+            fit_result = _fit_anchored_sine(
+                residual,
+                frame,
+                fit_freq,
+                peak_i,
+                sampling_rate=sampling_rate,
+                period_frac=period_frac,
+            )
+            regression = dict(point)
+            regression["sine_fit"] = None
+            if fit_result is not None:
+                yfit_res, fit_meta = fit_result
+                full_fit = (baseline + yfit_res).astype(float)
+                regression.update(fit_meta)
+                regression["sine_fit"] = full_fit[lo : hi + 1].tolist()
+                if strongest_peak_idx is not None and peak_i == strongest_peak_idx:
+                    sine_fit = full_fit
+            peak_regressions.append(regression)
 
-    lo, hi = 0, len(x) - 1
-    if index_range:
-        lo, hi = _parse_index_range(index_range, len(x))
-
-    x_view = x[lo : hi + 1]
+    frame_view = frame[lo : hi + 1]
     baseline_view = baseline[lo : hi + 1]
     residual_view = residual[lo : hi + 1] if include_residual else None
     sine_view = sine_fit[lo : hi + 1] if sine_fit is not None else None
@@ -809,14 +885,16 @@ def get_track_detail(
     return {
         "track_index": int(track_index),
         "coords": {"poly_format": "[x, y]", "x_name": "time_index", "y_name": "position_px"},
-        "time_index": x_view.tolist(),
-        "position": y[lo : hi + 1].tolist(),
+        "time_index": frame_view.tolist(),
+        "position": position[lo : hi + 1].tolist(),
         "baseline": baseline_view.tolist(),
         "residual": (residual_view.tolist() if residual_view is not None else None),
         "sine_fit": (sine_view.tolist() if sine_view is not None else None),
         "regression": {"method": "ransac_poly", "degree": degree, "params": detrend_cfg},
         "peaks": [int(i) for i in peaks_idx.tolist()],
         "peaks_in_slice": peaks_in_slice,
+        "peak_points": peak_points,
+        "peak_regressions": peak_regressions,
         "strongest_peak_idx": strongest_peak_idx,
         "metrics": {
             "dominant_frequency": freq if math.isfinite(freq) else None,
@@ -863,16 +941,86 @@ def export_waves_csv(
     q = select(Wave).where(Wave.job_id == job_id).order_by(Wave.created_at.asc())
     rows = session.exec(q).all()
 
+    headers = [
+        "wave_id",
+        "track_id",
+        "wave_index",
+        "Frame position 1 (y-axis)",
+        "Frame position 2 (y-axis)",
+        "Period In Frames (Frame 1- Frame 2)",
+        "Period in Seconds",
+        "Frequency (Hertz)",
+        "Pixel Position 1 (x-axis)",
+        "Pixel Position 2 (x-axis)",
+        "Amplitude (Pixels)",
+        "Position 1 (x-axis)",
+        "Position 2 (x-axis)",
+        "Frame 1 (y-axis)",
+        "Frame 2 (y-axis)",
+        "Frame 1 (seconds)",
+        "Frame 2 (seconds)",
+        "Seconds 2 - Seconds 1",
+        "Position2 -Position 1",
+        "Velocity (pixels/sec)",
+        "Frequency (Hz)",
+        "Wavelength (Pixels)",
+        "Peak Frame (y-axis)",
+        "Peak Position (x-axis)",
+        "Fit Error (VNMSE)",
+        "Fit Passes Peak",
+        "Wave Type",
+        "Type Score",
+    ]
+
+    def metric(row: Wave, key: str, default=None):
+        metrics = row.metrics or {}
+        value = metrics.get(key, default)
+        return "" if value is None else value
+
     def gen():
         buf = io.StringIO()
         w = csv.writer(buf)
-        w.writerow(["wave_id", "wave_index", "x", "y", "amplitude", "frequency", "period", "error", "t_start", "t_end"])
+        w.writerow(headers)
         yield buf.getvalue()
         buf.seek(0)
         buf.truncate(0)
 
         for r in rows:
-            w.writerow([r.id, r.wave_index, r.x, r.y, r.amplitude, r.frequency, r.period, r.error, r.t_start, r.t_end])
+            frame1 = metric(r, "frame1")
+            frame2 = metric(r, "frame2")
+            pos1 = metric(r, "pos1_px")
+            pos2 = metric(r, "pos2_px")
+            freq = metric(r, "frequency_hz", r.frequency)
+            w.writerow([
+                r.id,
+                r.track_id or "",
+                r.wave_index,
+                frame1,
+                frame2,
+                metric(r, "period_frames"),
+                metric(r, "period_s", r.period),
+                freq,
+                pos1,
+                pos2,
+                metric(r, "amplitude_px", r.amplitude),
+                pos1,
+                pos2,
+                frame1,
+                frame2,
+                r.t_start if r.t_start is not None else metric(r, "frame1_seconds"),
+                r.t_end if r.t_end is not None else metric(r, "frame2_seconds"),
+                metric(r, "seconds_delta"),
+                metric(r, "delta_pos_px"),
+                metric(r, "velocity_px_per_s"),
+                freq,
+                metric(r, "wavelength_px"),
+                metric(r, "peak_frame_y_axis"),
+                metric(r, "peak_position_x_axis"),
+                r.error if r.error is not None else metric(r, "fit_error_vnmse"),
+                metric(r, "fit_passes_peak"),
+                metric(r, "wave_type"),
+                metric(r, "type_score"),
+            ])
             yield buf.getvalue()
             buf.seek(0)
             buf.truncate(0)
