@@ -1,5 +1,5 @@
 // src/pages/AdvancedConfigPage.tsx
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { stageLabel } from "../utils/format";
 import { API_BASE, resumeJob } from "../api";
 import { RunPanel } from "../components/RunPanel";
@@ -106,7 +106,7 @@ export default function AdvancedConfigPage() {
           setValidationState("idle");
           setValidationMessage(null);
         }
-      } catch (err: any) {
+      } catch {
         setConfigError("Failed to load default config");
       } finally {
         setConfigLoading(false);
@@ -245,7 +245,7 @@ export default function AdvancedConfigPage() {
                       setValidationMessage(null);
                       setConfigValidatedText(configText);
                       setConfigDirty(false);
-                    } catch (err: any) {
+                    } catch {
                       setValidationState("error");
                       setValidationMessage("Config validation failed");
                     }
