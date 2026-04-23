@@ -13,6 +13,7 @@ from .artifact_store import ArtifactStore
 from .job_store import JobStore
 from .models import ArtifactKind, EventType, JobStatus
 
+from .io.image_to_heatmap import image_to_heatmap_bytes
 from .io.table_to_heatmap import table_to_heatmap_bytes
 from .extract_core import select_kymo_runner, process_track
 
@@ -262,27 +263,49 @@ def run_job(
             # -----------------------------
             # Load uploaded input from artifact store
             # -----------------------------
-            user_log("Loading input table", stage="load_input")
-            uploads = job_store.list_artifacts(job_id, kind=ArtifactKind.upload_csv, limit=10)
+            user_log("Loading input", stage="load_input")
+            uploads = [
+                *job_store.list_artifacts(job_id, kind=ArtifactKind.upload_image, limit=10),
+                *job_store.list_artifacts(job_id, kind=ArtifactKind.upload_csv, limit=10),
+            ]
             if not uploads:
-                raise PipelineError("No upload artifact found (expected ArtifactKind.upload_csv)")
+                raise PipelineError("No upload artifact found (expected table or image upload)")
+            uploads.sort(key=lambda art: art.created_at)
 
             upload = uploads[0]
-            table_bytes = artifact_store.get_bytes(upload.blob_path)
+            input_bytes = artifact_store.get_bytes(upload.blob_path)
+            input_filename = (upload.meta or {}).get("filename")
 
-            set_progress("table_loaded", extra={"upload_blob": upload.blob_path})
-            emit(EventType.progress, {"stage": "table_loaded", "bytes": len(table_bytes)})
+            loaded_stage = "image_loaded" if upload.kind == ArtifactKind.upload_image else "table_loaded"
+            set_progress(loaded_stage, extra={"upload_blob": upload.blob_path, "input_kind": upload.kind.value})
+            emit(EventType.progress, {"stage": loaded_stage, "bytes": len(input_bytes), "input_kind": upload.kind.value})
 
             if cancelled():
                 job_store.set_status(job_id, JobStatus.cancelled, emit_event=True)
-                emit(EventType.cancelled, {"reason": "cancel_requested_after_table_loaded"})
+                emit(EventType.cancelled, {"reason": "cancel_requested_after_input_loaded"})
                 return
 
             # -----------------------------
-            # Table -> base heatmap
+            # Input -> base heatmap
             # -----------------------------
             user_log("Generating heatmap", stage="heatmap")
-            heatmap_png, heatmap_meta = table_to_heatmap_bytes(table_bytes, config=config)
+            if upload.kind == ArtifactKind.upload_image:
+                heatmap_png, heatmap_meta = image_to_heatmap_bytes(
+                    input_bytes,
+                    config=config,
+                    filename_hint=str(input_filename) if input_filename else None,
+                )
+            else:
+                heatmap_png, heatmap_meta = table_to_heatmap_bytes(
+                    input_bytes,
+                    config=config,
+                    filename_hint=str(input_filename) if input_filename else None,
+                )
+            heatmap_meta = {
+                **(heatmap_meta or {}),
+                "source_artifact_id": str(upload.id),
+                "source_artifact_kind": upload.kind.value,
+            }
             publish_bytes(
                 kind=ArtifactKind.base_heatmap,
                 filename="base_heatmap.png",
