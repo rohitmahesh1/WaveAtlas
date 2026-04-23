@@ -14,7 +14,9 @@ export function RunPanel(props: {
   onNewRun?: () => void;
   onDownloadWaves?: () => void;
   onDownloadHeatmap?: () => void;
+  onDownloadOriginalImage?: () => void;
   heatmapDownloadDisabled?: boolean;
+  originalImageDownloadDisabled?: boolean;
 }) {
   const {
     file,
@@ -32,7 +34,9 @@ export function RunPanel(props: {
     onNewRun,
     onDownloadWaves,
     onDownloadHeatmap,
+    onDownloadOriginalImage,
     heatmapDownloadDisabled,
+    originalImageDownloadDisabled,
   } = props;
   const canRun = Boolean(file);
   const normalizedStatus = String(status ?? "");
@@ -103,7 +107,7 @@ export function RunPanel(props: {
             <input
               className="file-hidden"
               type="file"
-              accept=".csv,.tsv,.xlsx,.xls"
+              accept=".csv,.tsv,.xlsx,.xls,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp,image/*"
               onChange={(e) => onFileChange(e.target.files?.[0] || null)}
             />
           </label>
@@ -133,7 +137,7 @@ export function RunPanel(props: {
             <div className="run-transport-note">
               {canResume ? "Stopped. Resume from saved artifacts." : isPausePending ? "Stop requested..." : "Run outputs"}
             </div>
-            {onDownloadWaves || onDownloadHeatmap ? (
+            {onDownloadWaves || onDownloadHeatmap || onDownloadOriginalImage ? (
               <details className="run-download-menu">
                 <summary>Downloads</summary>
                 <div className="run-download-popover">
@@ -149,6 +153,15 @@ export function RunPanel(props: {
                       disabled={heatmapDownloadDisabled}
                     >
                       Heatmap
+                    </button>
+                  ) : null}
+                  {onDownloadOriginalImage ? (
+                    <button
+                      className="ghost-btn download-btn compact-btn"
+                      onClick={onDownloadOriginalImage}
+                      disabled={originalImageDownloadDisabled}
+                    >
+                      Original image
                     </button>
                   ) : null}
                 </div>
