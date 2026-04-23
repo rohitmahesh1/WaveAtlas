@@ -1,6 +1,7 @@
 # app/artifact_store.py
 from __future__ import annotations
 
+import logging
 import os
 import pathlib
 import re
@@ -8,6 +9,9 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Optional, Protocol, Tuple
 from uuid import UUID
+
+
+logger = logging.getLogger(__name__)
 
 
 def _safe_name(name: str) -> str:
@@ -248,8 +252,13 @@ class GCSArtifactStore:
         if self.public:
             return blob.public_url
 
-        # Signed URL requires service account credentials w/ signing capability
-        return blob.generate_signed_url(expiration=timedelta(seconds=expires_in), method="GET")
+        # Cloud Run commonly uses token-only credentials, so fall back to proxy downloads
+        # when object signing is unavailable.
+        try:
+            return blob.generate_signed_url(expiration=timedelta(seconds=expires_in), method="GET")
+        except Exception as exc:
+            logger.warning("Falling back to backend artifact download for %s: %s", blob_path, exc)
+            return None
 
     def delete_blob(self, blob_path: str) -> None:
         bucket, key = self._parse_gs_uri(blob_path)
