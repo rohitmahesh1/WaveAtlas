@@ -25,6 +25,7 @@ class JobStatus(str, Enum):
 class ArtifactKind(str, Enum):
     # uploads / primary outputs
     upload_csv = "upload_csv"
+    upload_image = "upload_image"
     base_heatmap = "base_heatmap"
 
     # overlays (use label for variants like mask_clean, skeleton, etc.)
