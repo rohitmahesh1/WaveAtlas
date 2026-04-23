@@ -149,6 +149,13 @@ def _pipeline_config_path() -> Path:
     return Path("configs/default.yaml")
 
 
+def _config_docs_path() -> Path:
+    raw_path = os.getenv("CONFIG_DOCS_PATH", "").strip()
+    if raw_path:
+        return Path(raw_path)
+    return Path(__file__).resolve().parents[2] / "docs" / "config.md"
+
+
 def _parse_config_value(config_value: Any) -> Dict[str, Any]:
     if isinstance(config_value, str):
         if not config_value.strip():
@@ -468,7 +475,7 @@ def get_default_config_text() -> Response:
 
 @router.get("/docs/config")
 def get_config_docs() -> Response:
-    path = Path("docs/config.md")
+    path = _config_docs_path()
     if not path.exists():
         raise HTTPException(status_code=404, detail="Config docs not found")
     return Response(content=path.read_text(), media_type="text/markdown")
