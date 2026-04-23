@@ -68,6 +68,7 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
     jobId,
     status,
     baseImageUrl,
+    originalImageUrl,
     tracks,
     activity,
     currentStage,
@@ -170,6 +171,15 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
     }
   };
 
+  const downloadOriginalImage = async () => {
+    if (!originalImageUrl) return;
+    try {
+      await downloadFromUrl(originalImageUrl, `${runStem(jobId)}_original_image.png`);
+    } catch {
+      window.alert("Could not download the original image.");
+    }
+  };
+
   const downloadVisibleTracks = () => {
     const rows = filteredTracks.map((track) => ({
       track_index: track.track_index,
@@ -246,7 +256,9 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
             cancelDisabled={!jobId || ["completed", "failed", "cancelled"].includes(status)}
             onDownloadWaves={jobId ? () => downloadWaves(jobId) : undefined}
             onDownloadHeatmap={downloadHeatmap}
+            onDownloadOriginalImage={originalImageUrl ? downloadOriginalImage : undefined}
             heatmapDownloadDisabled={!baseImageUrl}
+            originalImageDownloadDisabled={!originalImageUrl}
             onResume={async () => {
               if (!jobId || status !== "cancelled") return;
               try {
