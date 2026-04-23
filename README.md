@@ -9,7 +9,7 @@ The goal is not just to run a model. WaveAtlas is built as an end-to-end researc
 WaveAtlas converts raw experimental inputs into structured wave data:
 
 - Uploads CSV-style tabular intensity matrices or image files.
-- Normalizes images into heatmaps, including optional grayscale conversion through user-defined low/high intensity colors.
+- Normalizes images into heatmaps, including grayscale conversion through user-defined low/high intensity colors.
 - Runs ONNX segmentation models to identify track-like signal structures across the kymograph.
 - Skeletonizes and traces those structures into per-track coordinate arrays.
 - Extracts wave peaks from every track and computes peak-centered sinusoidal regressions.
@@ -23,11 +23,11 @@ The extraction core is a Python/ONNX reimplementation of the original KymoButler
 
 ```mermaid
 flowchart TB
-  A["Research input"] --> B{"Input type"}
+  A["Data"] --> B{"Input type"}
   B -->|"CSV / table"| C["Table to heatmap"]
   B -->|"Image"| D["Image to heatmap"]
 
-  D --> D1["Optional resize"]
+  D --> D1["Resize"]
   D1 --> D2["RGB passthrough or grayscale projection"]
   D2 --> D3["Low/high hex intensity calibration"]
   C --> E["Base heatmap artifact"]
