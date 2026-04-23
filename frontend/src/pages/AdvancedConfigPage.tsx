@@ -59,6 +59,7 @@ export default function AdvancedConfigPage() {
     jobId,
     status,
     baseImageUrl,
+    originalImageUrl,
     activity,
     currentStage,
     stageDetail,
@@ -109,6 +110,15 @@ export default function AdvancedConfigPage() {
       await downloadFromUrl(baseImageUrl, `${runStem}_base_heatmap.png`);
     } catch {
       window.alert("Could not download the base heatmap.");
+    }
+  };
+
+  const downloadOriginalImage = async () => {
+    if (!originalImageUrl) return;
+    try {
+      await downloadFromUrl(originalImageUrl, `${runStem}_original_image.png`);
+    } catch {
+      window.alert("Could not download the original image.");
     }
   };
 
@@ -184,7 +194,9 @@ export default function AdvancedConfigPage() {
             cancelDisabled={!jobId || ["completed", "failed", "cancelled"].includes(status)}
             onDownloadWaves={jobId ? downloadWaves : undefined}
             onDownloadHeatmap={downloadHeatmap}
+            onDownloadOriginalImage={originalImageUrl ? downloadOriginalImage : undefined}
             heatmapDownloadDisabled={!baseImageUrl}
+            originalImageDownloadDisabled={!originalImageUrl}
             onResume={async () => {
               if (!jobId || status !== "cancelled") return;
               try {
