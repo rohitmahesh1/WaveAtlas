@@ -13,9 +13,6 @@ data
 output
 scratch
 
-export
-*.onnx
-
 frontend/node_modules
 frontend/dist
 
