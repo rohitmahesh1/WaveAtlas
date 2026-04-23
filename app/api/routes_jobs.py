@@ -18,6 +18,7 @@ from fastapi import (
     File,
     HTTPException,
     Query,
+    Request,
     Response,
     UploadFile,
 )
@@ -529,6 +530,7 @@ def delete_job(
 @router.post("/jobs/{job_id}/upload-session", response_model=UploadSessionResponse)
 def create_upload_session(
     job_id: UUID,
+    request: Request,
     response: Response,
     filename: str = Query("upload.csv"),
     content_type: str = Query("text/csv"),
@@ -558,8 +560,9 @@ def create_upload_session(
     client = storage.Client()
     bucket = client.bucket(bucket_name)
     blob = bucket.blob(key)
+    origin = request.headers.get("origin") or None
 
-    upload_url = blob.create_resumable_upload_session(content_type=content_type)
+    upload_url = blob.create_resumable_upload_session(content_type=content_type, origin=origin)
 
     return UploadSessionResponse(
         upload_url=upload_url,
