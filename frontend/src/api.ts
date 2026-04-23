@@ -226,6 +226,17 @@ export async function getTrackDetail(
 }
 
 // Small/dev upload (goes through backend)
+function contentTypeForFile(file: File) {
+  if (file.type) return file.type;
+  const lower = file.name.toLowerCase();
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+  if (lower.endsWith(".tif") || lower.endsWith(".tiff")) return "image/tiff";
+  if (lower.endsWith(".bmp")) return "image/bmp";
+  if (lower.endsWith(".webp")) return "image/webp";
+  return "text/csv";
+}
+
 export async function uploadViaApi(jobId: string, file: File): Promise<unknown> {
   const fd = new FormData();
   fd.append("file", file);
@@ -242,7 +253,7 @@ export async function uploadViaApi(jobId: string, file: File): Promise<unknown> 
 export async function createUploadSession(jobId: string, file: File) {
   const params = new URLSearchParams({
     filename: file.name,
-    content_type: file.type || "text/csv",
+    content_type: contentTypeForFile(file),
   });
   const res = await fetch(`${API_BASE}/api/jobs/${jobId}/upload-session?${params}`, {
     method: "POST",
@@ -260,7 +271,7 @@ export async function uploadComplete(jobId: string, blobPath: string, file: File
     body: JSON.stringify({
       blob_path: blobPath,
       filename: file.name,
-      content_type: file.type || "text/csv",
+      content_type: contentTypeForFile(file),
       byte_size: file.size,
     }),
   });
@@ -274,7 +285,7 @@ export async function uploadToResumableUrl(uploadUrl: string, file: File) {
   const res = await fetch(uploadUrl, {
     method: "PUT",
     headers: {
-      "Content-Type": file.type || "application/octet-stream",
+      "Content-Type": contentTypeForFile(file),
       "Content-Range": `bytes 0-${file.size - 1}/${file.size}`,
     },
     body: file,
