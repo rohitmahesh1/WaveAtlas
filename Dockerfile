@@ -32,6 +32,7 @@ RUN python -m pip install --upgrade pip \
 COPY alembic.ini .
 COPY app ./app
 COPY configs ./configs
+COPY docs ./docs
 COPY migrations ./migrations
 COPY kymobutler_scripts ./kymobutler_scripts
 COPY export ./export
