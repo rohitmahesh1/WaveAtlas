@@ -58,6 +58,11 @@ function saveSession(jobId: string, lastSeq: number) {
   localStorage.setItem(SESSION_KEY, JSON.stringify({ jobId, lastSeq }));
 }
 
+function isImageFile(file: File) {
+  if (file.type.startsWith("image/")) return true;
+  return /\.(png|jpe?g|tiff?|bmp|webp)$/i.test(file.name);
+}
+
 function normalizeOverlayTrack(payload: unknown): OverlayTrackEvent | null {
   const data = asRecord(payload);
   if (!data) return null;
@@ -108,6 +113,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
   const [jobId, setJobId] = useState<string | null>(initialSession?.jobId ?? null);
   const [status, setStatus] = useState<string>(initialSession ? "resuming…" : "idle");
   const [baseImageUrl, setBaseImageUrl] = useState<string | null>(null);
+  const [originalImageUrl, setOriginalImageUrl] = useState<string | null>(null);
   const [tracks, setTracks] = useState<OverlayTrackEvent[]>([]);
   const [activity, setActivity] = useState<LogEntry[]>([]);
   const [currentStage, setCurrentStage] = useState<string>(initialSession ? "resuming" : "idle");
@@ -173,6 +179,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     setStatus("idle");
     setTracks([]);
     setBaseImageUrl(null);
+    setOriginalImageUrl(null);
     lastSeqRef.current = 0;
     setCurrentStage("idle");
     setStageDetail(null);
@@ -212,14 +219,31 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     }
   }
 
+  async function refreshOriginalImage(id: string, showAsBase = false) {
+    try {
+      const imageUploads = await listArtifacts(id, { kind: "upload_image", limit: 1 });
+      const original = imageUploads.find((a) => a.kind === "upload_image" || a.label === "upload");
+      if (original?.download_url) {
+        const url = normalizeOverlayUrl(original.download_url);
+        setOriginalImageUrl(url);
+        if (showAsBase) setBaseImageUrl(url);
+      }
+    } catch (error) {
+      if (isApiError(error, 404)) {
+        clearMissingJobSession(id);
+      }
+    }
+  }
+
   async function pollForBaseHeatmap(id: string) {
     const myToken = ++pollTokenRef.current;
     for (let i = 0; i < 60; i++) {
       if (pollTokenRef.current !== myToken) return;
       try {
-        const [overlayArts, baseArts] = await Promise.all([
+        const [overlayArts, baseArts, imageUploads] = await Promise.all([
           listArtifacts(id, { kind: "overlay", limit: 2000 }),
           listArtifacts(id, { kind: "base_heatmap", limit: 1 }),
+          listArtifacts(id, { kind: "upload_image", limit: 1 }),
         ]);
         if (pollTokenRef.current !== myToken) return;
         const overlays = overlayArts
@@ -245,6 +269,12 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
         const base = baseArts.find((a) => a.kind === "base_heatmap" || a.label === "base_heatmap");
         if (base?.download_url) {
           setBaseImageUrl(base.download_url);
+        }
+        const original = imageUploads.find((a) => a.kind === "upload_image" || a.label === "upload");
+        if (original?.download_url) {
+          const url = normalizeOverlayUrl(original.download_url);
+          setOriginalImageUrl(url);
+          if (!base?.download_url) setBaseImageUrl(url);
         }
       } catch (error) {
         if (isApiError(error, 404)) {
@@ -454,6 +484,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     setStatus("creating job…");
     setTracks([]);
     setBaseImageUrl(null);
+    setOriginalImageUrl(null);
     setCurrentStage("init");
     setStageDetail(null);
     setActivity([]);
@@ -487,6 +518,10 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
       addActivity("Direct upload complete");
     }
 
+    if (isImageFile(file)) {
+      await refreshOriginalImage(job.id, true);
+    }
+
     setStatus("starting job…");
     await startJob(job.id);
 
@@ -511,6 +546,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     setStatus("resuming…");
     setTracks([]);
     setBaseImageUrl(null);
+    setOriginalImageUrl(null);
     setCurrentStage("resuming");
     setStageDetail(null);
     setActivity([]);
@@ -554,6 +590,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     setStatus("idle");
     setTracks([]);
     setBaseImageUrl(null);
+    setOriginalImageUrl(null);
     lastSeqRef.current = 0;
     setCurrentStage("idle");
     setStageDetail(null);
@@ -595,6 +632,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     jobId,
     status,
     baseImageUrl,
+    originalImageUrl,
     tracks,
     activity,
     currentStage,
