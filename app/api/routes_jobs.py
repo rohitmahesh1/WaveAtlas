@@ -78,7 +78,7 @@ def _get_artifact_owned(session: Session, job_id: UUID, artifact_id: UUID, owner
 def _get_upload_filename(session: Session, job_id: UUID) -> Optional[str]:
     q = (
         select(Artifact)
-        .where(Artifact.job_id == job_id, Artifact.kind == ArtifactKind.upload_csv)
+        .where(Artifact.job_id == job_id, Artifact.kind.in_((ArtifactKind.upload_csv, ArtifactKind.upload_image)))
         .order_by(Artifact.created_at.desc())
         .limit(1)
     )
@@ -187,15 +187,30 @@ def _artifact_prefix() -> str:
 
 def _gcs_key_for_upload(job_id: UUID, filename: str) -> str:
     safe = filename.strip().replace("\\", "/").split("/")[-1]
-    safe = safe or "upload.csv"
+    safe = safe or "upload"
     pfx = _artifact_prefix()
     if pfx:
         return f"{pfx}/jobs/{job_id}/upload/{safe}"
     return f"jobs/{job_id}/upload/{safe}"
 
 
+def _is_image_upload(*, filename: Optional[str], content_type: Optional[str]) -> bool:
+    ctype = (content_type or "").strip().lower()
+    if ctype.startswith("image/"):
+        return True
+    suffix = Path(filename or "").suffix.lower()
+    return suffix in {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
+
+
+def _upload_artifact_kind(*, filename: Optional[str], content_type: Optional[str]) -> ArtifactKind:
+    return ArtifactKind.upload_image if _is_image_upload(filename=filename, content_type=content_type) else ArtifactKind.upload_csv
+
+
 def _ensure_upload_exists(job_store: JobStore, job_id: UUID) -> None:
-    arts = job_store.list_artifacts(job_id, kind=ArtifactKind.upload_csv, limit=1)
+    arts = [
+        *job_store.list_artifacts(job_id, kind=ArtifactKind.upload_csv, limit=1),
+        *job_store.list_artifacts(job_id, kind=ArtifactKind.upload_image, limit=1),
+    ]
     if not arts:
         raise HTTPException(status_code=400, detail="No upload found for job")
 
@@ -561,16 +576,18 @@ def upload_complete(
     """
     _get_job_owned(session, job_id, owner_session_id)
     store = JobStore(session=session)
+    kind = _upload_artifact_kind(filename=payload.filename or payload.blob_path, content_type=payload.content_type)
 
     art = store.create_artifact(
         job_id=job_id,
-        kind=ArtifactKind.upload_csv,
+        kind=kind,
         blob_path=payload.blob_path,
         label="upload",
-        content_type=payload.content_type or "text/csv",
+        content_type=payload.content_type or ("image/png" if kind == ArtifactKind.upload_image else "text/csv"),
         byte_size=payload.byte_size,
         meta={
             "filename": payload.filename,
+            "input_type": "image" if kind == ArtifactKind.upload_image else "table",
             "uploaded_at": datetime.utcnow().isoformat(),
             "upload_method": "gcs_resumable",
         },
@@ -600,6 +617,7 @@ async def upload_table(
 
     filename = file.filename or "upload.csv"
     content_type = file.content_type or "application/octet-stream"
+    kind = _upload_artifact_kind(filename=filename, content_type=content_type)
 
     with tempfile.NamedTemporaryFile(dir=str(tmp_dir), delete=False) as tf:
         tmp_path = Path(tf.name)
@@ -620,7 +638,7 @@ async def upload_table(
 
         blob_path, stored_size = artifact_store.put_file(
             job_id=job_id,
-            kind=ArtifactKind.upload_csv.value,
+            kind=kind.value,
             filename=filename,
             local_path=str(tmp_path),
             content_type=content_type,
@@ -629,12 +647,17 @@ async def upload_table(
 
         art = store.create_artifact(
             job_id=job_id,
-            kind=ArtifactKind.upload_csv,
+            kind=kind,
             blob_path=blob_path,
             label="upload",
             content_type=content_type,
             byte_size=stored_size,
-            meta={"filename": filename, "uploaded_at": datetime.utcnow().isoformat(), "upload_method": "api_stream"},
+            meta={
+                "filename": filename,
+                "input_type": "image" if kind == ArtifactKind.upload_image else "table",
+                "uploaded_at": datetime.utcnow().isoformat(),
+                "upload_method": "api_stream",
+            },
         )
         return ArtifactRead.model_validate(art)  # type: ignore
     finally:
