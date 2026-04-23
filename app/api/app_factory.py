@@ -12,6 +12,10 @@ def create_app() -> FastAPI:
 
     _add_cors(app)
 
+    @app.get("/health", tags=["health"])
+    def health() -> dict[str, str]:
+        return {"status": "ok"}
+
     app.include_router(api_router)
 
     return app
