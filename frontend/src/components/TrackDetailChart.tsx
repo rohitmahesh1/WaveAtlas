@@ -111,7 +111,7 @@ export function TrackDetailChart({
   const [showFit, setShowFit] = useState<boolean>(false);
   const [showSine, setShowSine] = useState<boolean>(true);
   const [showPeaks, setShowPeaks] = useState<boolean>(true);
-  const [showRegressionWindowOnly, setShowRegressionWindowOnly] = useState<boolean>(false);
+  const [showRegressionWindowOnly, setShowRegressionWindowOnly] = useState<boolean>(true);
   const [selectedPeak, setSelectedPeak] = useState<{ trackIndex: number; peakI: number } | null>(null);
   const [hover, setHover] = useState<{ x: number; y: number; cx: number; cy: number } | null>(null);
   const [baseImg, setBaseImg] = useState<LoadedImageSize | null>(null);
