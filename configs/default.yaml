@@ -15,6 +15,15 @@ heatmap:
   origin: lower
   cmap: hot
 
+image_input:
+  grayscale: true
+  target_width: null
+  target_height: null
+  low_hex: null
+  high_hex: null
+  invert: false
+  alpha_background: "#000000"
+
 detrend:
   degree: 1
   min_samples: 0.5
