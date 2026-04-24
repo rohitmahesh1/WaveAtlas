@@ -59,6 +59,7 @@ export type ArtifactView = {
   label?: string | null;
   download_url: string;
   content_type?: string | null;
+  meta?: { [key: string]: JsonValue } | null;
 };
 
 export type TrackPeakPoint = {
