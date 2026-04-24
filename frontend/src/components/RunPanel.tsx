@@ -2,6 +2,19 @@ export function RunPanel(props: {
   file: File | null;
   onFileChange: (file: File | null) => void;
   onRun: () => void;
+  imageSizing?: {
+    loading: boolean;
+    originalWidth: number | null;
+    originalHeight: number | null;
+    targetWidth: string;
+    targetHeight: string;
+    helperText: string | null;
+    loadError: string | null;
+    validationError: string | null;
+    valid: boolean;
+    onTargetWidthChange: (value: string) => void;
+    onTargetHeightChange: (value: string) => void;
+  } | null;
   jobId: string | null;
   status?: string;
   runName: string;
@@ -22,6 +35,7 @@ export function RunPanel(props: {
     file,
     onFileChange,
     onRun,
+    imageSizing = null,
     jobId,
     status,
     runName,
@@ -38,7 +52,7 @@ export function RunPanel(props: {
     heatmapDownloadDisabled,
     originalImageDownloadDisabled,
   } = props;
-  const canRun = Boolean(file);
+  const canRun = Boolean(file) && (!imageSizing || (!imageSizing.loading && imageSizing.valid));
   const normalizedStatus = String(status ?? "");
   const isCancelled = normalizedStatus === "cancelled";
   const isPausePending = normalizedStatus === "cancel_requested";
@@ -116,6 +130,46 @@ export function RunPanel(props: {
             Upload + Start
           </button>
         </div>
+
+        {imageSizing ? (
+          <div className="image-sizing-card">
+            <div className="image-sizing-header">
+              <div className="image-sizing-title">Image processing size</div>
+              <div className="image-sizing-copy">Set the internal dimensions used before tracking.</div>
+            </div>
+            <div className="image-sizing-grid">
+              <label className="image-sizing-field">
+                Width (px)
+                <input
+                  type="number"
+                  min="1"
+                  inputMode="numeric"
+                  value={imageSizing.targetWidth}
+                  onChange={(e) => imageSizing.onTargetWidthChange(e.target.value)}
+                  disabled={imageSizing.loading}
+                  placeholder={imageSizing.originalWidth ? String(imageSizing.originalWidth) : "e.g. 1024"}
+                />
+              </label>
+              <label className="image-sizing-field">
+                Height (px)
+                <input
+                  type="number"
+                  min="1"
+                  inputMode="numeric"
+                  value={imageSizing.targetHeight}
+                  onChange={(e) => imageSizing.onTargetHeightChange(e.target.value)}
+                  disabled={imageSizing.loading}
+                  placeholder={imageSizing.originalHeight ? String(imageSizing.originalHeight) : "e.g. 768"}
+                />
+              </label>
+            </div>
+            {imageSizing.helperText ? <div className="image-sizing-hint">{imageSizing.helperText}</div> : null}
+            {imageSizing.loadError ? <div className="image-sizing-error">{imageSizing.loadError}</div> : null}
+            {imageSizing.validationError ? (
+              <div className="image-sizing-error">{imageSizing.validationError}</div>
+            ) : null}
+          </div>
+        ) : null}
 
         <div className="meta-grid">
           <div>
