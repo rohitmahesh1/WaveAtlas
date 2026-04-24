@@ -68,6 +68,7 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
     jobId,
     status,
     baseImageUrl,
+    baseImageInfo,
     originalImageUrl,
     tracks,
     activity,
@@ -409,6 +410,7 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
           <div className="canvas-card">
             <OverlayCanvas
               imageUrl={baseImageUrl}
+              coordInfo={baseImageInfo}
               debugImageUrl={debugImageUrl}
               debugOpacity={debugOpacity}
               tracks={filteredTracks}
