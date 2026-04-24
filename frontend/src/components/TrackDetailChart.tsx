@@ -61,7 +61,38 @@ function buildScale(
   return { scale, offX, offY, minX, minY };
 }
 
-function toCanvas(point: ChartPoint, scale: { scale: number; offX: number; offY: number; minX: number; minY: number }) {
+function zoomDomain(min: number, max: number, focus: number, factor: number) {
+  const span = Math.max(1e-6, max - min);
+  const nextSpan = Math.max(1e-3, span / factor);
+  const ratio = (focus - min) / span;
+  const nextMin = focus - nextSpan * ratio;
+  return { min: nextMin, max: nextMin + nextSpan };
+}
+
+function clampDomain(min: number, max: number, boundMin: number, boundMax: number) {
+  const span = max - min;
+  const boundSpan = boundMax - boundMin;
+  if (!Number.isFinite(span) || span >= boundSpan) {
+    return { min: boundMin, max: boundMax };
+  }
+
+  let nextMin = min;
+  let nextMax = max;
+  if (nextMin < boundMin) {
+    nextMin = boundMin;
+    nextMax = boundMin + span;
+  }
+  if (nextMax > boundMax) {
+    nextMax = boundMax;
+    nextMin = boundMax - span;
+  }
+  return { min: nextMin, max: nextMax };
+}
+
+function toCanvas(
+  point: ChartPoint,
+  scale: { scale: number; offX: number; offY: number; minX: number; minY: number }
+) {
   return {
     x: scale.offX + (point.x - scale.minX) * scale.scale,
     y: scale.offY + (point.y - scale.minY) * scale.scale,
@@ -114,6 +145,7 @@ export function TrackDetailChart({
   const [showRegressionWindowOnly, setShowRegressionWindowOnly] = useState<boolean>(true);
   const [selectedPeak, setSelectedPeak] = useState<{ trackIndex: number; peakI: number } | null>(null);
   const [hover, setHover] = useState<{ x: number; y: number; cx: number; cy: number } | null>(null);
+  const dragRef = useRef<{ x: number; y: number; minX: number; maxX: number; minY: number; maxY: number } | null>(null);
   const [baseImg, setBaseImg] = useState<LoadedImageSize | null>(null);
   const [overlayImg, setOverlayImg] = useState<LoadedImageSize | null>(null);
 
@@ -175,9 +207,24 @@ export function TrackDetailChart({
   const safeMaxX = hasValidRange ? maxX : 1;
   const safeMinY = hasValidRange ? minY : 0;
   const safeMaxY = hasValidRange ? maxY : 1;
+  const viewKey = `${detail.track_index}:${safeMinX}:${safeMaxX}:${safeMinY}:${safeMaxY}`;
+  const [viewDomain, setViewDomain] = useState<{
+    key: string;
+    minX: number;
+    maxX: number;
+    minY: number;
+    maxY: number;
+  } | null>(null);
 
-  const spanX = Math.max(1, safeMaxX - safeMinX);
-  const spanY = Math.max(1, safeMaxY - safeMinY);
+  const domain = viewDomain?.key === viewKey ? viewDomain : {
+    minX: safeMinX,
+    maxX: safeMaxX,
+    minY: safeMinY,
+    maxY: safeMaxY,
+  };
+
+  const spanX = Math.max(1, domain.maxX - domain.minX);
+  const spanY = Math.max(1, domain.maxY - domain.minY);
   const pad = 12;
 
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -198,8 +245,8 @@ export function TrackDetailChart({
   }, [spanX, spanY]);
 
   const scale = useMemo(
-    () => buildScale(chartSize.width, chartSize.height, pad, safeMinX, safeMaxX, safeMinY, safeMaxY),
-    [chartSize.width, chartSize.height, pad, safeMinX, safeMaxX, safeMinY, safeMaxY]
+    () => buildScale(chartSize.width, chartSize.height, pad, domain.minX, domain.maxX, domain.minY, domain.maxY),
+    [chartSize.width, chartSize.height, pad, domain.minX, domain.maxX, domain.minY, domain.maxY]
   );
   const effW = spanX * scale.scale;
   const effH = spanY * scale.scale;
@@ -255,6 +302,11 @@ export function TrackDetailChart({
     showBase && baseImageUrl && baseImg?.src === baseImageUrl && baseImg.width > 0 ? baseImg : null;
   const activeOverlayImg =
     showBase && debugImageUrl && overlayImg?.src === debugImageUrl && overlayImg.width > 0 ? overlayImg : null;
+  const isZoomed =
+    Math.abs(domain.minX - safeMinX) > 1e-6 ||
+    Math.abs(domain.maxX - safeMaxX) > 1e-6 ||
+    Math.abs(domain.minY - safeMinY) > 1e-6 ||
+    Math.abs(domain.maxY - safeMaxY) > 1e-6;
 
   const polylines = series.map((s) => ({
     name: s.name,
@@ -352,26 +404,113 @@ export function TrackDetailChart({
         ref={wrapRef}
         className="mini-chart-canvas"
         style={{ height: `${chartSize.height}px` }}
-        onMouseLeave={() => setHover(null)}
+        onMouseLeave={() => {
+          dragRef.current = null;
+          setHover(null);
+        }}
       >
+        <div className="zoom-controls zoom-controls-dark">
+          <button
+            type="button"
+            className="zoom-btn zoom-btn-dark"
+            onClick={() =>
+              setViewDomain((current) => {
+                const base = current ?? { minX: safeMinX, maxX: safeMaxX, minY: safeMinY, maxY: safeMaxY };
+                const centerX = (base.minX + base.maxX) / 2;
+                const centerY = (base.minY + base.maxY) / 2;
+                const nextXDomain = zoomDomain(base.minX, base.maxX, centerX, 1 / 1.25);
+                const nextYDomain = zoomDomain(base.minY, base.maxY, centerY, 1 / 1.25);
+                const nextX = clampDomain(nextXDomain.min, nextXDomain.max, safeMinX, safeMaxX);
+                const nextY = clampDomain(nextYDomain.min, nextYDomain.max, safeMinY, safeMaxY);
+                return { key: viewKey, minX: nextX.min, maxX: nextX.max, minY: nextY.min, maxY: nextY.max };
+              })
+            }
+          >
+            -
+          </button>
+          <button
+            type="button"
+            className="zoom-btn zoom-btn-dark"
+            onClick={() =>
+              setViewDomain((current) => {
+                const base = current ?? { minX: safeMinX, maxX: safeMaxX, minY: safeMinY, maxY: safeMaxY };
+                const centerX = (base.minX + base.maxX) / 2;
+                const centerY = (base.minY + base.maxY) / 2;
+                const nextXDomain = zoomDomain(base.minX, base.maxX, centerX, 1.25);
+                const nextYDomain = zoomDomain(base.minY, base.maxY, centerY, 1.25);
+                const nextX = clampDomain(nextXDomain.min, nextXDomain.max, safeMinX, safeMaxX);
+                const nextY = clampDomain(nextYDomain.min, nextYDomain.max, safeMinY, safeMaxY);
+                return { key: viewKey, minX: nextX.min, maxX: nextX.max, minY: nextY.min, maxY: nextY.max };
+              })
+            }
+          >
+            +
+          </button>
+          <button
+            type="button"
+            className="zoom-btn zoom-btn-dark"
+            onClick={() => setViewDomain(null)}
+            disabled={!isZoomed}
+          >
+            Reset
+          </button>
+        </div>
         <svg
           className="mini-svg"
           viewBox={`0 0 ${chartSize.width} ${chartSize.height}`}
           role="img"
           aria-label="Track detail"
+          style={{ cursor: isZoomed ? "grab" : "crosshair" }}
           onMouseMove={(e) => {
             const rect = (e.currentTarget as SVGSVGElement).getBoundingClientRect();
             const cx = e.clientX - rect.left;
             const cy = e.clientY - rect.top;
             const inX = cx >= scale.offX && cx <= scale.offX + effW;
             const inY = cy >= scale.offY && cy <= scale.offY + effH;
+            if (dragRef.current) {
+              const dx = (e.clientX - dragRef.current.x) / scale.scale;
+              const dy = (e.clientY - dragRef.current.y) / scale.scale;
+              const nextX = clampDomain(
+                dragRef.current.minX - dx,
+                dragRef.current.maxX - dx,
+                safeMinX,
+                safeMaxX
+              );
+              const nextY = clampDomain(
+                dragRef.current.minY - dy,
+                dragRef.current.maxY - dy,
+                safeMinY,
+                safeMaxY
+              );
+              setViewDomain({
+                key: viewKey,
+                minX: nextX.min,
+                maxX: nextX.max,
+                minY: nextY.min,
+                maxY: nextY.max,
+              });
+            }
             if (!inX || !inY) {
               setHover(null);
               return;
             }
-            const x = safeMinX + (cx - scale.offX) / scale.scale;
-            const y = safeMinY + (cy - scale.offY) / scale.scale;
+            const x = domain.minX + (cx - scale.offX) / scale.scale;
+            const y = domain.minY + (cy - scale.offY) / scale.scale;
             setHover({ x, y, cx, cy });
+          }}
+          onMouseDown={(e) => {
+            if (!isZoomed) return;
+            dragRef.current = {
+              x: e.clientX,
+              y: e.clientY,
+              minX: domain.minX,
+              maxX: domain.maxX,
+              minY: domain.minY,
+              maxY: domain.maxY,
+            };
+          }}
+          onMouseUp={() => {
+            dragRef.current = null;
           }}
         >
           <defs>
@@ -383,8 +522,8 @@ export function TrackDetailChart({
           {activeBaseImg ? (
             <image
               href={baseImageUrl ?? ""}
-              x={scale.offX - safeMinX * scale.scale}
-              y={scale.offY - safeMinY * scale.scale}
+              x={scale.offX - domain.minX * scale.scale}
+              y={scale.offY - domain.minY * scale.scale}
               width={activeBaseImg.width * scale.scale}
               height={activeBaseImg.height * scale.scale}
               preserveAspectRatio="none"
@@ -396,8 +535,8 @@ export function TrackDetailChart({
           {activeOverlayImg ? (
             <image
               href={debugImageUrl ?? ""}
-              x={scale.offX - safeMinX * scale.scale}
-              y={scale.offY - safeMinY * scale.scale}
+              x={scale.offX - domain.minX * scale.scale}
+              y={scale.offY - domain.minY * scale.scale}
               width={activeOverlayImg.width * scale.scale}
               height={activeOverlayImg.height * scale.scale}
               preserveAspectRatio="none"
@@ -420,15 +559,15 @@ export function TrackDetailChart({
               {(() => {
                 const maxXTicks = clamp(Math.floor(effW / 80), 2, 6);
                 const maxYTicks = clamp(Math.floor(effH / 60), 2, 6);
-                const xt = niceTicks(safeMinX, safeMaxX, maxXTicks);
-                const yt = niceTicks(safeMinY, safeMaxY, maxYTicks);
+                const xt = niceTicks(domain.minX, domain.maxX, maxXTicks);
+                const yt = niceTicks(domain.minY, domain.maxY, maxYTicks);
                 const xStep = xt.length >= 2 ? Math.abs(xt[1] - xt[0]) : undefined;
                 const yStep = yt.length >= 2 ? Math.abs(yt[1] - yt[0]) : undefined;
 
                 return (
                   <>
                     {xt.map((v) => {
-                      const cx = scale.offX + (v - safeMinX) * scale.scale;
+                      const cx = scale.offX + (v - domain.minX) * scale.scale;
                       return (
                         <g key={`xt-${v}`}>
                           <line
@@ -455,7 +594,7 @@ export function TrackDetailChart({
                     })}
 
                     {yt.map((v) => {
-                      const cy = scale.offY + (v - safeMinY) * scale.scale;
+                      const cy = scale.offY + (v - domain.minY) * scale.scale;
                       return (
                         <g key={`yt-${v}`}>
                           <line
@@ -518,7 +657,7 @@ export function TrackDetailChart({
 
         {hover ? (
           <div className="mini-tooltip" style={{ left: hover.cx + 10, top: hover.cy + 10 }}>
-            x {hover.x.toFixed(1)}, frame {hover.y.toFixed(1)}
+            ({hover.x.toFixed(1)}, {hover.y.toFixed(1)})
           </div>
         ) : null}
       </div>
