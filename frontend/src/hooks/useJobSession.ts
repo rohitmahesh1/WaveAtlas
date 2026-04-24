@@ -28,6 +28,17 @@ type WsMsg =
 
 type UnknownRecord = Record<string, unknown>;
 type OverlayPeak = NonNullable<OverlayTrackEvent["peaks"]>[number];
+type HeatmapCoordInfo = {
+  sourceKind: string | null;
+  sourceRows: number | null;
+  sourceCols: number | null;
+  outputWidth: number | null;
+  outputHeight: number | null;
+  coordOrigin: string | null;
+  pixelMapping: string | null;
+  xLabel: string;
+  yLabel: string;
+};
 
 function asRecord(value: unknown): UnknownRecord | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -61,6 +72,27 @@ function saveSession(jobId: string, lastSeq: number) {
 function isImageFile(file: File) {
   if (file.type.startsWith("image/")) return true;
   return /\.(png|jpe?g|tiff?|bmp|webp)$/i.test(file.name);
+}
+
+function parseHeatmapCoordInfo(meta: unknown): HeatmapCoordInfo | null {
+  const data = asRecord(meta);
+  if (!data) return null;
+  return {
+    sourceKind: typeof data.source_kind === "string" ? data.source_kind : null,
+    sourceRows: finiteNumber(data.source_rows),
+    sourceCols: finiteNumber(data.source_cols),
+    outputWidth: finiteNumber(data.output_width),
+    outputHeight: finiteNumber(data.output_height) ?? finiteNumber(data.nrows),
+    coordOrigin:
+      typeof data.coord_origin === "string"
+        ? data.coord_origin
+        : typeof data.origin === "string"
+          ? data.origin
+          : null,
+    pixelMapping: typeof data.pixel_mapping === "string" ? data.pixel_mapping : null,
+    xLabel: typeof data.coord_x_label === "string" ? data.coord_x_label : "x",
+    yLabel: typeof data.coord_y_label === "string" ? data.coord_y_label : "y",
+  };
 }
 
 function normalizeOverlayTrack(payload: unknown): OverlayTrackEvent | null {
@@ -113,6 +145,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
   const [jobId, setJobId] = useState<string | null>(initialSession?.jobId ?? null);
   const [status, setStatus] = useState<string>(initialSession ? "resuming…" : "idle");
   const [baseImageUrl, setBaseImageUrl] = useState<string | null>(null);
+  const [baseImageInfo, setBaseImageInfo] = useState<HeatmapCoordInfo | null>(null);
   const [originalImageUrl, setOriginalImageUrl] = useState<string | null>(null);
   const [tracks, setTracks] = useState<OverlayTrackEvent[]>([]);
   const [activity, setActivity] = useState<LogEntry[]>([]);
@@ -179,6 +212,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     setStatus("idle");
     setTracks([]);
     setBaseImageUrl(null);
+    setBaseImageInfo(null);
     setOriginalImageUrl(null);
     lastSeqRef.current = 0;
     setCurrentStage("idle");
@@ -226,7 +260,10 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
       if (original?.download_url) {
         const url = normalizeOverlayUrl(original.download_url);
         setOriginalImageUrl(url);
-        if (showAsBase) setBaseImageUrl(url);
+        if (showAsBase) {
+          setBaseImageUrl(url);
+          setBaseImageInfo(null);
+        }
       }
     } catch (error) {
       if (isApiError(error, 404)) {
@@ -269,12 +306,16 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
         const base = baseArts.find((a) => a.kind === "base_heatmap" || a.label === "base_heatmap");
         if (base?.download_url) {
           setBaseImageUrl(base.download_url);
+          setBaseImageInfo(parseHeatmapCoordInfo(base.meta));
         }
         const original = imageUploads.find((a) => a.kind === "upload_image" || a.label === "upload");
         if (original?.download_url) {
           const url = normalizeOverlayUrl(original.download_url);
           setOriginalImageUrl(url);
-          if (!base?.download_url) setBaseImageUrl(url);
+          if (!base?.download_url) {
+            setBaseImageUrl(url);
+            setBaseImageInfo(null);
+          }
         }
       } catch (error) {
         if (isApiError(error, 404)) {
@@ -484,6 +525,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     setStatus("creating job…");
     setTracks([]);
     setBaseImageUrl(null);
+    setBaseImageInfo(null);
     setOriginalImageUrl(null);
     setCurrentStage("init");
     setStageDetail(null);
@@ -632,6 +674,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     jobId,
     status,
     baseImageUrl,
+    baseImageInfo,
     originalImageUrl,
     tracks,
     activity,
