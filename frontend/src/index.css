@@ -380,6 +380,74 @@ body {
   box-shadow: 0 10px 24px rgba(17, 122, 101, 0.18);
 }
 
+.image-sizing-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, #ffffff);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(244, 248, 246, 0.96) 100%);
+}
+
+.image-sizing-header {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.image-sizing-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #1f2a2e;
+}
+
+.image-sizing-copy {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.image-sizing-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.image-sizing-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.image-sizing-field input {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--border) 72%, #ffffff);
+  background: #ffffff;
+  font-size: 13px;
+  color: #1f2a2e;
+}
+
+.image-sizing-field input:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--accent) 60%, #ffffff);
+  box-shadow: 0 0 0 2px rgba(17, 122, 101, 0.14);
+}
+
+.image-sizing-hint {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.image-sizing-error {
+  font-size: 12px;
+  color: #a33f32;
+}
+
 .run-panel .run-actions {
   padding-top: 10px;
   border-top: 1px dashed color-mix(in srgb, var(--border) 75%, #ffffff);
@@ -523,6 +591,12 @@ body {
   color: #1b242a;
   font-weight: 600;
   word-break: break-all;
+}
+
+@media (max-width: 640px) {
+  .image-sizing-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .filter-actions {
