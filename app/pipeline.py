@@ -256,6 +256,7 @@ def run_job(
             )
             if existing:
                 heatmap_png = artifact_store.get_bytes(existing[0].blob_path)
+                heatmap_meta = dict(getattr(existing[0], "meta", {}) or {})
                 set_progress("heatmap_ready", extra={"resume": True})
                 user_log("Using existing heatmap", stage="heatmap_ready")
 
@@ -534,6 +535,7 @@ def run_job(
                 track_index=track_index,
                 track_path=track_path,
                 config=config,
+                heatmap_meta=heatmap_meta,
             )
 
             # print("Processed track #", track_row, " Wave", wave_rows)
