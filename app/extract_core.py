@@ -11,7 +11,7 @@ import numpy as np
 from .signal.detrend import detrend_residual
 from .signal.peaks import detect_peaks, detect_peaks_adaptive, ensure_minimum_peaks
 from .signal.period import estimate_dominant_frequency, frequency_to_period, resolve_positive_frequency
-from .features import build_wave_rows, build_peak_rows
+from .features import build_wave_rows, build_peak_rows, map_heatmap_x, map_heatmap_y
 
 
 # -----------------------------
@@ -212,6 +212,7 @@ def process_track(
     track_index: int,
     track_path: Path,
     config: Dict[str, Any],
+    heatmap_meta: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
     kymo_cfg = (config.get("kymo") or {})
     backend = str(kymo_cfg.get("backend", "onnx")).lower()
@@ -263,6 +264,7 @@ def process_track(
         features_cfg=features_cfg,
         freq_hz=freq_hz if np.isfinite(freq_hz) else None,
         period_frac_for_fit=float(features_cfg.get("fit_window_period_frac", 0.5)),
+        coord_meta=heatmap_meta,
     )
 
     peak_rows = build_peak_rows(
@@ -277,6 +279,7 @@ def process_track(
         features_cfg=features_cfg,
         global_freq_hz=freq_hz if np.isfinite(freq_hz) else None,
         period_frac_for_fit=float(features_cfg.get("fit_window_period_frac", 0.5)),
+        coord_meta=heatmap_meta,
     )
 
     amps = residual[peaks_idx] if len(peaks_idx) else np.array([], dtype=float)
@@ -286,14 +289,16 @@ def process_track(
         "amplitude": float(np.nanmean(amps)) if amps.size else None,
         "frequency": float(freq_hz) if np.isfinite(freq_hz) else None,
         "error": None,
-        "x0": int(position[0]) if position.size else None,
-        "y0": int(frame[0]) if frame.size else None,
+        "x0": int(round(map_heatmap_x(position[0], heatmap_meta))) if position.size else None,
+        "y0": int(round(map_heatmap_y(frame[0], heatmap_meta))) if frame.size else None,
         "metrics": {
             "num_peaks": int(len(peaks_idx)),
             "period": float(period_s) if np.isfinite(period_s) else None,
             "sampling_rate": sampling_rate,
             "track_stem": track_path.stem,
             "sample": _infer_sample(track_path),
+            "coord_origin": (heatmap_meta or {}).get("coord_origin"),
+            "pixel_mapping": (heatmap_meta or {}).get("pixel_mapping"),
         },
         "overlay": {},
     }
