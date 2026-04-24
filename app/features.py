@@ -69,6 +69,39 @@ def _finite_or_none(v: Any) -> Optional[float]:
         return None
 
 
+def _coord_height(coord_meta: Optional[dict]) -> Optional[float]:
+    if not coord_meta:
+        return None
+    for key in ("output_height", "source_rows", "nrows"):
+        value = coord_meta.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            height = float(value)
+        except Exception:
+            continue
+        if np.isfinite(height) and height > 0:
+            return height
+    return None
+
+
+def map_heatmap_x(x: float, coord_meta: Optional[dict] = None) -> float:
+    _ = coord_meta
+    return float(x)
+
+
+def map_heatmap_y(y: float, coord_meta: Optional[dict] = None) -> float:
+    if not np.isfinite(y):
+        return float(y)
+    height = _coord_height(coord_meta)
+    origin = str((coord_meta or {}).get("coord_origin", (coord_meta or {}).get("origin", "upper"))).lower()
+    if height is None:
+        return float(y)
+    if origin == "lower":
+        return float((height - 1.0) - float(y))
+    return float(y)
+
+
 # -----------------------
 # Geometry & descriptors
 # -----------------------
@@ -299,6 +332,7 @@ def build_peak_rows(
     features_cfg: Optional[dict] = None,
     global_freq_hz: float | None = None,
     period_frac_for_fit: float = 0.5,
+    coord_meta: Optional[dict] = None,
 ) -> List[dict]:
     rows: List[dict] = []
     features_cfg = features_cfg or {}
@@ -313,8 +347,10 @@ def build_peak_rows(
     global_fpp = (sampling_rate / float(global_freq_hz)) if (sampling_rate and global_freq_hz and global_freq_hz > 0) else None
 
     for idx_in_list, peak_i in enumerate(p):
-        frame_value = float(frame[peak_i])
-        pos_px = float(position[peak_i])
+        frame_value_img = float(frame[peak_i])
+        pos_px_img = float(position[peak_i])
+        frame_value = map_heatmap_y(frame_value_img, coord_meta)
+        pos_px = map_heatmap_x(pos_px_img, coord_meta)
         amp = float(residual[peak_i])
 
         local_fpp = _local_period_frames_from_peaks(p, idx_in_list, frame)
@@ -387,6 +423,7 @@ def build_wave_rows(
     features_cfg: Optional[dict] = None,
     freq_hz: float | None = None,
     period_frac_for_fit: float = 0.5,
+    coord_meta: Optional[dict] = None,
 ) -> List[dict]:
     features_cfg = features_cfg or {}
     rows: List[dict] = []
@@ -406,8 +443,10 @@ def build_wave_rows(
         prev_i = int(p[k - 1]) if k - 1 >= 0 else None
         next_i = int(p[k + 1]) if k + 1 < p.size else None
 
-        peak_frame = float(frame[peak_i])
-        peak_pos = float(position[peak_i])
+        peak_frame_img = float(frame[peak_i])
+        peak_pos_img = float(position[peak_i])
+        peak_frame = map_heatmap_y(peak_frame_img, coord_meta)
+        peak_pos = map_heatmap_x(peak_pos_img, coord_meta)
         period_est = _local_period_frames_from_peaks(p, k, frame)
         if not (period_est and period_est > 0) and global_fpp and global_fpp > 0:
             period_est = float(global_fpp)
@@ -433,8 +472,11 @@ def build_wave_rows(
         period_s = (period_frames / sampling_rate) if sampling_rate else float("nan")
         freq = (1.0 / period_s) if (np.isfinite(period_s) and period_s > 0) else (float(freq_hz) if (freq_hz and freq_hz > 0) else np.nan)
 
-        pos1 = _interp_position_at_frame(frame, position, frame1)
-        pos2 = _interp_position_at_frame(frame, position, frame2)
+        pos1 = map_heatmap_x(_interp_position_at_frame(frame, position, frame1), coord_meta)
+        pos2 = map_heatmap_x(_interp_position_at_frame(frame, position, frame2), coord_meta)
+
+        frame1_coord = map_heatmap_y(frame1, coord_meta)
+        frame2_coord = map_heatmap_y(frame2, coord_meta)
 
         amp = float(residual[peak_i])
 
@@ -457,6 +499,8 @@ def build_wave_rows(
         xmax = float(np.nanmax(pos_seg)) if pos_seg.size else np.nan
         ymin = float(np.nanmin(frame_seg)) if frame_seg.size else np.nan
         ymax = float(np.nanmax(frame_seg)) if frame_seg.size else np.nan
+        ymin_coord = map_heatmap_y(ymax, coord_meta)
+        ymax_coord = map_heatmap_y(ymin, coord_meta)
 
         bulge = bulge_from_props(peak_i, p, peak_props or {}, sampling_rate)
 
@@ -503,8 +547,8 @@ def build_wave_rows(
             "next_peak_i": int(next_i) if next_i is not None else None,
             "peak_frame_y_axis": peak_frame,
             "peak_position_x_axis": peak_pos,
-            "frame1": frame1,
-            "frame2": frame2,
+            "frame1": frame1_coord,
+            "frame2": frame2_coord,
             "period_frames": period_frames,
             "period_s": period_s,
             "frequency_hz": freq,
@@ -515,7 +559,7 @@ def build_wave_rows(
             "seconds_delta": seconds_delta,
             "velocity_px_per_s": vel,
             "wavelength_px": wavelength,
-            "bbox": {"xmin": xmin, "xmax": xmax, "ymin": ymin, "ymax": ymax},
+            "bbox": {"xmin": xmin, "xmax": xmax, "ymin": min(ymin_coord, ymax_coord), "ymax": max(ymin_coord, ymax_coord)},
             "boundary_extrapolated": boundary_extrapolated,
             "orientation_deg": ang_mean,
             "orientation_std_deg": ang_std,
@@ -527,8 +571,8 @@ def build_wave_rows(
                 "Sample": sample,
                 "Track": maybe_track_id if maybe_track_id is not None else track_stem,
                 "Wave number": int(k + 1),
-                "Frame position 1": frame1,
-                "Frame position 2": frame2,
+                "Frame position 1": frame1_coord,
+                "Frame position 2": frame2_coord,
                 "Period (frames)": period_frames,
                 "Period (s)": period_s,
                 "Frequency (Hz)": freq,
