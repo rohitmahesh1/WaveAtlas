@@ -16,8 +16,10 @@ import { useTrackDetail } from "../hooks/useTrackDetail";
 import { useJobHistory } from "../hooks/useJobHistory";
 import { PastRunsPanel } from "../components/PastRunsPanel";
 import { cancelJob, deleteJob, jobWavesCsvUrl, resumeJob, updateJobName } from "../api";
+import { useImageProcessingPrompt } from "../hooks/useImageProcessingPrompt";
 import { useSharedJobSession } from "../hooks/useSharedJobSession";
 import { downloadCsv, downloadFromUrl, downloadJson } from "../utils/download";
+import { mergeRunConfigWithImageProcessing } from "../utils/imageProcessing";
 
 const NUMERIC_OPS: FilterOp[] = [">", "<", ">=", "<=", "==", "!=", "between"];
 const STRING_OPS: FilterOp[] = ["contains", "==", "!="];
@@ -83,6 +85,12 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
   } = useSharedJobSession();
 
   const { jobs, loading: jobsLoading, error: jobsError, refresh: refreshJobs } = useJobHistory();
+  const {
+    imageSizing,
+    dimensions: imageProcessingDimensions,
+    syncWithFile: syncImageProcessingWithFile,
+    reset: resetImageProcessing,
+  } = useImageProcessingPrompt();
 
   const buildDefaultRunName = (file: File) => {
     const raw = file.name || "run";
@@ -94,6 +102,7 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
 
   const handleFileChange = (nextFile: File | null) => {
     setFile(nextFile);
+    syncImageProcessingWithFile(nextFile);
     if (nextFile && (runNameAuto || !runName.trim())) {
       setRunName(buildDefaultRunName(nextFile));
       setRunNameAuto(true);
@@ -241,9 +250,10 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
               setHoveredTrackId(null);
               setSelectedDebugLabel("none");
               resetTrackDetail();
-              runJob(file, undefined, runName);
+              runJob(file, mergeRunConfigWithImageProcessing({}, imageProcessingDimensions), runName);
               refreshJobs();
             }}
+            imageSizing={imageSizing}
             jobId={jobId}
             status={status}
             runName={runName}
@@ -273,6 +283,7 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
             onNewRun={() => {
               clearSession();
               setFile(null);
+              resetImageProcessing();
               setRunName("");
               setRunNameAuto(true);
               setSelectedTrackId(null);
