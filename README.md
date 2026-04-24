@@ -2,8 +2,6 @@
 
 WaveAtlas is a data analysis and visualization platform for turning kymograph-style research data into quantitative, inspectable wave dynamics. It accepts tabular intensity data or color-mapped image uploads, converts them into analysis-ready heatmaps, runs a KymoButler-inspired ONNX/Python extraction pipeline, and presents the resulting tracks, peaks, regressions, and metrics in an interactive browser viewer.
 
-The goal is not just to run a model. WaveAtlas is built as an end-to-end research instrument: input normalization, model inference, geometric track reconstruction, peak-centered signal analysis, durable artifact storage, live job state, and visual quality control all live in one coherent workflow.
-
 ## What It Does
 
 WaveAtlas converts raw experimental inputs into structured wave data:
@@ -96,8 +94,3 @@ WaveAtlas is designed for a simple production footprint:
 - Google-managed HTTPS and Cloud Run custom domain mappings put the application behind a researcher-friendly domain.
 
 This keeps the operational surface small while preserving a path to scale: long-running or high-throughput processing can move into a dedicated worker later without changing the core data model or frontend contract.
-
-## Why WaveAtlas Matters
-
-Many analysis tools stop at either model inference or static metrics. WaveAtlas connects the full chain: experimental upload, ML-assisted extraction, signal processing, visual verification, structured metrics, and reproducible exports. The result is a platform that can support exploratory research, pipeline tuning, and publication-grade quantitative review from the same interface.
-
