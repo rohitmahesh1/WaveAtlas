@@ -7,12 +7,12 @@ from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+from PIL import Image
 
 # Headless backend for servers/Cloud Run (mirrors the intent of your current module)
 os.environ.setdefault("MPLBACKEND", "Agg")
 import matplotlib  # noqa: E402
 matplotlib.use("Agg", force=True)  # noqa: E402
-import matplotlib.pyplot as plt  # noqa: E402
 
 
 def _is_xlsx_magic(header: bytes) -> bool:
@@ -147,21 +147,34 @@ def table_to_heatmap_bytes(
     nrows, ncols = filtered.shape
     vmax = float(np.max(filtered)) if filtered.size else 1.0
 
-    # Render to PNG bytes
-    buf = io.BytesIO()
-    plt.figure(figsize=(8, 6), dpi=(dpi_val if dpi_val else None))
-    plt.imshow(filtered, cmap=cmap, interpolation="nearest", vmin=0, vmax=vmax, origin=origin)
-    plt.axis("off")
-    plt.savefig(buf, format="png", bbox_inches="tight", pad_inches=0, dpi=(dpi_val if dpi_val else None))
-    plt.close()
-    buf.seek(0)
+    # Render a direct pixel-for-cell PNG so the output image dimensions match
+    # the submitted table dimensions exactly.
+    render = np.flipud(filtered) if origin == "lower" else filtered
+    norm = np.zeros_like(render, dtype=np.float32)
+    if vmax > 0:
+        norm = np.clip(render.astype(np.float32) / float(vmax), 0.0, 1.0)
 
-    png_bytes = buf.read()
+    cmap_fn = matplotlib.colormaps.get_cmap(cmap)
+    rgba = np.asarray(cmap_fn(norm, bytes=True), dtype=np.uint8)
+    out_img = Image.fromarray(rgba, mode="RGBA")
+
+    buf = io.BytesIO()
+    out_img.save(buf, format="PNG")
+    png_bytes = buf.getvalue()
 
     meta: Dict[str, Any] = {
         **load_meta,
         "nrows": int(nrows),
         "ncols": int(ncols),
+        "source_kind": "table",
+        "source_rows": int(nrows),
+        "source_cols": int(ncols),
+        "output_width": int(ncols),
+        "output_height": int(nrows),
+        "pixel_mapping": "table_cell",
+        "coord_origin": origin,
+        "coord_x_label": "col",
+        "coord_y_label": "row",
         "lower": lower,
         "upper": upper,
         "binarize": binarize,
