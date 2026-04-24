@@ -4,8 +4,10 @@ import { stageLabel } from "../utils/format";
 import { API_BASE, jobWavesCsvUrl, resumeJob } from "../api";
 import { RunPanel } from "../components/RunPanel";
 import { ActivityPanel } from "../components/ActivityPanel";
+import { useImageProcessingPrompt } from "../hooks/useImageProcessingPrompt";
 import { useSharedJobSession } from "../hooks/useSharedJobSession";
 import { downloadFromUrl } from "../utils/download";
+import { mergeRunConfigWithImageProcessing } from "../utils/imageProcessing";
 
 const DEFAULT_CONFIG_TEXT = `# Loading config...`;
 
@@ -52,6 +54,12 @@ export default function AdvancedConfigPage() {
   const [validationMessage, setValidationMessage] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const preRef = useRef<HTMLPreElement | null>(null);
+  const {
+    imageSizing,
+    dimensions: imageProcessingDimensions,
+    syncWithFile: syncImageProcessingWithFile,
+    reset: resetImageProcessing,
+  } = useImageProcessingPrompt();
 
   const highlightedHtml = useMemo(() => highlightYaml(configText), [configText]);
 
@@ -80,6 +88,7 @@ export default function AdvancedConfigPage() {
 
   const handleFileChange = (nextFile: File | null) => {
     setFile(nextFile);
+    syncImageProcessingWithFile(nextFile);
     if (nextFile && (runNameAuto || !runName.trim())) {
       setRunName(buildDefaultRunName(nextFile));
       setRunNameAuto(true);
@@ -179,8 +188,13 @@ export default function AdvancedConfigPage() {
                 setValidationMessage("Please submit config before running.");
                 return;
               }
-              runJob(file, configValidatedText.trim(), runName);
+              runJob(
+                file,
+                mergeRunConfigWithImageProcessing(configValidatedText.trim(), imageProcessingDimensions),
+                runName
+              );
             }}
+            imageSizing={imageSizing}
             jobId={jobId}
             status={status}
             runName={runName}
@@ -209,6 +223,7 @@ export default function AdvancedConfigPage() {
             onNewRun={() => {
               clearSession();
               setFile(null);
+              resetImageProcessing();
               setRunName("");
               setRunNameAuto(true);
             }}
