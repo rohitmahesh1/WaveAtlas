@@ -1,5 +1,5 @@
 // src/OverlayCanvas.tsx
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { MouseEvent, PointerEvent } from "react";
 
 export type OverlayTrackEvent = {
@@ -43,12 +43,27 @@ type HoverPoint = {
   y: number;
   px: number;
   py: number;
+  xLabel: string;
+  yLabel: string;
+};
+
+type CoordInfo = {
+  sourceKind?: string | null;
+  sourceRows?: number | null;
+  sourceCols?: number | null;
+  outputWidth?: number | null;
+  outputHeight?: number | null;
+  coordOrigin?: string | null;
+  pixelMapping?: string | null;
+  xLabel?: string;
+  yLabel?: string;
 };
 
 export function OverlayCanvas(props: {
   imageUrl: string | null;
   debugImageUrl?: string | null;
   debugOpacity?: number;
+  coordInfo?: CoordInfo | null;
   tracks: OverlayTrackEvent[];
   overlayColor?: string;
   hideBaseImage?: boolean;
@@ -64,6 +79,7 @@ export function OverlayCanvas(props: {
     imageUrl,
     debugImageUrl = null,
     debugOpacity = 0.5,
+    coordInfo = null,
     tracks,
     overlayColor = "rgba(0,140,90,0.85)",
     hideBaseImage = false,
@@ -77,11 +93,135 @@ export function OverlayCanvas(props: {
   } = props;
 
   const imgRef = useRef<HTMLImageElement | null>(null);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const tooltipRef = useRef<HTMLDivElement | null>(null);
   const hitCacheRef = useRef<HitEntry[] | null>(null);
   const hoverRef = useRef<string | number | null>(null);
   const hoverRaf = useRef<number | null>(null);
+  const dragStartRef = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
   const [hoverPoint, setHoverPoint] = useState<HoverPoint | null>(null);
+  const [tooltipSize, setTooltipSize] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
+  const [imageSize, setImageSize] = useState<{ width: number; height: number } | null>(null);
+  const [stageSize, setStageSize] = useState<{ width: number; height: number }>({ width: 1, height: 1 });
+  const [zoom, setZoom] = useState<number>(1);
+  const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+
+  useEffect(() => {
+    const image = imgRef.current;
+    if (!image) return;
+
+    const update = () => {
+      const width = image.naturalWidth || 0;
+      const height = image.naturalHeight || 0;
+      setImageSize(width > 0 && height > 0 ? { width, height } : null);
+    };
+
+    if (image.complete && image.naturalWidth > 0) {
+      update();
+      return;
+    }
+
+    image.addEventListener("load", update);
+    return () => image.removeEventListener("load", update);
+  }, [imageUrl]);
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport || !imageSize) return;
+
+    const update = () => {
+      const vw = Math.max(1, viewport.clientWidth);
+      const vh = Math.max(1, viewport.clientHeight);
+      setStageSize({
+        // Fill the entire viewer area visually, even when the heatmap aspect
+        // ratio differs from the available canvas size.
+        width: vw,
+        height: vh,
+      });
+    };
+
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(viewport);
+    return () => ro.disconnect();
+  }, [imageSize]);
+
+  useLayoutEffect(() => {
+    const tooltip = tooltipRef.current;
+    if (!tooltip || !hoverPoint) return;
+
+    setTooltipSize({
+      width: tooltip.offsetWidth,
+      height: tooltip.offsetHeight,
+    });
+  }, [hoverPoint]);
+
+  function clampPan(nextPan: { x: number; y: number }, nextZoom: number) {
+    const extraX = Math.max(0, (stageSize.width * nextZoom - stageSize.width) / 2);
+    const extraY = Math.max(0, (stageSize.height * nextZoom - stageSize.height) / 2);
+    return {
+      x: Math.max(-extraX, Math.min(extraX, nextPan.x)),
+      y: Math.max(-extraY, Math.min(extraY, nextPan.y)),
+    };
+  }
+
+  function updateZoom(nextZoom: number, anchor?: { clientX: number; clientY: number }) {
+    const clampedZoom = Math.max(1, Math.min(8, nextZoom));
+    if (!viewportRef.current || !anchor || zoom === clampedZoom) {
+      setZoom(clampedZoom);
+      setPan((current) => clampPan(current, clampedZoom));
+      return;
+    }
+
+    const rect = viewportRef.current.getBoundingClientRect();
+    const anchorX = anchor.clientX - rect.left - rect.width / 2;
+    const anchorY = anchor.clientY - rect.top - rect.height / 2;
+    const ratio = clampedZoom / zoom;
+    setZoom(clampedZoom);
+    setPan((current) =>
+      clampPan(
+        {
+          x: anchorX - (anchorX - current.x) * ratio,
+          y: anchorY - (anchorY - current.y) * ratio,
+        },
+        clampedZoom
+      )
+    );
+  }
+
+  function projectHoverPoint(cx: number, cy: number, w: number, h: number): HoverPoint {
+    const maxX = Math.max(0, w - 1);
+    const maxY = Math.max(0, h - 1);
+    const rawX = Math.max(0, Math.min(maxX, cx));
+    const rawY = Math.max(0, Math.min(maxY, cy));
+
+    const xLabel = coordInfo?.xLabel || "x";
+    const yLabel = coordInfo?.yLabel || "y";
+    if (coordInfo?.sourceKind === "table" && coordInfo?.pixelMapping === "table_cell") {
+      const gridH = Math.max(1, Math.round(coordInfo.outputHeight || coordInfo.sourceRows || h));
+      const topRow = Math.max(0, Math.min(gridH - 1, Math.floor(rawY)));
+      const row =
+        String(coordInfo.coordOrigin || "").toLowerCase() === "lower" ? gridH - 1 - topRow : topRow;
+      return {
+        x: Math.max(0, Math.floor(rawX)),
+        y: row,
+        px: 0,
+        py: 0,
+        xLabel,
+        yLabel,
+      };
+    }
+
+    return {
+      x: Math.max(0, Math.floor(rawX)),
+      y: Math.max(0, Math.floor(rawY)),
+      px: 0,
+      py: 0,
+      xLabel,
+      yLabel,
+    };
+  }
 
   // Draw whenever tracks change, transform changes, or image loads
   useEffect(() => {
@@ -248,6 +388,20 @@ export function OverlayCanvas(props: {
   const handlePointerMove = (ev: PointerEvent<HTMLCanvasElement>) => {
     if (hoverRaf.current) cancelAnimationFrame(hoverRaf.current);
     hoverRaf.current = requestAnimationFrame(() => {
+      if (dragStartRef.current) {
+        const dx = ev.clientX - dragStartRef.current.x;
+        const dy = ev.clientY - dragStartRef.current.y;
+        setPan(
+          clampPan(
+            {
+              x: dragStartRef.current.panX + dx,
+              y: dragStartRef.current.panY + dy,
+            },
+            zoom
+          )
+        );
+      }
+
       const canvas = canvasRef.current;
       if (!canvas) return;
       const rect = canvas.getBoundingClientRect();
@@ -268,9 +422,9 @@ export function OverlayCanvas(props: {
 
       const w = canvas.width || 1;
       const h = canvas.height || 1;
+      const projected = projectHoverPoint(cx, cy, w, h);
       const nextPoint = {
-        x: Math.max(0, Math.min(w, cx)),
-        y: Math.max(0, Math.min(h, cy)),
+        ...projected,
         px: Math.max(0, Math.min(rect.width, localX)),
         py: Math.max(0, Math.min(rect.height, localY)),
       };
@@ -283,7 +437,26 @@ export function OverlayCanvas(props: {
       hoverRef.current = null;
       onHoverTrack(null);
     }
+    dragStartRef.current = null;
     setHoverPoint(null);
+  };
+
+  const handlePointerDown = (ev: PointerEvent<HTMLCanvasElement>) => {
+    if (zoom <= 1) return;
+    dragStartRef.current = {
+      x: ev.clientX,
+      y: ev.clientY,
+      panX: pan.x,
+      panY: pan.y,
+    };
+    ev.currentTarget.setPointerCapture(ev.pointerId);
+  };
+
+  const handlePointerUp = (ev: PointerEvent<HTMLCanvasElement>) => {
+    dragStartRef.current = null;
+    if (ev.currentTarget.hasPointerCapture(ev.pointerId)) {
+      ev.currentTarget.releasePointerCapture(ev.pointerId);
+    }
   };
 
   const handleClick = (ev: MouseEvent<HTMLCanvasElement>) => {
@@ -299,7 +472,27 @@ export function OverlayCanvas(props: {
     onClickTrack(hit);
   };
 
-  const imgTransform = "none";
+  const stageTransform = `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`;
+  const tooltipOffset = 12;
+  const tooltipMargin = 8;
+  const tooltipLeft = hoverPoint
+    ? Math.max(
+        tooltipMargin,
+        Math.min(
+          stageSize.width - tooltipSize.width - tooltipMargin,
+          hoverPoint.px + tooltipOffset
+        )
+      )
+    : 0;
+  const tooltipTop = hoverPoint
+    ? Math.max(
+        tooltipMargin,
+        Math.min(
+          stageSize.height - tooltipSize.height - tooltipMargin,
+          hoverPoint.py + tooltipOffset
+        )
+      )
+    : 0;
 
   return (
     <div
@@ -310,63 +503,112 @@ export function OverlayCanvas(props: {
       }}
     >
       {imageUrl ? (
-        <>
-          <img
-            ref={imgRef}
-            src={imageUrl}
-            alt="base heatmap"
+        <div
+          ref={viewportRef}
+          className="zoom-viewport"
+          style={{
+            position: "relative",
+            width: "100%",
+            height: "clamp(280px, 72vh, 720px)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <div className="zoom-controls">
+            <button type="button" className="zoom-btn" onClick={() => updateZoom(zoom / 1.25)}>
+              -
+            </button>
+            <span className="zoom-readout">{Math.round(zoom * 100)}%</span>
+            <button type="button" className="zoom-btn" onClick={() => updateZoom(zoom * 1.25)}>
+              +
+            </button>
+            <button
+              type="button"
+              className="zoom-btn"
+              onClick={() => {
+                setZoom(1);
+                setPan({ x: 0, y: 0 });
+              }}
+              disabled={zoom === 1 && pan.x === 0 && pan.y === 0}
+            >
+              Reset
+            </button>
+          </div>
+          <div
             style={{
-              width: "100%",
-              height: "auto",
-              display: "block",
-              opacity: hideBaseImage ? 0 : 1,
-              transform: imgTransform,
-              transformOrigin: "center",
+              position: "relative",
+              width: `${stageSize.width}px`,
+              height: `${stageSize.height}px`,
+              maxWidth: "100%",
+              maxHeight: "100%",
+              overflow: "hidden",
             }}
-          />
-          {debugImageUrl ? (
-            <img
-              src={debugImageUrl}
-              alt="debug overlay"
+          >
+            <div
               style={{
                 position: "absolute",
                 inset: 0,
-                width: "100%",
-                height: "100%",
-                objectFit: "contain",
-                opacity: debugOpacity,
-                transform: imgTransform,
+                transform: stageTransform,
                 transformOrigin: "center",
-                pointerEvents: "none",
-              }}
-            />
-          ) : null}
-          <canvas
-            ref={canvasRef}
-            style={{
-              position: "absolute",
-              inset: 0,
-              width: "100%",
-              height: "100%",
-              pointerEvents: "auto",
-              cursor: hideTracks ? "default" : "crosshair",
-            }}
-            onPointerMove={handlePointerMove}
-            onPointerLeave={handlePointerLeave}
-            onClick={handleClick}
-          />
-          {hoverPoint ? (
-            <div
-              className="coord-tooltip"
-              style={{
-                left: hoverPoint.px + 12,
-                top: hoverPoint.py + 12,
               }}
             >
-              x {Math.round(hoverPoint.x)}, y {Math.round(hoverPoint.y)}
+              <img
+                ref={imgRef}
+                src={imageUrl}
+                alt="base heatmap"
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  display: "block",
+                  opacity: hideBaseImage ? 0 : 1,
+                }}
+              />
+              {debugImageUrl ? (
+                <img
+                  src={debugImageUrl}
+                  alt="debug overlay"
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    width: "100%",
+                    height: "100%",
+                    opacity: debugOpacity,
+                    pointerEvents: "none",
+                  }}
+                />
+              ) : null}
+              <canvas
+                ref={canvasRef}
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  width: "100%",
+                  height: "100%",
+                  pointerEvents: "auto",
+                  cursor: zoom > 1 ? "grab" : hideTracks ? "default" : "crosshair",
+                }}
+                onPointerMove={handlePointerMove}
+                onPointerLeave={handlePointerLeave}
+                onPointerDown={handlePointerDown}
+                onPointerUp={handlePointerUp}
+                onClick={handleClick}
+              />
             </div>
-          ) : null}
-        </>
+            {hoverPoint ? (
+              <div
+                ref={tooltipRef}
+                className="coord-tooltip"
+                style={{
+                  left: tooltipLeft,
+                  top: tooltipTop,
+                }}
+              >
+                ({hoverPoint.x}, {hoverPoint.y})
+              </div>
+            ) : null}
+          </div>
+        </div>
       ) : (
         <div className="canvas-empty">Waiting for base heatmap…</div>
       )}
