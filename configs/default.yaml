@@ -139,6 +139,19 @@ kymo:
       max_gap_rows: 11
       max_dx: 5
       prob_bridge_min: 0.12
+      endpoint_link:
+        enabled: true
+        max_gap_rows: 35
+        max_dx: 6.0
+        min_bridge_prob: 0.10
+        max_slope_delta: 0.45
+        fit_rows: 12
+        max_conflict_fraction: 0.15
+        insert_bridge_points: true
+        overlap_enabled: true
+        min_overlap_rows: 5
+        max_overlap_rows: 45
+        overlap_dx_tol: 3.0
       dedupe:
         enabled: true
         min_rows: 30
@@ -148,6 +161,11 @@ kymo:
 
     debug:
       save_debug_images: true
+      save_overlay_tracks: true
 
   wolfram:
     scripts_dir: kymobutler_scripts
+    executable: wolframscript
+    script_name: Run_Kymobutler.wls
+    min_length: 30
+    verbose: false
