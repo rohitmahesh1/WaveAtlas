@@ -19,6 +19,7 @@ frontend/dist-ssr/
 frontend/.env
 frontend/.env.*
 !frontend/.env.example
+deploy.md
 
 # Local runtime state
 data/
