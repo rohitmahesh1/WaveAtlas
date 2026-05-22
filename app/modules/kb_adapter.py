@@ -149,6 +149,35 @@ def _mean_dx_on_overlap(a_pts: List[Tuple[int, int]], b_pts: List[Tuple[int, int
     return float(np.mean(diffs)) if diffs else 1e9
 
 
+def _dedupe_row_index(pts: List[Tuple[int, int]]) -> Tuple[set[int], Dict[int, int]]:
+    from collections import defaultdict
+
+    by_row = defaultdict(list)
+    for y, x in pts:
+        by_row[y].append(x)
+
+    row_x: Dict[int, int] = {}
+    for y, xs in by_row.items():
+        median_x = np.median(xs)
+        row_x[y] = min(xs, key=lambda v: abs(v - median_x))
+    return set(by_row.keys()), row_x
+
+
+def _row_overlap_index(a_rows: set[int], b_rows: set[int]) -> float:
+    if not a_rows or not b_rows:
+        return 0.0
+    inter = len(a_rows & b_rows)
+    return inter / float(min(len(a_rows), len(b_rows)))
+
+
+def _mean_dx_on_overlap_index(a_row_x: Dict[int, int], b_row_x: Dict[int, int]) -> float:
+    ys = sorted(set(a_row_x) & set(b_row_x))
+    if not ys:
+        return 1e9
+    diffs = [abs(a_row_x[y] - b_row_x[y]) for y in ys]
+    return float(np.mean(diffs)) if diffs else 1e9
+
+
 def filter_and_dedupe_tracks(
     tracks: List[Track],
     prob: np.ndarray,
@@ -166,19 +195,23 @@ def filter_and_dedupe_tracks(
         score = _track_score(prob, t)
         if score < min_score:
             continue
-        enriched.append((t, pts, score, len(pts)))
+        row_set, row_x = _dedupe_row_index(pts)
+        enriched.append((t, pts, score, len(pts), row_set, row_x))
 
     enriched.sort(key=lambda z: (z[2], z[3]), reverse=True)
 
     kept = []
-    for t, pts, score, ln in enriched:
+    for t, pts, score, ln, row_set, row_x in enriched:
         dup = False
-        for kt, kpts, kscore, kln in kept:
-            if _row_overlap(pts, kpts) >= overlap_iou and _mean_dx_on_overlap(pts, kpts) <= dx_tol:
+        for kt, kpts, kscore, kln, krow_set, krow_x in kept:
+            if (
+                _row_overlap_index(row_set, krow_set) >= overlap_iou
+                and _mean_dx_on_overlap_index(row_x, krow_x) <= dx_tol
+            ):
                 dup = True
                 break
         if not dup:
-            kept.append((t, pts, score, ln))
+            kept.append((t, pts, score, ln, row_set, row_x))
 
     return [z[0] for z in kept]
 
@@ -424,6 +457,362 @@ def refine_tracks(
     return [type(t)(points=enforce_one_point_per_row(t.points), id=t.id) for t in merged]
 
 
+def _track_slope(points: List[Tuple[int, int]], *, head: bool, fit_rows: int) -> float:
+    if len(points) < 2:
+        return 0.0
+    pts = points[:fit_rows] if head else points[-fit_rows:]
+    if len(pts) < 2:
+        return 0.0
+
+    ys = np.asarray([p[0] for p in pts], dtype=np.float64)
+    xs = np.asarray([p[1] for p in pts], dtype=np.float64)
+    y0 = ys - float(ys.mean())
+    denom = float(np.dot(y0, y0))
+    if denom <= 1e-9:
+        return 0.0
+    return float(np.dot(y0, xs - float(xs.mean())) / denom)
+
+
+def _row_line_points(y0: int, x0: int, y1: int, x1: int, *, include_ends: bool) -> List[Tuple[int, int]]:
+    if y1 < y0:
+        return []
+    if y1 == y0:
+        return [(int(y0), int(round(0.5 * (x0 + x1))))] if include_ends else []
+
+    start = y0 if include_ends else y0 + 1
+    stop = y1 + 1 if include_ends else y1
+    pts: List[Tuple[int, int]] = []
+    for y in range(int(start), int(stop)):
+        frac = float(y - y0) / float(y1 - y0)
+        x = int(round(float(x0) + frac * float(x1 - x0)))
+        pts.append((int(y), x))
+    return pts
+
+
+def _mean_prob_at_points(prob: np.ndarray, points: List[Tuple[int, int]]) -> float:
+    if not points:
+        return 1.0
+    h, w = prob.shape
+    vals = [
+        float(prob[y, min(w - 1, max(0, x))])
+        for y, x in points
+        if 0 <= y < h
+    ]
+    return float(np.mean(vals)) if vals else 0.0
+
+
+def _track_row_x(points: List[Tuple[int, int]]) -> Dict[int, int]:
+    return _dedupe_row_index(points)[1]
+
+
+def _consensus_overlap_points(
+    prob: np.ndarray,
+    a_row_x: Dict[int, int],
+    b_row_x: Dict[int, int],
+    rows: List[int],
+) -> List[Tuple[int, int]]:
+    h, w = prob.shape
+    out: List[Tuple[int, int]] = []
+    for y in rows:
+        ax = int(a_row_x[y])
+        bx = int(b_row_x[y])
+        if 0 <= y < h:
+            ap = float(prob[y, min(w - 1, max(0, ax))])
+            bp = float(prob[y, min(w - 1, max(0, bx))])
+        else:
+            ap = bp = 0.0
+
+        if ap + bp > 1e-9:
+            x = int(round((float(ax) * ap + float(bx) * bp) / (ap + bp)))
+        else:
+            x = int(round(0.5 * (float(ax) + float(bx))))
+        out.append((int(y), x))
+    return out
+
+
+def _build_owner_index(tracks: List[Track]) -> Dict[Tuple[int, int], set[int]]:
+    owners: Dict[Tuple[int, int], set[int]] = {}
+    for idx, t in enumerate(tracks):
+        for y, x in t.points:
+            owners.setdefault((int(y), int(x)), set()).add(idx)
+    return owners
+
+
+def _bridge_conflict_fraction(
+    bridge_points: List[Tuple[int, int]],
+    owners: Dict[Tuple[int, int], set[int]],
+    *,
+    source_idx: int,
+    target_idx: int,
+    shape: Tuple[int, int],
+    radius: int = 1,
+) -> float:
+    if not bridge_points:
+        return 0.0
+
+    h, w = shape
+    conflicts = 0
+    allowed = {int(source_idx), int(target_idx)}
+    for y, x in bridge_points:
+        found = False
+        for yy in range(max(0, y - radius), min(h, y + radius + 1)):
+            for xx in range(max(0, x - radius), min(w, x + radius + 1)):
+                pix_owners = owners.get((int(yy), int(xx)))
+                if pix_owners and (pix_owners - allowed):
+                    found = True
+                    break
+            if found:
+                break
+        if found:
+            conflicts += 1
+
+    return float(conflicts) / float(len(bridge_points))
+
+
+def link_track_endpoints(
+    tracks: List[Track],
+    prob: np.ndarray,
+    *,
+    max_gap_rows: int = 35,
+    max_dx: float = 6.0,
+    min_bridge_prob: float = 0.10,
+    max_slope_delta: float = 0.45,
+    fit_rows: int = 12,
+    max_conflict_fraction: float = 0.15,
+    insert_bridge_points: bool = True,
+    overlap_enabled: bool = True,
+    min_overlap_rows: int = 5,
+    max_overlap_rows: int = 45,
+    overlap_dx_tol: float = 3.0,
+) -> Tuple[List[Track], Dict[str, object]]:
+    if not tracks:
+        return [], {
+            "input_tracks": 0,
+            "candidate_links": 0,
+            "candidate_gap_links": 0,
+            "candidate_overlap_links": 0,
+            "accepted_links": 0,
+            "accepted_gap_links": 0,
+            "accepted_overlap_links": 0,
+            "output_tracks": 0,
+        }
+
+    norm_tracks = [
+        type(t)(points=enforce_one_point_per_row(sorted(t.points, key=lambda p: (p[0], p[1]))), id=t.id)
+        for t in tracks
+        if t.points
+    ]
+    if not norm_tracks:
+        return [], {
+            "input_tracks": len(tracks),
+            "candidate_links": 0,
+            "candidate_gap_links": 0,
+            "candidate_overlap_links": 0,
+            "accepted_links": 0,
+            "accepted_gap_links": 0,
+            "accepted_overlap_links": 0,
+            "output_tracks": 0,
+        }
+
+    starts_by_row: Dict[int, List[int]] = {}
+    starts: List[Tuple[int, int]] = []
+    ends: List[Tuple[int, int]] = []
+    row_xs: List[Dict[int, int]] = []
+    head_slopes: List[float] = []
+    tail_slopes: List[float] = []
+    for idx, t in enumerate(norm_tracks):
+        starts.append(t.points[0])
+        ends.append(t.points[-1])
+        starts_by_row.setdefault(int(t.points[0][0]), []).append(idx)
+        row_xs.append(_track_row_x(t.points))
+        head_slopes.append(_track_slope(t.points, head=True, fit_rows=int(fit_rows)))
+        tail_slopes.append(_track_slope(t.points, head=False, fit_rows=int(fit_rows)))
+
+    owners = _build_owner_index(norm_tracks)
+    candidates: List[Tuple[float, int, int, str, List[Tuple[int, int]], Optional[int], Optional[int]]] = []
+    max_gap = max(0, int(max_gap_rows))
+    max_dx_f = max(0.0, float(max_dx))
+    max_slope_delta_f = max(0.0, float(max_slope_delta))
+    min_overlap = max(1, int(min_overlap_rows))
+    max_overlap = max(min_overlap, int(max_overlap_rows))
+    overlap_dx_tol_f = max(0.0, float(overlap_dx_tol))
+    candidate_gap_links = 0
+    candidate_overlap_links = 0
+
+    for i, (ey, ex) in enumerate(ends):
+        for gap in range(1, max_gap + 1):
+            for j in starts_by_row.get(int(ey) + gap, []):
+                if i == j:
+                    continue
+
+                sy, sx = starts[j]
+                tail_slope = tail_slopes[i]
+                head_slope = head_slopes[j]
+                slope_delta = abs(tail_slope - head_slope)
+                if slope_delta > max_slope_delta_f:
+                    continue
+
+                pred_head_x = float(ex) + tail_slope * float(gap)
+                pred_tail_x = float(sx) - head_slope * float(gap)
+                projected_dx = max(abs(float(sx) - pred_head_x), abs(float(ex) - pred_tail_x))
+                if projected_dx > max_dx_f:
+                    continue
+
+                score_line = _row_line_points(int(ey), int(ex), int(sy), int(sx), include_ends=True)
+                bridge_prob = _mean_prob_at_points(prob, score_line)
+                if bridge_prob < float(min_bridge_prob):
+                    continue
+
+                bridge_points = _row_line_points(int(ey), int(ex), int(sy), int(sx), include_ends=False)
+                conflict_fraction = _bridge_conflict_fraction(
+                    bridge_points,
+                    owners,
+                    source_idx=i,
+                    target_idx=j,
+                    shape=prob.shape,
+                )
+                if conflict_fraction > float(max_conflict_fraction):
+                    continue
+
+                score = (
+                    bridge_prob
+                    - 0.25 * (projected_dx / max(max_dx_f, 1e-6))
+                    - 0.15 * (slope_delta / max(max_slope_delta_f, 1e-6))
+                    - 0.10 * (float(gap) / max(float(max_gap), 1.0))
+                    - 0.50 * conflict_fraction
+                )
+                candidates.append((float(score), i, j, "gap", bridge_points, None, None))
+                candidate_gap_links += 1
+
+        if not overlap_enabled:
+            continue
+
+        iy0 = int(starts[i][0])
+        for overlap_start_y in range(max(iy0 + 1, int(ey) - max_overlap + 1), int(ey) + 1):
+            for j in starts_by_row.get(overlap_start_y, []):
+                if i == j:
+                    continue
+
+                jy0, _ = starts[j]
+                jy1, _ = ends[j]
+                if int(jy0) <= iy0 or int(jy1) <= int(ey):
+                    continue
+
+                rows = sorted(y for y in set(row_xs[i]) & set(row_xs[j]) if int(jy0) <= y <= int(ey))
+                if len(rows) < min_overlap or len(rows) > max_overlap:
+                    continue
+
+                diffs = [abs(row_xs[i][y] - row_xs[j][y]) for y in rows]
+                mean_dx = float(np.mean(diffs)) if diffs else 1e9
+                max_row_dx = float(max(diffs)) if diffs else 1e9
+                if mean_dx > overlap_dx_tol_f or max_row_dx > 2.0 * overlap_dx_tol_f:
+                    continue
+
+                tail_slope = tail_slopes[i]
+                head_slope = head_slopes[j]
+                slope_delta = abs(tail_slope - head_slope)
+                if slope_delta > max_slope_delta_f:
+                    continue
+
+                consensus_points = _consensus_overlap_points(prob, row_xs[i], row_xs[j], rows)
+                overlap_prob = _mean_prob_at_points(prob, consensus_points)
+                if overlap_prob < float(min_bridge_prob):
+                    continue
+
+                conflict_fraction = _bridge_conflict_fraction(
+                    consensus_points,
+                    owners,
+                    source_idx=i,
+                    target_idx=j,
+                    shape=prob.shape,
+                )
+                if conflict_fraction > float(max_conflict_fraction):
+                    continue
+
+                score = (
+                    overlap_prob
+                    + 0.20 * (float(len(rows)) / max(float(max_overlap), 1.0))
+                    - 0.25 * (mean_dx / max(overlap_dx_tol_f, 1e-6))
+                    - 0.15 * (slope_delta / max(max_slope_delta_f, 1e-6))
+                    - 0.50 * conflict_fraction
+                )
+                candidates.append((float(score), i, j, "overlap", consensus_points, int(rows[0]), int(rows[-1])))
+                candidate_overlap_links += 1
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    linked_from: Dict[int, int] = {}
+    linked_to: Dict[int, int] = {}
+    links: Dict[Tuple[int, int], Tuple[str, List[Tuple[int, int]], Optional[int], Optional[int]]] = {}
+    accepted_gap_links = 0
+    accepted_overlap_links = 0
+    for _, i, j, kind, connector_points, overlap_start, overlap_end in candidates:
+        if i in linked_from or j in linked_to:
+            continue
+        linked_from[i] = j
+        linked_to[j] = i
+        links[(i, j)] = (kind, connector_points, overlap_start, overlap_end)
+        if kind == "overlap":
+            accepted_overlap_links += 1
+        else:
+            accepted_gap_links += 1
+
+    out: List[Track] = []
+    seen: set[int] = set()
+    chain_starts = [idx for idx in range(len(norm_tracks)) if idx not in linked_to]
+    chain_starts.sort(key=lambda idx: (norm_tracks[idx].points[0][0], norm_tracks[idx].points[0][1]))
+
+    for start_idx in chain_starts:
+        if start_idx in seen:
+            continue
+        chain_points: List[Tuple[int, int]] = []
+        cur = start_idx
+        skip_until_y: Optional[int] = None
+        while cur not in seen:
+            seen.add(cur)
+            cur_points = norm_tracks[cur].points
+            if skip_until_y is not None:
+                cur_points = [p for p in cur_points if int(p[0]) > int(skip_until_y)]
+
+            if chain_points and cur_points and chain_points[-1] == cur_points[0]:
+                chain_points.extend(cur_points[1:])
+            else:
+                chain_points.extend(cur_points)
+
+            nxt = linked_from.get(cur)
+            if nxt is None:
+                break
+            kind, connector_points, overlap_start, overlap_end = links.get((cur, nxt), ("gap", [], None, None))
+            skip_until_y = None
+            if kind == "overlap" and overlap_start is not None and overlap_end is not None:
+                chain_points = [
+                    p for p in chain_points
+                    if not (int(overlap_start) <= int(p[0]) <= int(overlap_end))
+                ]
+                chain_points.extend(connector_points)
+                skip_until_y = int(overlap_end)
+            elif insert_bridge_points:
+                chain_points.extend(connector_points)
+            cur = nxt
+
+        out.append(type(norm_tracks[start_idx])(points=enforce_one_point_per_row(chain_points), id=norm_tracks[start_idx].id))
+
+    for idx, t in enumerate(norm_tracks):
+        if idx not in seen:
+            out.append(t)
+
+    out.sort(key=lambda t: (t.points[0][0], t.points[0][1]) if t.points else (0, 0))
+    return out, {
+        "input_tracks": len(tracks),
+        "candidate_links": len(candidates),
+        "candidate_gap_links": candidate_gap_links,
+        "candidate_overlap_links": candidate_overlap_links,
+        "accepted_links": len(linked_from),
+        "accepted_gap_links": accepted_gap_links,
+        "accepted_overlap_links": accepted_overlap_links,
+        "output_tracks": len(out),
+    }
+
+
 # ---------------------------
 # Geometry + IO
 # ---------------------------
@@ -514,6 +903,18 @@ def run_kymobutler(
     max_gap_rows: int = 13,
     max_dx: int = 6,
     prob_bridge_min: float = 0.11,
+    endpoint_link_enable: bool = False,
+    endpoint_link_max_gap_rows: int = 35,
+    endpoint_link_max_dx: float = 6.0,
+    endpoint_link_min_bridge_prob: float = 0.10,
+    endpoint_link_max_slope_delta: float = 0.45,
+    endpoint_link_fit_rows: int = 12,
+    endpoint_link_max_conflict_fraction: float = 0.15,
+    endpoint_link_insert_bridge_points: bool = True,
+    endpoint_link_overlap_enabled: bool = True,
+    endpoint_link_min_overlap_rows: int = 5,
+    endpoint_link_max_overlap_rows: int = 45,
+    endpoint_link_overlap_dx_tol: float = 3.0,
     dedupe_enable: bool = True,
     dedupe_min_rows: Optional[int] = None,
     dedupe_min_score: float = 0.11,
@@ -698,6 +1099,26 @@ def run_kymobutler(
             prob_bridge_min=float(prob_bridge_min),
         )
 
+    endpoint_link_stats: Dict[str, object] = {}
+    if endpoint_link_enable and tracks_seg:
+        _progress("endpoint_linking", before_tracks=len(tracks_seg))
+        tracks_seg, endpoint_link_stats = link_track_endpoints(
+            tracks_seg,
+            prob,
+            max_gap_rows=int(endpoint_link_max_gap_rows),
+            max_dx=float(endpoint_link_max_dx),
+            min_bridge_prob=float(endpoint_link_min_bridge_prob),
+            max_slope_delta=float(endpoint_link_max_slope_delta),
+            fit_rows=int(endpoint_link_fit_rows),
+            max_conflict_fraction=float(endpoint_link_max_conflict_fraction),
+            insert_bridge_points=bool(endpoint_link_insert_bridge_points),
+            overlap_enabled=bool(endpoint_link_overlap_enabled),
+            min_overlap_rows=int(endpoint_link_min_overlap_rows),
+            max_overlap_rows=int(endpoint_link_max_overlap_rows),
+            overlap_dx_tol=float(endpoint_link_overlap_dx_tol),
+        )
+        _progress("endpoint_linking_done", **endpoint_link_stats)
+
     if dedupe_enable and tracks_seg:
         _progress("deduping")
         tracks_seg = filter_and_dedupe_tracks(
@@ -708,6 +1129,20 @@ def run_kymobutler(
             overlap_iou=float(dedupe_overlap_iou),
             dx_tol=float(dedupe_dx_tol),
         )
+
+    if debug_save_images and endpoint_link_stats:
+        with open(dbg_dir / "stats.txt", "a") as f:
+            f.write(
+                "endpoint_link "
+                f"input_tracks={endpoint_link_stats.get('input_tracks', 0)} "
+                f"candidate_links={endpoint_link_stats.get('candidate_links', 0)} "
+                f"candidate_gap_links={endpoint_link_stats.get('candidate_gap_links', 0)} "
+                f"candidate_overlap_links={endpoint_link_stats.get('candidate_overlap_links', 0)} "
+                f"accepted_links={endpoint_link_stats.get('accepted_links', 0)} "
+                f"accepted_gap_links={endpoint_link_stats.get('accepted_gap_links', 0)} "
+                f"accepted_overlap_links={endpoint_link_stats.get('accepted_overlap_links', 0)} "
+                f"output_tracks={endpoint_link_stats.get('output_tracks', 0)}\n"
+            )
 
     _progress("scaling")
     tracks = _scale_tracks_to_original(tracks_seg, seg_hw=prob.shape, orig_hw=(h0, w0))
