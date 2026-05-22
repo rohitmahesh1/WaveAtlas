@@ -106,14 +106,22 @@ class WolframKymoRunner:
         base_dir.mkdir(parents=True, exist_ok=True)
 
         kymo_cfg = (self.config.get("kymo") or {})
-        min_length = int(kymo_cfg.get("min_length", 30))
-        verbose = bool(kymo_cfg.get("verbose", False))
+        wolfram_cfg = (kymo_cfg.get("wolfram") or {})
+        min_length = int(wolfram_cfg.get("min_length", kymo_cfg.get("min_length", 30)))
+        verbose = bool(wolfram_cfg.get("verbose", kymo_cfg.get("verbose", False)))
+        scripts_dir = wolfram_cfg.get("scripts_dir", None)
+        executable = str(wolfram_cfg.get("executable", "wolframscript"))
+        script_name = str(wolfram_cfg.get("script_name", "Run_Kymobutler.wls"))
 
         run_kymo(
             str(heatmap_path),
             output_dir=str(base_dir),
+            scripts_dir=scripts_dir,
+            executable=executable,
+            script_name=script_name,
             min_length=min_length,
             verbose=verbose,
+            progress_cb=progress_cb,
         )
 
         track_paths = _discover_tracks(base_dir)
@@ -155,6 +163,7 @@ def _flatten_onnx_cfg_for_runner(onnx_cfg: Dict[str, Any]) -> Dict[str, Any]:
     comp = (onnx_cfg.get("components") or {})
     skel = (onnx_cfg.get("skeleton") or {})
     post = (onnx_cfg.get("postproc") or {})
+    endpoint_link = (post.get("endpoint_link") or {})
     dedupe = (post.get("dedupe") or {})
     tracking = (onnx_cfg.get("tracking") or {})
 
@@ -192,6 +201,18 @@ def _flatten_onnx_cfg_for_runner(onnx_cfg: Dict[str, Any]) -> Dict[str, Any]:
         "max_gap_rows": int(post.get("max_gap_rows", 13)),
         "max_dx": int(post.get("max_dx", 6)),
         "prob_bridge_min": float(post.get("prob_bridge_min", 0.11)),
+        "endpoint_link_enable": bool(endpoint_link.get("enabled", False)),
+        "endpoint_link_max_gap_rows": int(endpoint_link.get("max_gap_rows", 35)),
+        "endpoint_link_max_dx": float(endpoint_link.get("max_dx", 6.0)),
+        "endpoint_link_min_bridge_prob": float(endpoint_link.get("min_bridge_prob", 0.10)),
+        "endpoint_link_max_slope_delta": float(endpoint_link.get("max_slope_delta", 0.45)),
+        "endpoint_link_fit_rows": int(endpoint_link.get("fit_rows", 12)),
+        "endpoint_link_max_conflict_fraction": float(endpoint_link.get("max_conflict_fraction", 0.15)),
+        "endpoint_link_insert_bridge_points": bool(endpoint_link.get("insert_bridge_points", True)),
+        "endpoint_link_overlap_enabled": bool(endpoint_link.get("overlap_enabled", True)),
+        "endpoint_link_min_overlap_rows": int(endpoint_link.get("min_overlap_rows", 5)),
+        "endpoint_link_max_overlap_rows": int(endpoint_link.get("max_overlap_rows", 45)),
+        "endpoint_link_overlap_dx_tol": float(endpoint_link.get("overlap_dx_tol", 3.0)),
         "dedupe_enable": bool(dedupe.get("enabled", True)),
         "dedupe_min_rows": int(dedupe.get("min_rows", 30)),
         "dedupe_min_score": float(dedupe.get("min_score", 0.11)),

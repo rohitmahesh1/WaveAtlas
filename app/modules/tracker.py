@@ -12,6 +12,8 @@ import cv2
 from .kymobutler_pt import KymoButlerPT
 
 Coord = Tuple[int, int]  # (y, x)
+NeighborCache = Dict[Coord, Tuple[Coord, ...]]
+PreviewCache = Dict[Tuple[Coord, Coord, int], Tuple[Coord, ...]]
 
 # 8-connected neighborhood
 _OFFSETS_8 = [(-1, -1), (-1, 0), (-1, 1),
@@ -35,16 +37,49 @@ def degree_at(skel: np.ndarray, y: int, x: int) -> int:
     H, W = skel.shape
     return sum(1 for ny, nx in neighbors8(y, x, H, W) if skel[ny, nx] == 1)
 
-def find_endpoints_and_junctions(skel: np.ndarray) -> Tuple[List[Coord], List[Coord]]:
+def degree_map(skel: np.ndarray) -> np.ndarray:
+    k = np.ones((3, 3), dtype=np.uint8)
+    k[1, 1] = 0
+    return cv2.filter2D(skel.astype(np.uint8), ddepth=cv2.CV_16U, kernel=k, borderType=cv2.BORDER_CONSTANT)
+
+def active_neighbors(skel: np.ndarray, y: int, x: int, cache: NeighborCache | None = None) -> Tuple[Coord, ...]:
+    key = (int(y), int(x))
+    if cache is not None and key in cache:
+        return cache[key]
+    H, W = skel.shape
+    nbrs = tuple((ny, nx) for ny, nx in neighbors8(key[0], key[1], H, W) if skel[ny, nx] == 1)
+    if cache is not None:
+        cache[key] = nbrs
+    return nbrs
+
+def find_endpoints_and_junctions(
+    skel: np.ndarray,
+    degrees: np.ndarray | None = None,
+) -> Tuple[List[Coord], List[Coord]]:
     endpoints, junctions = [], []
+    if degrees is None:
+        degrees = degree_map(skel)
     ys, xs = np.where(skel == 1)
     for y, x in zip(ys, xs):
-        d = degree_at(skel, y, x)
+        d = int(degrees[y, x])
         if d == 1:
-            endpoints.append((y, x))
+            endpoints.append((int(y), int(x)))
         elif d >= 3:
-            junctions.append((y, x))
+            junctions.append((int(y), int(x)))
     return endpoints, junctions
+
+def cropped_path_mask(shape: Tuple[int, int], pts: List[Coord], cy: int, cx: int, hh: int, hw: int) -> np.ndarray:
+    """Sparse equivalent of crop_with_pad(path_mask(shape, pts), cy, cx, hh, hw) for radius=0."""
+    _ = shape
+    crop = np.zeros((2 * hh + 1, 2 * hw + 1), dtype=np.uint8)
+    y_origin = cy - hh
+    x_origin = cx - hw
+    for y, x in pts:
+        yy = int(y) - y_origin
+        xx = int(x) - x_origin
+        if 0 <= yy < crop.shape[0] and 0 <= xx < crop.shape[1]:
+            crop[yy, xx] = 1
+    return crop
 
 def crop_with_pad(arr: np.ndarray, cy: int, cx: int, hh: int, hw: int) -> np.ndarray:
     """Center crop with zero-padding if window runs off the borders."""
@@ -143,6 +178,7 @@ class CrossingTracker:
         self.seed_interior = bool(seed_interior)
         self.max_iters = int(max_iters)
         self._raw01_cache: Optional[np.ndarray] = None  # set per extract() call
+        self._progress_pulse: Optional[Callable[[], None]] = None
 
     # -------- edge-visited helpers --------
     @staticmethod
@@ -166,7 +202,10 @@ class CrossingTracker:
     # -------- decision scoring --------
     def _score_branches(self, raw01: np.ndarray, skel_all: np.ndarray,
                         curr_pts: List[Coord], junction: Coord,
-                        cand_starts: List[Coord]) -> Optional[Coord]:
+                        cand_starts: List[Coord],
+                        degrees: np.ndarray,
+                        neighbor_cache: NeighborCache,
+                        preview_cache: PreviewCache) -> Optional[Coord]:
         """
         Score candidate branch starts using the decision map; return the best (or None).
         Gate: if a branch's max probability along its preview path is below decision_thr,
@@ -176,20 +215,29 @@ class CrossingTracker:
         H, W = raw01.shape
         jy, jx = junction
         tail_pts = curr_pts[-self.decision_recent_tail:] if curr_pts else []
-        curr_mask = path_mask((H, W), tail_pts, radius=0)
         hh, hw = self.ch // 2, self.cw // 2
 
         # one decision map per junction
         crop_raw  = crop_with_pad(raw01, jy, jx, hh, hw)
         crop_all  = crop_with_pad(skel_all, jy, jx, hh, hw)
-        crop_curr = crop_with_pad(curr_mask, jy, jx, hh, hw)
+        crop_curr = cropped_path_mask((H, W), tail_pts, jy, jx, hh, hw)
+        if self._progress_pulse is not None:
+            self._progress_pulse()
         dmap = self.kb.decision_map(crop_raw, crop_all, crop_curr)  # [Hc,Wc] in 0..1
 
         best_start: Optional[Coord] = None
         best_score: float = -1.0
 
         for sy, sx in cand_starts:
-            branch_pts = self._walk_branch_preview(skel_all, junction, (sy, sx), self.max_branch_steps)
+            branch_pts = self._walk_branch_preview(
+                skel_all,
+                junction,
+                (sy, sx),
+                self.max_branch_steps,
+                degrees,
+                neighbor_cache,
+                preview_cache,
+            )
             if not branch_pts:
                 continue
 
@@ -218,9 +266,15 @@ class CrossingTracker:
         return best_start  # may be None -> triggers fallback straightness
 
     def _walk_branch_preview(self, skel: np.ndarray, prev: Coord,
-                             start: Coord, max_steps: int) -> List[Coord]:
+                             start: Coord, max_steps: int,
+                             degrees: np.ndarray,
+                             neighbor_cache: NeighborCache,
+                             preview_cache: PreviewCache) -> Tuple[Coord, ...]:
         """Preview a corridor from 'start' until junction/end or max_steps."""
-        H, W = skel.shape
+        cache_key = (prev, start, int(max_steps))
+        cached = preview_cache.get(cache_key)
+        if cached is not None:
+            return cached
         path: List[Coord] = []
         prev_y, prev_x = prev
         y, x = start
@@ -228,20 +282,25 @@ class CrossingTracker:
         while steps < max_steps and skel[y, x] == 1:
             path.append((y, x))
             steps += 1
-            deg = degree_at(skel, y, x)
-            nbrs = [(ny, nx) for ny, nx in neighbors8(y, x, H, W)
-                    if skel[ny, nx] == 1 and (ny, nx) != (prev_y, prev_x)]
+            deg = int(degrees[y, x])
+            nbrs = [(ny, nx) for ny, nx in active_neighbors(skel, y, x, neighbor_cache)
+                    if (ny, nx) != (prev_y, prev_x)]
             if deg != 2 or not nbrs:
                 break
             prev_y, prev_x = y, x
             y, x = nbrs[0]
-        return path
+        preview = tuple(path)
+        preview_cache[cache_key] = preview
+        return preview
 
     # -------- edge-aware walking & growing --------
     def _walk_one_dir(self, start: Coord, prev: Coord,
                       skel: np.ndarray,
                       visited_px: np.ndarray,
-                      visited_edge: np.ndarray) -> List[Coord]:
+                      visited_edge: np.ndarray,
+                      degrees: np.ndarray,
+                      neighbor_cache: NeighborCache,
+                      preview_cache: PreviewCache) -> List[Coord]:
         """
         Walk in one direction, marking edges as used at junctions, and pixels in corridors.
         Uses decision-map scoring at junctions.
@@ -249,7 +308,6 @@ class CrossingTracker:
         assert self._raw01_cache is not None, "raw01 cache must be set before walking"
         raw01 = self._raw01_cache
 
-        H, W = skel.shape
         y, x = start
         prev_y, prev_x = prev
         acc: List[Coord] = []
@@ -258,7 +316,9 @@ class CrossingTracker:
             if skel[y, x] == 0:
                 break
 
-            deg = degree_at(skel, y, x)
+            deg = int(degrees[y, x])
+            if len(acc) and len(acc) % 256 == 0 and self._progress_pulse is not None:
+                self._progress_pulse()
 
             # Corridor pixels can be pixel-visited; junctions keep pixel free (edge-wise control)
             if deg <= 2:
@@ -269,8 +329,8 @@ class CrossingTracker:
             acc.append((y, x))
 
             # Candidate neighbors (excluding immediate back-step)
-            nbrs = [(ny, nx) for ny, nx in neighbors8(y, x, H, W)
-                    if skel[ny, nx] == 1 and (ny, nx) != (prev_y, prev_x)]
+            nbrs = [(ny, nx) for ny, nx in active_neighbors(skel, y, x, neighbor_cache)
+                    if (ny, nx) != (prev_y, prev_x)]
 
             # Prefer neighbors via UNUSED edges
             nbrs = [(ny, nx) for (ny, nx) in nbrs if not self._edge_is_used(visited_edge, y, x, ny, nx)]
@@ -283,7 +343,16 @@ class CrossingTracker:
             elif deg == 2:
                 ny, nx = nbrs[0]
             else:
-                chosen = self._score_branches(raw01, skel, acc, (y, x), nbrs)
+                chosen = self._score_branches(
+                    raw01,
+                    skel,
+                    acc,
+                    (y, x),
+                    nbrs,
+                    degrees,
+                    neighbor_cache,
+                    preview_cache,
+                )
                 if chosen is None:
                     # fallback: pick the neighbor that best continues the incoming direction
                     vy, vx = y - prev_y, x - prev_x
@@ -303,20 +372,22 @@ class CrossingTracker:
         return acc
 
     def _grow_from(self, raw01: np.ndarray, skel: np.ndarray, seed: Coord,
-                   visited_px: np.ndarray, visited_edge: np.ndarray, bidir: bool) -> List[Coord]:
+                   visited_px: np.ndarray, visited_edge: np.ndarray, bidir: bool,
+                   degrees: np.ndarray,
+                   neighbor_cache: NeighborCache,
+                   preview_cache: PreviewCache) -> List[Coord]:
         """Grow a track from 'seed'. If bidir=True, grow forward and backward from the seed."""
-        H, W = skel.shape
         y0, x0 = seed
         if skel[y0, x0] == 0:
             return []
 
         # neighbors from seed that have UNUSED edges
-        nbrs0 = [(ny, nx) for ny, nx in neighbors8(y0, x0, H, W)
-                 if skel[ny, nx] == 1 and not self._edge_is_used(visited_edge, y0, x0, ny, nx)]
+        nbrs0 = [(ny, nx) for ny, nx in active_neighbors(skel, y0, x0, neighbor_cache)
+                 if not self._edge_is_used(visited_edge, y0, x0, ny, nx)]
 
         if not nbrs0:
             # allow single-pixel capture if corridor & not visited
-            if degree_at(skel, y0, x0) <= 2 and visited_px[y0, x0] == 0:
+            if int(degrees[y0, x0]) <= 2 and visited_px[y0, x0] == 0:
                 visited_px[y0, x0] = 1
                 return [(y0, x0)]
             return []
@@ -325,13 +396,19 @@ class CrossingTracker:
             fwd_start = nbrs0[0]
             bwd_start = nbrs0[1] if len(nbrs0) >= 2 else None
             fwd = self._walk_one_dir(fwd_start, prev=(y0, x0), skel=skel,
-                                     visited_px=visited_px, visited_edge=visited_edge)
+                                     visited_px=visited_px, visited_edge=visited_edge,
+                                     degrees=degrees, neighbor_cache=neighbor_cache,
+                                     preview_cache=preview_cache)
             bwd = self._walk_one_dir(bwd_start, prev=(y0, x0), skel=skel,
-                                     visited_px=visited_px, visited_edge=visited_edge) if bwd_start else []
+                                     visited_px=visited_px, visited_edge=visited_edge,
+                                     degrees=degrees, neighbor_cache=neighbor_cache,
+                                     preview_cache=preview_cache) if bwd_start else []
             pts = list(reversed(bwd)) + [(y0, x0)] + fwd
         else:
             pts = [(y0, x0)] + self._walk_one_dir(nbrs0[0], prev=(y0, x0), skel=skel,
-                                                  visited_px=visited_px, visited_edge=visited_edge)
+                                                  visited_px=visited_px, visited_edge=visited_edge,
+                                                  degrees=degrees, neighbor_cache=neighbor_cache,
+                                                  preview_cache=preview_cache)
 
         return enforce_one_point_per_row(pts)
 
@@ -353,7 +430,7 @@ class CrossingTracker:
         raw_gray: np.ndarray,
         skel: np.ndarray,
         *,
-        progress_cb: Optional[Callable[[Dict[str, float | int]], None]] = None,
+        progress_cb: Optional[Callable[[Dict[str, object]], None]] = None,
         progress_every_secs: float = 1.0,
     ) -> List[Track]:
         """
@@ -373,6 +450,10 @@ class CrossingTracker:
         last_processed_px = 0
         ema_rate_px: Optional[float] = None
         ema_alpha = 0.2
+        phase = "init"
+        seeds_seen = 0
+        seeds_total = 0
+        new_tracks_iter = 0
 
         def emit_progress(force: bool = False) -> None:
             nonlocal last_emit, last_rate_ts, last_processed_px, ema_rate_px
@@ -406,6 +487,10 @@ class CrossingTracker:
                         "eta_secs": float(eta_secs),
                         "tracks_found": len(tracks),
                         "iter": it,
+                        "phase": phase,
+                        "seeds_seen": seeds_seen,
+                        "seeds_total": seeds_total,
+                        "new_tracks_iter": new_tracks_iter,
                     }
                 )
             except Exception:
@@ -414,48 +499,92 @@ class CrossingTracker:
             last_emit = now
         tracks: List[Track] = []
         tid = 0
+        self._progress_pulse = lambda: emit_progress()
 
         it = 0
         emit_progress(force=True)
         while it < self.max_iters:
             it += 1
             new_tracks: List[Track] = []
+            new_tracks_iter = 0
+            degrees = degree_map(remaining)
+            neighbor_cache: NeighborCache = {}
+            preview_cache: PreviewCache = {}
 
             # (re)initialize visitation for this pass
             visited_px = np.zeros_like(remaining, dtype=np.uint8)
             visited_edge = np.zeros((*remaining.shape, 8), dtype=np.uint8)
 
             # Pass 1: endpoints first (more stable)
-            endpoints, _ = find_endpoints_and_junctions(remaining)
-            for seed in endpoints:
+            endpoints, _ = find_endpoints_and_junctions(remaining, degrees)
+            phase = "endpoints"
+            seeds_seen = 0
+            seeds_total = len(endpoints)
+            emit_progress(force=True)
+            for seed_index, seed in enumerate(endpoints, start=1):
+                seeds_seen = seed_index
                 y, x = seed
                 if remaining[y, x] == 0:
+                    emit_progress()
                     continue
-                trk = self._grow_from(raw01, remaining, seed, visited_px, visited_edge, bidir=False)
+                trk = self._grow_from(
+                    raw01,
+                    remaining,
+                    seed,
+                    visited_px,
+                    visited_edge,
+                    bidir=False,
+                    degrees=degrees,
+                    neighbor_cache=neighbor_cache,
+                    preview_cache=preview_cache,
+                )
                 if len(trk) >= self.min_track_len:
                     new_tracks.append(Track(points=trk, id=tid)); tid += 1
+                    new_tracks_iter = len(new_tracks)
+                emit_progress()
 
             # Pass 2: interior seeding — any pixel that still has an UNUSED edge
             if self.seed_interior:
-                H, W = remaining.shape
                 ys, xs = np.where(remaining == 1)
-                for y, x in zip(ys, xs):
+                phase = "interior"
+                seeds_seen = 0
+                seeds_total = len(ys)
+                emit_progress(force=True)
+                for seed_index, (y, x) in enumerate(zip(ys, xs), start=1):
+                    seeds_seen = seed_index
                     # quick check: does (y,x) have any unused outgoing edge?
                     has_free = False
-                    for ny, nx in neighbors8(y, x, H, W):
-                        if remaining[ny, nx] == 1 and not self._edge_is_used(visited_edge, y, x, ny, nx):
+                    for ny, nx in active_neighbors(remaining, int(y), int(x), neighbor_cache):
+                        if not self._edge_is_used(visited_edge, y, x, ny, nx):
                             has_free = True
                             break
                     if not has_free:
+                        emit_progress()
                         continue
-                    trk = self._grow_from(raw01, remaining, (y, x), visited_px, visited_edge, bidir=True)
+                    trk = self._grow_from(
+                        raw01,
+                        remaining,
+                        (int(y), int(x)),
+                        visited_px,
+                        visited_edge,
+                        bidir=True,
+                        degrees=degrees,
+                        neighbor_cache=neighbor_cache,
+                        preview_cache=preview_cache,
+                    )
                     if len(trk) >= self.min_track_len:
                         new_tracks.append(Track(points=trk, id=tid)); tid += 1
+                        new_tracks_iter = len(new_tracks)
+                    emit_progress()
 
             if not new_tracks:
                 break  # nothing else to harvest
 
             # Accumulate and subtract for next iteration
+            phase = "subtracting"
+            seeds_seen = 0
+            seeds_total = 0
+            emit_progress(force=True)
             tracks.extend(new_tracks)
             remaining = self._subtract_tracks(remaining, new_tracks)
             emit_progress()
@@ -465,8 +594,12 @@ class CrossingTracker:
                 break
 
         # clear cache
+        phase = "done"
+        seeds_seen = 0
+        seeds_total = 0
         emit_progress(force=True)
         self._raw01_cache = None
+        self._progress_pulse = None
         return tracks
 
     # -------- utility I/O --------

@@ -167,6 +167,17 @@ Post-processing after skeletonization.
 - `kymo.onnx.postproc.max_gap_rows` (int): Max gap (rows) to bridge. Change when: you want to bridge larger gaps (increase) or avoid over-bridging (decrease).
 - `kymo.onnx.postproc.max_dx` (int): Max horizontal delta allowed when bridging. Change when: you want to allow more/less horizontal deviation.
 - `kymo.onnx.postproc.prob_bridge_min` (number): Minimum probability to bridge gaps. Change when: bridging is too aggressive (raise) or too conservative (lower).
+- `kymo.onnx.postproc.endpoint_link.enabled` (bool): Link compatible track endpoints after the normal extension pass. Change when: you want to merge fragmented or slightly overlapping traces (true) or preserve raw extracted fragments (false).
+- `kymo.onnx.postproc.endpoint_link.max_gap_rows` (int): Largest row gap considered for endpoint linking. Change when: desired fragments are farther apart or false merges appear over long gaps.
+- `kymo.onnx.postproc.endpoint_link.max_dx` (number): Max projected horizontal mismatch for endpoint links. Change when: valid tracks drift more/less between fragments.
+- `kymo.onnx.postproc.endpoint_link.min_bridge_prob` (number): Minimum average probability along a proposed link. Change when: links are too permissive (raise) or missed across faint regions (lower).
+- `kymo.onnx.postproc.endpoint_link.max_slope_delta` (number): Max slope mismatch between linked tails and heads. Change when: good links bend more sharply or bad links pass through crossings.
+- `kymo.onnx.postproc.endpoint_link.fit_rows` (int): Number of rows used to estimate endpoint slope. Change when: slope estimates are too noisy or too slow to react.
+- `kymo.onnx.postproc.endpoint_link.max_conflict_fraction` (number): Max fraction of proposed link points that conflict with other tracks. Change when: dense regions need stricter or looser conflict rejection.
+- `kymo.onnx.postproc.endpoint_link.insert_bridge_points` (bool): Insert interpolated bridge points for gap links. Change when: you want continuous saved tracks instead of preserving a gap.
+- `kymo.onnx.postproc.endpoint_link.overlap_enabled` (bool): Allow endpoint linking through short overlapping track sections. Change when: duplicate/overlapping fragments should be merged.
+- `kymo.onnx.postproc.endpoint_link.min_overlap_rows` / `max_overlap_rows` (int): Overlap-size range considered for overlap links. Change when: valid overlaps are shorter or longer.
+- `kymo.onnx.postproc.endpoint_link.overlap_dx_tol` (number): Horizontal tolerance for overlap-link consensus. Change when: overlapping fragments are slightly offset or false overlap links appear.
 - `kymo.onnx.postproc.dedupe.enabled` (bool): Remove duplicate tracks. Change when: duplicates appear (enable) or you want to keep overlapping tracks (disable).
 - `kymo.onnx.postproc.dedupe.min_rows` (int): Minimum rows for dedupe consideration. Change when: shorter tracks should be deduped or ignored.
 - `kymo.onnx.postproc.dedupe.min_score` (number): Minimum score to keep a track during dedupe. Change when: dedupe is too aggressive (raise) or too lax (lower).
@@ -175,7 +186,12 @@ Post-processing after skeletonization.
 
 #### kymo.onnx.debug
 - `kymo.onnx.debug.save_debug_images` (bool): Saves debug masks and overlays that appear in the UI. Change when: you want UI debug overlays (true) or need to reduce disk usage (false).
+- `kymo.onnx.debug.save_overlay_tracks` (bool): Saves the final track overlay image. Change when: you want a compact visual check of final linked tracks (true) or fewer artifacts (false).
 
 ### kymo.wolfram
 Used only when `kymo.backend` is set to `wolfram`.
 - `kymo.wolfram.scripts_dir` (string): Path to WolframScript files. Change when: scripts live in a non-default directory.
+- `kymo.wolfram.executable` (string): Wolfram executable name/path. Change when: WolframScript is installed somewhere nonstandard.
+- `kymo.wolfram.script_name` (string): Script file to execute from `scripts_dir`. Change when: you want to run a different Wolfram wrapper.
+- `kymo.wolfram.min_length` (int): Minimum saved Wolfram track length. Change when: short tracks should be kept or filtered.
+- `kymo.wolfram.verbose` (bool): Print Wolfram stdout/stderr. Change when: debugging Wolfram execution.

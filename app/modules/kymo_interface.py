@@ -1,6 +1,6 @@
 import subprocess
 from pathlib import Path
-from typing import Union, List, Optional
+from typing import Callable, Dict, Union, List, Optional
 import ast
 import numpy as np
 
@@ -94,24 +94,45 @@ def _parse_mathematica_arrays(stdout_text: str) -> List[np.ndarray]:
 
 def run_kymobutler(
     heatmap_path: Union[str, Path],
+    *,
+    output_dir: Union[str, Path, None] = None,
+    scripts_dir: Union[str, Path, None] = None,
+    executable: str = "wolframscript",
     min_length: int = 30,
     verbose: bool = False,
     script_name: str = "Run_Kymobutler.wls",
+    progress_cb: Optional[Callable[[str, Dict[str, object]], None]] = None,
 ) -> Path:
     """
     Invoke the KymoButler WolframScript on a heatmap image, parse stdout for
     track coordinates, and save each track as .npy under:
+        <output_dir>/kymobutler_output/
+
+    If output_dir is omitted, the legacy default is used:
         <heatmap_dir>/<heatmap_stem>/kymobutler_output/
 
     Returns the base_dir (parent folder that contains kymobutler_output/).
     """
+    def _progress(stage: str, **data: object) -> None:
+        if progress_cb is None:
+            return
+        try:
+            progress_cb(stage, data)
+        except Exception:
+            return
+
     heatmap_path = Path(heatmap_path)
-    base_dir = heatmap_path.parent / heatmap_path.stem
+    base_dir = Path(output_dir) if output_dir is not None else heatmap_path.parent / heatmap_path.stem
     out_dir = base_dir / "kymobutler_output"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    script = SCRIPT_DIR / script_name
-    cmd = ["wolframscript", "-script", str(script), str(heatmap_path)]
+    script_root = Path(scripts_dir) if scripts_dir is not None else SCRIPT_DIR
+    script = script_root / script_name
+    if not script.is_file():
+        raise FileNotFoundError(f"WolframScript not found: {script}")
+
+    cmd = [str(executable), "-script", str(script), str(heatmap_path)]
+    _progress("wolfram_start", script=str(script), executable=str(executable))
     proc = subprocess.run(cmd, capture_output=True, text=True)
 
     if verbose:
@@ -120,6 +141,8 @@ def run_kymobutler(
         if proc.stderr:
             print(proc.stderr)
 
+    if proc.returncode != 0:
+        _progress("wolfram_failed", returncode=int(proc.returncode), stderr=proc.stderr or "")
     proc.check_returncode()
 
     arrays = _parse_mathematica_arrays(proc.stdout or "")
@@ -131,10 +154,12 @@ def run_kymobutler(
         np.save(out_dir / f"{i}.npy", arr)
         saved += 1
 
+    _progress("wolfram_done", parsed_tracks=len(arrays), saved_tracks=saved, output_dir=str(out_dir))
+
     if verbose:
         print(
             f"[kymo_interface] Parsed {len(arrays)} track(s); "
-            f"saved {saved} ≥ min_length to {out_dir}"
+            f"saved {saved} >= min_length to {out_dir}"
         )
 
     return base_dir
