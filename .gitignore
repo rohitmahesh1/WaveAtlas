@@ -41,3 +41,8 @@ legacy/
 .vscode/
 *.swp
 *.swo
+
+# Temporary Backend artifacts
+export/
+waveatlas-cli/
+ioae071.pdf
