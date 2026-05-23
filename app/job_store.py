@@ -23,6 +23,44 @@ from .models import (
 )
 
 
+_WAVE_MODEL_KEYS = {
+    "track_id",
+    "wave_index",
+    "event_polarity",
+    "event_kind",
+    "fit_target",
+    "x",
+    "y",
+    "amplitude",
+    "frequency",
+    "period",
+    "error",
+    "t_start",
+    "t_end",
+    "metrics",
+}
+_PEAK_MODEL_KEYS = {
+    "track_id",
+    "wave_id",
+    "pos",
+    "value",
+    "event_polarity",
+    "event_kind",
+    "fit_target",
+    "metrics",
+}
+
+
+def _row_for_metric_model(row: Dict[str, Any], *, model_keys: set[str]) -> Dict[str, Any]:
+    out = {key: value for key, value in row.items() if key in model_keys}
+    metrics = dict(out.get("metrics") or {})
+    for key, value in row.items():
+        if key not in model_keys:
+            metrics.setdefault(key, value)
+    out["metrics"] = metrics
+    return out
+
+
 @dataclass
 class JobStore:
     """
@@ -421,13 +459,13 @@ class JobStore:
         return len(objs)
 
     def insert_waves_batch(self, job_id: UUID, rows: Sequence[Dict[str, Any]]) -> int:
-        objs = [Wave(job_id=job_id, **r) for r in rows]
+        objs = [Wave(job_id=job_id, **_row_for_metric_model(r, model_keys=_WAVE_MODEL_KEYS)) for r in rows]
         self.session.add_all(objs)
         self.session.commit()
         return len(objs)
 
     def insert_peaks_batch(self, job_id: UUID, rows: Sequence[Dict[str, Any]]) -> int:
-        objs = [Peak(job_id=job_id, **r) for r in rows]
+        objs = [Peak(job_id=job_id, **_row_for_metric_model(r, model_keys=_PEAK_MODEL_KEYS)) for r in rows]
         self.session.add_all(objs)
         self.session.commit()
         return len(objs)
