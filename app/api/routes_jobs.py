@@ -44,6 +44,7 @@ from ..models import (
     Wave,
 )
 from ..pipeline import PipelineSettings, run_job
+from ..extract_core import PEAK_POLARITY_ALIASES, _suppress_cross_polarity_peak_sets
 from ..signal.detrend import fit_baseline_ransac
 from ..signal.peaks import detect_peaks, detect_peaks_adaptive, ensure_minimum_peaks
 from ..signal.period import estimate_dominant_frequency, frequency_to_period, resolve_positive_frequency
@@ -301,6 +302,41 @@ def _detect_peaks_for_detail(
     return ensure_minimum_peaks(residual, peaks, props, minimum=int(peaks_cfg.get("minimum_per_track", 1)))
 
 
+def _normalize_detail_event_polarity(value: Any) -> str:
+    key = str(value or "both").strip().lower()
+    return PEAK_POLARITY_ALIASES.get(key, "both")
+
+
+def _detail_peak_polarity_specs(value: Any) -> List[Dict[str, Any]]:
+    polarity = _normalize_detail_event_polarity(value)
+    specs: List[Dict[str, Any]] = []
+    if polarity in {"maxima", "both"}:
+        specs.append({"event_polarity": "maxima", "event_kind": "max", "sign": 1})
+    if polarity in {"minima", "both"}:
+        specs.append({"event_polarity": "minima", "event_kind": "min", "sign": -1})
+    return specs
+
+
+def _detect_peak_sets_for_detail(
+    residual: np.ndarray,
+    peaks_cfg: Dict[str, Any],
+    frames_per_period: Optional[float],
+) -> List[Dict[str, Any]]:
+    specs = _detail_peak_polarity_specs(peaks_cfg.get("event_polarity", peaks_cfg.get("polarity", "both")))
+    out: List[Dict[str, Any]] = []
+    for spec in specs:
+        sign = int(spec["sign"])
+        signal = np.asarray(residual, dtype=float) * float(sign)
+        peaks_idx, peak_props = _detect_peaks_for_detail(signal, peaks_cfg, frames_per_period)
+        out.append({
+            **spec,
+            "signal": signal,
+            "peaks_idx": np.asarray(peaks_idx, dtype=int),
+            "peak_props": peak_props,
+        })
+    return _suppress_cross_polarity_peak_sets(out, peaks_cfg)
+
+
 def _fit_anchored_sine(
     residual: np.ndarray,
     t: np.ndarray,
@@ -350,6 +386,25 @@ def _fit_anchored_sine(
         "fit_peak_error": float(yfit[int(center_idx)] - peak_value),
         "fit_passes_peak": True,
     }
+
+
+def _detail_fit_meta_for_original_polarity(
+    fit_meta: Dict[str, Any],
+    *,
+    sign: int,
+    original_peak_value: float,
+) -> Dict[str, Any]:
+    out = dict(fit_meta)
+    out["fit_signal_sign"] = int(sign)
+    out["fit_event_value"] = out.get("fit_peak_value")
+    out["fit_peak_value"] = float(original_peak_value)
+    if int(sign) < 0:
+        for key in ("fit_amp_A", "fit_offset_c", "fit_peak_error"):
+            try:
+                out[key] = float(out[key]) * -1.0
+            except Exception:
+                pass
+    return out
 
 
 # -----------------------------
@@ -847,21 +902,46 @@ def get_track_detail(
     period = float(frequency_to_period(freq)) if (isinstance(freq, float) and math.isfinite(freq) and freq > 0) else float("nan")
 
     frames_per_period = (sampling_rate / float(freq)) if (sampling_rate and math.isfinite(freq) and freq > 0) else None
-    peaks_idx, _props = _detect_peaks_for_detail(residual, peaks_cfg, frames_per_period)
-    peaks_idx = np.asarray(peaks_idx, dtype=int)
+    peak_sets = _detect_peak_sets_for_detail(residual, peaks_cfg, frames_per_period)
+    peak_events: List[Dict[str, Any]] = []
+    for peak_set in peak_sets:
+        signal = np.asarray(peak_set["signal"], dtype=float)
+        sign = int(peak_set["sign"])
+        for peak_i_raw in np.asarray(peak_set["peaks_idx"], dtype=int).tolist():
+            peak_i = int(peak_i_raw)
+            if peak_i < 0 or peak_i >= len(frame):
+                continue
+            peak_events.append({
+                "peak_i": peak_i,
+                "event_kind": str(peak_set["event_kind"]),
+                "event_polarity": str(peak_set["event_polarity"]),
+                "fit_signal_sign": sign,
+                "event_amplitude": float(signal[peak_i]),
+            })
+    peak_events.sort(key=lambda event: (int(event["peak_i"]), 0 if event["event_kind"] == "max" else 1))
+    peaks_idx = np.asarray([int(event["peak_i"]) for event in peak_events], dtype=int)
 
     lo, hi = 0, len(frame) - 1
     if index_range:
         lo, hi = _parse_index_range(index_range, len(frame))
 
     strongest_peak_idx: Optional[int] = None
-    if peaks_idx.size > 0:
+    if peak_events:
         try:
-            strongest_peak_idx = int(peaks_idx[int(np.argmax(residual[peaks_idx]))])
+            strongest_event = max(
+                peak_events,
+                key=lambda event: (
+                    float(event["event_amplitude"])
+                    if math.isfinite(float(event["event_amplitude"]))
+                    else float("-inf")
+                ),
+            )
+            strongest_peak_idx = int(strongest_event["peak_i"])
         except Exception:
-            strongest_peak_idx = int(peaks_idx[0])
+            strongest_peak_idx = int(peak_events[0]["peak_i"])
 
-    def peak_point(ordinal: int, peak_i: int) -> Dict[str, Any]:
+    def peak_point(ordinal: int, event: Dict[str, Any]) -> Dict[str, Any]:
+        peak_i = int(event["peak_i"])
         in_slice = bool(lo <= peak_i <= hi)
         return {
             "peak_index": int(ordinal),
@@ -869,12 +949,16 @@ def get_track_detail(
             "frame": float(frame[peak_i]),
             "position": float(position[peak_i]),
             "amplitude": float(residual[peak_i]),
+            "event_amplitude": float(event["event_amplitude"]),
+            "event_kind": str(event["event_kind"]),
+            "event_polarity": str(event["event_polarity"]),
+            "fit_signal_sign": int(event["fit_signal_sign"]),
             "in_slice": in_slice,
             "slice_index": int(peak_i - lo) if in_slice else None,
             "is_strongest": bool(strongest_peak_idx is not None and int(peak_i) == strongest_peak_idx),
         }
 
-    peak_points = [peak_point(i + 1, int(peak_i)) for i, peak_i in enumerate(peaks_idx.tolist())]
+    peak_points = [peak_point(i + 1, event) for i, event in enumerate(peak_events)]
     peak_regressions: List[Dict[str, Any]] = []
     sine_fit = None
     if include_sine:
@@ -882,8 +966,10 @@ def get_track_detail(
         period_frac = float((config.get("features") or {}).get("fit_window_period_frac", 0.5))
         for point in peak_points:
             peak_i = int(point["peak_i"])
+            sign = int(point.get("fit_signal_sign", 1))
+            fit_signal = residual.astype(float, copy=False) * float(sign)
             fit_result = _fit_anchored_sine(
-                residual,
+                fit_signal,
                 frame,
                 fit_freq,
                 peak_i,
@@ -893,9 +979,14 @@ def get_track_detail(
             regression = dict(point)
             regression["sine_fit"] = None
             if fit_result is not None:
-                yfit_res, fit_meta = fit_result
+                yfit_signed, fit_meta = fit_result
+                yfit_res = yfit_signed * float(sign)
                 full_fit = (baseline + yfit_res).astype(float)
-                regression.update(fit_meta)
+                regression.update(_detail_fit_meta_for_original_polarity(
+                    fit_meta,
+                    sign=sign,
+                    original_peak_value=float(residual[peak_i]),
+                ))
                 regression["sine_fit"] = full_fit[lo : hi + 1].tolist()
                 if strongest_peak_idx is not None and peak_i == strongest_peak_idx:
                     sine_fit = full_fit
@@ -905,13 +996,12 @@ def get_track_detail(
     baseline_view = baseline[lo : hi + 1]
     residual_view = residual[lo : hi + 1] if include_residual else None
     sine_view = sine_fit[lo : hi + 1] if sine_fit is not None else None
-    peaks_in_slice = [int(i) for i in peaks_idx.tolist() if lo <= int(i) <= hi]
+    peaks_in_slice = [int(event["peak_i"]) for event in peak_events if lo <= int(event["peak_i"]) <= hi]
 
-    if peaks_idx.size > 0:
-        try:
-            mean_amp = float(residual[peaks_idx].mean())
-        except Exception:
-            mean_amp = float("nan")
+    event_amps = np.asarray([float(event["event_amplitude"]) for event in peak_events], dtype=float)
+    event_amps = event_amps[np.isfinite(event_amps)]
+    if event_amps.size > 0:
+        mean_amp = float(event_amps.mean())
     else:
         mean_amp = float("nan")
 
@@ -933,6 +1023,9 @@ def get_track_detail(
             "dominant_frequency": freq if math.isfinite(freq) else None,
             "period": period if math.isfinite(period) else None,
             "num_peaks": int(len(peaks_idx)),
+            "num_maxima": int(sum(1 for event in peak_events if event["event_kind"] == "max")),
+            "num_minima": int(sum(1 for event in peak_events if event["event_kind"] == "min")),
+            "event_polarity": _normalize_detail_event_polarity(peaks_cfg.get("event_polarity", peaks_cfg.get("polarity", "both"))),
             "mean_amplitude": mean_amp if math.isfinite(mean_amp) else None,
         },
     }
@@ -969,7 +1062,15 @@ def export_waves_csv(
     owner_session_id: UUID = Depends(get_owner_session_id),
     session: Session = Depends(get_db_session),
 ) -> StreamingResponse:
-    _get_job_owned(session, job_id, owner_session_id)
+    job = _get_job_owned(session, job_id, owner_session_id)
+    job_config = job.config or {}
+    peaks_cfg = (job_config.get("peaks") or {}) if isinstance(job_config, dict) else {}
+    endpoint_cfg = (
+        (((job_config.get("kymo") or {}).get("onnx") or {}).get("postproc") or {}).get("endpoint_link") or {}
+    ) if isinstance(job_config, dict) else {}
+    config_event_polarity = peaks_cfg.get("event_polarity", peaks_cfg.get("polarity", ""))
+    endpoint_link_enabled = endpoint_cfg.get("enabled", "")
+    endpoint_link_level = endpoint_cfg.get("level", "")
 
     q = select(Wave).where(Wave.job_id == job_id).order_by(Wave.created_at.asc())
     rows = session.exec(q).all()
@@ -999,8 +1100,38 @@ def export_waves_csv(
         "Wavelength (Pixels)",
         "Peak Frame (y-axis)",
         "Peak Position (x-axis)",
+        "Event Kind",
+        "Event Polarity",
+        "Event Value",
+        "Peak Value Original",
+        "Fit Target",
+        "Compare Fit Targets",
+        "Peak Frame Raw",
+        "Peak Position Raw",
+        "Frame 1 Raw",
+        "Frame 2 Raw",
         "Fit Error (VNMSE)",
         "Fit Passes Peak",
+        "Fit R2",
+        "Fit RMSE (px)",
+        "Fit NRMSE",
+        "Fit MAE (px)",
+        "Fit Points",
+        "Residual Fit Error (VNMSE)",
+        "Residual Fit R2",
+        "Residual Fit RMSE (px)",
+        "Raw Fit Error (VNMSE)",
+        "Raw Fit R2",
+        "Raw Fit RMSE (px)",
+        "Track Fit Error Median",
+        "Track Fit R2 Median",
+        "Period Consistency CV",
+        "Frequency Agreement Error",
+        "Spectral SNR",
+        "Peak Prominence SNR",
+        "Config Event Polarity",
+        "Endpoint Linking Enabled",
+        "Endpoint Linking Level",
         "Wave Type",
         "Type Score",
     ]
@@ -1009,6 +1140,12 @@ def export_waves_csv(
         metrics = row.metrics or {}
         value = metrics.get(key, default)
         return "" if value is None else value
+
+    def attr_or_metric(row: Wave, attr: str, key: Optional[str] = None):
+        value = getattr(row, attr, None)
+        if value is not None:
+            return value
+        return metric(row, key or attr)
 
     def gen():
         buf = io.StringIO()
@@ -1049,8 +1186,38 @@ def export_waves_csv(
                 metric(r, "wavelength_px"),
                 metric(r, "peak_frame_y_axis"),
                 metric(r, "peak_position_x_axis"),
+                attr_or_metric(r, "event_kind"),
+                attr_or_metric(r, "event_polarity"),
+                metric(r, "event_value"),
+                metric(r, "peak_value_original"),
+                attr_or_metric(r, "fit_target"),
+                metric(r, "compare_fit_targets"),
+                metric(r, "peak_frame_raw"),
+                metric(r, "peak_position_raw"),
+                metric(r, "frame1_raw"),
+                metric(r, "frame2_raw"),
                 r.error if r.error is not None else metric(r, "fit_error_vnmse"),
                 metric(r, "fit_passes_peak"),
+                metric(r, "fit_r2"),
+                metric(r, "fit_rmse_px"),
+                metric(r, "fit_nrmse"),
+                metric(r, "fit_mae_px"),
+                metric(r, "fit_points"),
+                metric(r, "residual_fit_error_vnmse"),
+                metric(r, "residual_fit_r2"),
+                metric(r, "residual_fit_rmse_px"),
+                metric(r, "raw_fit_error_vnmse"),
+                metric(r, "raw_fit_r2"),
+                metric(r, "raw_fit_rmse_px"),
+                metric(r, "track_fit_error_median"),
+                metric(r, "track_fit_r2_median"),
+                metric(r, "period_consistency_cv"),
+                metric(r, "frequency_agreement_error"),
+                metric(r, "spectral_snr"),
+                metric(r, "peak_prominence_snr"),
+                config_event_polarity,
+                endpoint_link_enabled,
+                endpoint_link_level,
                 metric(r, "wave_type"),
                 metric(r, "type_score"),
             ])
