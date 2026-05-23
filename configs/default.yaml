@@ -31,11 +31,14 @@ detrend:
   random_state: 42
 
 peaks:
+  event_polarity: both
   adaptive: false
   minimum_per_track: 1
-  prominence: 3.0
-  width: 2
+  prominence: 2.0
+  width: 1
   distance: 8
+  cross_polarity_min_distance: 12
+  cross_polarity_policy: stronger
 
 period:
   sampling_rate: *sr
@@ -57,6 +60,8 @@ viz:
   dpi: 180
 
 features:
+  fit_target: raw_wave
+  compare_fit_targets: true
   fit_window_period_frac: 0.5
   classify:
     ripple_max_deg: 10
@@ -141,11 +146,11 @@ kymo:
       prob_bridge_min: 0.12
       endpoint_link:
         enabled: true
-        max_gap_rows: 35
-        max_dx: 6.0
-        min_bridge_prob: 0.10
-        max_slope_delta: 0.45
-        fit_rows: 12
+        max_gap_rows: 60
+        max_dx: 10.0
+        min_bridge_prob: 0.075
+        max_slope_delta: 0.7
+        fit_rows: 16
         max_conflict_fraction: 0.15
         insert_bridge_points: true
         overlap_enabled: true

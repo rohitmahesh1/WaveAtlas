@@ -69,6 +69,58 @@ def _finite_or_none(v: Any) -> Optional[float]:
         return None
 
 
+def _normalise_fit_target(value: Any) -> str:
+    key = str(value or "raw_wave").strip().lower().replace("-", "_")
+    aliases = {
+        "residual": "residual",
+        "res": "residual",
+        "residuals": "residual",
+        "raw": "raw_wave",
+        "raw_position": "raw_wave",
+        "raw_wave": "raw_wave",
+        "wave": "raw_wave",
+        "base": "raw_wave",
+        "base_wave": "raw_wave",
+        "both": "raw_wave",
+        "comparison": "raw_wave",
+        "compare": "raw_wave",
+    }
+    return aliases.get(key, "raw_wave")
+
+
+def _bool_cfg(value: Any, default: bool) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        key = value.strip().lower()
+        if key in {"1", "true", "yes", "y", "on"}:
+            return True
+        if key in {"0", "false", "no", "n", "off"}:
+            return False
+    return bool(default)
+
+
+def _prefix_fit_metrics(fit: Dict[str, Any], prefix: str) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for key, value in fit.items():
+        if key.startswith("fit_"):
+            out[f"{prefix}_{key}"] = value
+    return out
+
+
+def _prefixed_fit_as_primary(prefixed_fit: Dict[str, Any], prefix: str) -> Dict[str, Any]:
+    marker = f"{prefix}_fit_"
+    out: Dict[str, Any] = {}
+    for key, value in prefixed_fit.items():
+        if key.startswith(marker):
+            out[f"fit_{key[len(marker):]}"] = value
+    return out
+
+
 def _coord_height(coord_meta: Optional[dict]) -> Optional[float]:
     if not coord_meta:
         return None
@@ -222,6 +274,11 @@ def anchored_sine_params(
         "fit_offset_c": np.nan,
         "fit_freq_hz": float(freq) if freq is not None else np.nan,
         "fit_error_vnmse": np.nan,
+        "fit_r2": np.nan,
+        "fit_rmse_px": np.nan,
+        "fit_nrmse": np.nan,
+        "fit_mae_px": np.nan,
+        "fit_points": 0,
         "fit_window_lo": np.nan,
         "fit_window_hi": np.nan,
     }
@@ -245,16 +302,39 @@ def anchored_sine_params(
 
     y_slice = residual[lo : hi + 1]
     y_fit = yfit_res[lo : hi + 1]
-    if y_slice.size >= 2 and np.var(y_slice) > 0:
-        vnmse = float(np.mean((y_slice - y_fit) ** 2) / np.var(y_slice))
+    valid = np.isfinite(y_slice) & np.isfinite(y_fit)
+    y_slice_valid = y_slice[valid]
+    y_fit_valid = y_fit[valid]
+    fit_points = int(y_slice_valid.size)
+    if fit_points:
+        err = y_slice_valid - y_fit_valid
+        mse = float(np.mean(err ** 2))
+        rmse = float(np.sqrt(mse))
+        mae = float(np.mean(np.abs(err)))
+    else:
+        mse = np.nan
+        rmse = np.nan
+        mae = np.nan
+
+    if fit_points >= 2 and np.var(y_slice_valid) > 0:
+        vnmse = float(mse / np.var(y_slice_valid))
+        nrmse = float(np.sqrt(vnmse)) if vnmse >= 0 else np.nan
+        r2 = float(1.0 - vnmse)
     else:
         vnmse = np.nan
+        nrmse = np.nan
+        r2 = np.nan
 
     out.update({
         "fit_amp_A": float(A),
         "fit_phase_phi": float(phi),
         "fit_offset_c": float(c),
         "fit_error_vnmse": float(vnmse),
+        "fit_r2": float(r2),
+        "fit_rmse_px": float(rmse),
+        "fit_nrmse": float(nrmse),
+        "fit_mae_px": float(mae),
+        "fit_points": fit_points,
         "fit_window_lo": float(lo),
         "fit_window_hi": float(hi),
         "fit_peak_value": float(residual[int(center_idx)]),
@@ -262,6 +342,55 @@ def anchored_sine_params(
         "fit_passes_peak": True,
     })
     return out
+
+
+def _polarity_fit_metrics(fit: Dict[str, float], *, sign: int, original_peak_value: float) -> Dict[str, float]:
+    out = dict(fit)
+    out["fit_signal_sign"] = int(sign)
+    out["fit_event_value"] = float(fit.get("fit_peak_value", np.nan))
+    out["fit_peak_value"] = float(original_peak_value)
+    if int(sign) < 0:
+        for key in ("fit_amp_A", "fit_offset_c", "fit_peak_error"):
+            try:
+                out[key] = float(out[key]) * -1.0
+            except Exception:
+                pass
+    return out
+
+
+def raw_wave_sine_params(
+    *,
+    position: np.ndarray,
+    x: np.ndarray,
+    sampling_rate: float,
+    freq: float,
+    center_idx: int,
+    sign: int = 1,
+    period_frac: float = 0.5,
+) -> Dict[str, float]:
+    """
+    Fit the same anchored sine model directly to raw track position.
+
+    Minima are fit in inverted position space so the detected event is still a
+    sine maximum, then signed parameters are flipped back to raw coordinates.
+    """
+    fit_position = np.asarray(position, dtype=float) * float(1 if int(sign) >= 0 else -1)
+    raw_fit = anchored_sine_params(
+        residual=fit_position,
+        x=x,
+        sampling_rate=sampling_rate,
+        freq=freq,
+        center_idx=center_idx,
+        period_frac=period_frac,
+    )
+    signed = _polarity_fit_metrics(
+        raw_fit,
+        sign=1 if int(sign) >= 0 else -1,
+        original_peak_value=float(np.asarray(position, dtype=float)[int(center_idx)])
+        if 0 <= int(center_idx) < len(position)
+        else np.nan,
+    )
+    return _prefix_fit_metrics(signed, "raw")
 
 
 # -----------------------
@@ -330,6 +459,10 @@ def build_peak_rows(
     sample: str,
     track_stem: str,
     features_cfg: Optional[dict] = None,
+    fit_residual: Optional[np.ndarray] = None,
+    event_polarity: str = "maxima",
+    event_kind: str = "max",
+    fit_signal_sign: int = 1,
     global_freq_hz: float | None = None,
     period_frac_for_fit: float = 0.5,
     coord_meta: Optional[dict] = None,
@@ -338,11 +471,15 @@ def build_peak_rows(
     features_cfg = features_cfg or {}
 
     p = np.asarray(peaks_idx, dtype=int)
+    fit_res = np.asarray(residual if fit_residual is None else fit_residual, dtype=float)
+    sign = 1 if int(fit_signal_sign) >= 0 else -1
     if p.size == 0:
         return rows
 
     sample_id = sample_id_from_name(sample)
     maybe_track_id = coerce_track_id(track_stem)
+    fit_target = _normalise_fit_target(features_cfg.get("fit_target", "raw_wave"))
+    compare_fit_targets = _bool_cfg(features_cfg.get("compare_fit_targets"), True)
 
     global_fpp = (sampling_rate / float(global_freq_hz)) if (sampling_rate and global_freq_hz and global_freq_hz > 0) else None
 
@@ -352,6 +489,7 @@ def build_peak_rows(
         frame_value = map_heatmap_y(frame_value_img, coord_meta)
         pos_px = map_heatmap_x(pos_px_img, coord_meta)
         amp = float(residual[peak_i])
+        event_amp = float(fit_res[peak_i])
 
         local_fpp = _local_period_frames_from_peaks(p, idx_in_list, frame)
         frames_per_period = local_fpp if (local_fpp and local_fpp > 0) else (global_fpp if (global_fpp and global_fpp > 0) else np.nan)
@@ -362,13 +500,29 @@ def build_peak_rows(
         bulge = bulge_from_props(int(peak_i), p, peak_props or {}, sampling_rate)
 
         fit = anchored_sine_params(
-            residual=residual,
+            residual=fit_res,
             x=frame,
             sampling_rate=sampling_rate,
             freq=freq_hz if (np.isfinite(freq_hz) and freq_hz > 0) else (global_freq_hz or np.nan),
             center_idx=int(peak_i),
             period_frac=float(features_cfg.get("fit_window_period_frac", period_frac_for_fit)),
         )
+        fit = _polarity_fit_metrics(fit, sign=sign, original_peak_value=amp)
+        residual_fit = _prefix_fit_metrics(fit, "residual")
+
+        raw_fit: Dict[str, Any] = {}
+        if compare_fit_targets or fit_target == "raw_wave":
+            raw_fit = raw_wave_sine_params(
+                position=position,
+                x=frame,
+                sampling_rate=sampling_rate,
+                freq=freq_hz if (np.isfinite(freq_hz) and freq_hz > 0) else (global_freq_hz or np.nan),
+                center_idx=int(peak_i),
+                sign=sign,
+                period_frac=float(features_cfg.get("fit_window_period_frac", period_frac_for_fit)),
+            )
+            if fit_target == "raw_wave":
+                fit = _prefixed_fit_as_primary(raw_fit, "raw")
 
         lo = fit.get("fit_window_lo", np.nan)
         hi = fit.get("fit_window_hi", np.nan)
@@ -386,24 +540,36 @@ def build_peak_rows(
             "sample_id": int(sample_id),
             "track_stem": track_stem,
             "track_id_hint": int(maybe_track_id) if maybe_track_id is not None else None,
+            "event_polarity": event_polarity,
+            "event_kind": event_kind,
+            "fit_target": fit_target,
+            "compare_fit_targets": compare_fit_targets,
+            "fit_signal_sign": sign,
             "peak_index": int(idx_in_list + 1),
             "peak_i": int(peak_i),
             "frame": frame_value,
             "pos_px": pos_px,
             "x_px": x_px,
             "y_px": y_px,
+            "event_value": event_amp,
+            "peak_value_original": amp,
             "local_period_frames": period_frames,
             "local_period_s": period_s,
             "local_freq_hz": freq_hz,
             "orientation_deg": ang_mean,
             "orientation_std_deg": ang_std,
             **bulge,
+            **residual_fit,
+            **raw_fit,
             **fit,
         }
 
         rows.append({
             "pos": frame_value,                   # Peak.pos
             "value": amp,                         # Peak.value
+            "event_polarity": event_polarity,
+            "event_kind": event_kind,
+            "fit_target": fit_target,
             "metrics": json_sanitize(metrics),    # Peak.metrics (JSONB)
         })
 
@@ -421,6 +587,10 @@ def build_wave_rows(
     sample: str,
     track_stem: str,
     features_cfg: Optional[dict] = None,
+    fit_residual: Optional[np.ndarray] = None,
+    event_polarity: str = "maxima",
+    event_kind: str = "max",
+    fit_signal_sign: int = 1,
     freq_hz: float | None = None,
     period_frac_for_fit: float = 0.5,
     coord_meta: Optional[dict] = None,
@@ -429,11 +599,15 @@ def build_wave_rows(
     rows: List[dict] = []
 
     p = np.asarray(peaks_idx, dtype=int)
+    fit_res = np.asarray(residual if fit_residual is None else fit_residual, dtype=float)
+    sign = 1 if int(fit_signal_sign) >= 0 else -1
     if p.size == 0:
         return rows
 
     sample_id = sample_id_from_name(sample)
     maybe_track_id = coerce_track_id(track_stem)
+    fit_target = _normalise_fit_target(features_cfg.get("fit_target", "raw_wave"))
+    compare_fit_targets = _bool_cfg(features_cfg.get("compare_fit_targets"), True)
     global_fpp = (sampling_rate / float(freq_hz)) if (sampling_rate and freq_hz and freq_hz > 0) else None
     frame_min = float(np.nanmin(frame)) if frame.size else np.nan
     frame_max = float(np.nanmax(frame)) if frame.size else np.nan
@@ -443,48 +617,49 @@ def build_wave_rows(
         prev_i = int(p[k - 1]) if k - 1 >= 0 else None
         next_i = int(p[k + 1]) if k + 1 < p.size else None
 
-        peak_frame_img = float(frame[peak_i])
-        peak_pos_img = float(position[peak_i])
-        peak_frame = map_heatmap_y(peak_frame_img, coord_meta)
-        peak_pos = map_heatmap_x(peak_pos_img, coord_meta)
+        peak_frame_raw = float(frame[peak_i])
+        peak_pos_raw = float(position[peak_i])
+        peak_frame = map_heatmap_y(peak_frame_raw, coord_meta)
+        peak_pos = map_heatmap_x(peak_pos_raw, coord_meta)
         period_est = _local_period_frames_from_peaks(p, k, frame)
         if not (period_est and period_est > 0) and global_fpp and global_fpp > 0:
             period_est = float(global_fpp)
 
         if period_est and np.isfinite(period_est) and period_est > 0:
             if prev_i is not None:
-                frame1 = (float(frame[prev_i]) + peak_frame) / 2.0
+                frame1_raw = (float(frame[prev_i]) + peak_frame_raw) / 2.0
             else:
-                frame1 = peak_frame - (float(period_est) / 2.0)
+                frame1_raw = peak_frame_raw - (float(period_est) / 2.0)
 
             if next_i is not None:
-                frame2 = (peak_frame + float(frame[next_i])) / 2.0
+                frame2_raw = (peak_frame_raw + float(frame[next_i])) / 2.0
             else:
-                frame2 = peak_frame + (float(period_est) / 2.0)
+                frame2_raw = peak_frame_raw + (float(period_est) / 2.0)
         else:
-            frame1 = peak_frame
-            frame2 = peak_frame
+            frame1_raw = peak_frame_raw
+            frame2_raw = peak_frame_raw
 
-        if frame2 < frame1:
-            frame1, frame2 = frame2, frame1
+        if frame2_raw < frame1_raw:
+            frame1_raw, frame2_raw = frame2_raw, frame1_raw
 
-        period_frames = frame2 - frame1
+        period_frames = frame2_raw - frame1_raw
         period_s = (period_frames / sampling_rate) if sampling_rate else float("nan")
         freq = (1.0 / period_s) if (np.isfinite(period_s) and period_s > 0) else (float(freq_hz) if (freq_hz and freq_hz > 0) else np.nan)
 
-        pos1 = map_heatmap_x(_interp_position_at_frame(frame, position, frame1), coord_meta)
-        pos2 = map_heatmap_x(_interp_position_at_frame(frame, position, frame2), coord_meta)
+        pos1 = map_heatmap_x(_interp_position_at_frame(frame, position, frame1_raw), coord_meta)
+        pos2 = map_heatmap_x(_interp_position_at_frame(frame, position, frame2_raw), coord_meta)
 
-        frame1_coord = map_heatmap_y(frame1, coord_meta)
-        frame2_coord = map_heatmap_y(frame2, coord_meta)
+        frame1_coord = map_heatmap_y(frame1_raw, coord_meta)
+        frame2_coord = map_heatmap_y(frame2_raw, coord_meta)
 
         amp = float(residual[peak_i])
+        event_amp = float(fit_res[peak_i])
 
         dpos = pos2 - pos1
         vel = (dpos / period_s) if (np.isfinite(period_s) and period_s != 0) else float("nan")
         wavelength = float(abs(dpos))
 
-        mask = (frame >= frame1) & (frame <= frame2)
+        mask = (frame >= frame1_raw) & (frame <= frame2_raw)
         if int(np.count_nonzero(mask)) >= 2:
             ang_mean, ang_std = orientation_deg(frame[mask], position[mask])
             frame_seg = frame[mask]
@@ -505,13 +680,29 @@ def build_wave_rows(
         bulge = bulge_from_props(peak_i, p, peak_props or {}, sampling_rate)
 
         fit = anchored_sine_params(
-            residual=residual,
+            residual=fit_res,
             x=frame,
             sampling_rate=sampling_rate,
             freq=freq if np.isfinite(freq) else (freq_hz or np.nan),
             center_idx=peak_i,
             period_frac=float(features_cfg.get("fit_window_period_frac", period_frac_for_fit)),
         )
+        fit = _polarity_fit_metrics(fit, sign=sign, original_peak_value=amp)
+        residual_fit = _prefix_fit_metrics(fit, "residual")
+
+        raw_fit: Dict[str, Any] = {}
+        if compare_fit_targets or fit_target == "raw_wave":
+            raw_fit = raw_wave_sine_params(
+                position=position,
+                x=frame,
+                sampling_rate=sampling_rate,
+                freq=freq if np.isfinite(freq) else (freq_hz or np.nan),
+                center_idx=peak_i,
+                sign=sign,
+                period_frac=float(features_cfg.get("fit_window_period_frac", period_frac_for_fit)),
+            )
+            if fit_target == "raw_wave":
+                fit = _prefixed_fit_as_primary(raw_fit, "raw")
 
         wlabel, wscore = classify_wave_type(
             angle_deg=ang_mean,
@@ -524,13 +715,13 @@ def build_wave_rows(
         y_px = int(round(peak_frame)) if np.isfinite(peak_frame) else None
 
         # Time window for this wave (best-effort)
-        t_start = (frame1 / sampling_rate) if (sampling_rate and np.isfinite(frame1)) else None
-        t_end = (frame2 / sampling_rate) if (sampling_rate and np.isfinite(frame2)) else None
+        t_start = (frame1_raw / sampling_rate) if (sampling_rate and np.isfinite(frame1_raw)) else None
+        t_end = (frame2_raw / sampling_rate) if (sampling_rate and np.isfinite(frame2_raw)) else None
         seconds_delta = (t_end - t_start) if (t_start is not None and t_end is not None) else float("nan")
         boundary_extrapolated = bool(
             np.isfinite(frame_min)
             and np.isfinite(frame_max)
-            and (frame1 < frame_min or frame2 > frame_max)
+            and (frame1_raw < frame_min or frame2_raw > frame_max)
         )
 
         metrics = {
@@ -538,6 +729,11 @@ def build_wave_rows(
             "sample_id": int(sample_id),
             "track_stem": track_stem,
             "track_id_hint": int(maybe_track_id) if maybe_track_id is not None else None,
+            "event_polarity": event_polarity,
+            "event_kind": event_kind,
+            "fit_target": fit_target,
+            "compare_fit_targets": compare_fit_targets,
+            "fit_signal_sign": sign,
             "wave_index": int(k + 1),
             "peak_i": int(peak_i),
             "peak_index": int(k + 1),
@@ -545,8 +741,14 @@ def build_wave_rows(
             "has_peak": True,
             "previous_peak_i": int(prev_i) if prev_i is not None else None,
             "next_peak_i": int(next_i) if next_i is not None else None,
+            "peak_frame_raw": peak_frame_raw,
+            "peak_position_raw": peak_pos_raw,
             "peak_frame_y_axis": peak_frame,
             "peak_position_x_axis": peak_pos,
+            "event_value": event_amp,
+            "peak_value_original": amp,
+            "frame1_raw": frame1_raw,
+            "frame2_raw": frame2_raw,
             "frame1": frame1_coord,
             "frame2": frame2_coord,
             "period_frames": period_frames,
@@ -566,11 +768,14 @@ def build_wave_rows(
             "wave_type": wlabel,
             "type_score": float(wscore),
             **bulge,
+            **residual_fit,
+            **raw_fit,
             **fit,
             "legacy": {
                 "Sample": sample,
                 "Track": maybe_track_id if maybe_track_id is not None else track_stem,
                 "Wave number": int(k + 1),
+                "Event polarity": event_polarity,
                 "Frame position 1": frame1_coord,
                 "Frame position 2": frame2_coord,
                 "Period (frames)": period_frames,
@@ -592,6 +797,9 @@ def build_wave_rows(
 
         rows.append({
             "wave_index": int(k + 1),                         # Wave.wave_index
+            "event_polarity": event_polarity,
+            "event_kind": event_kind,
+            "fit_target": fit_target,
             "x": x_px,                                         # Wave.x (heatmap col)
             "y": y_px,                                         # Wave.y (heatmap row)
             "amplitude": _finite_or_none(amp),                 # Wave.amplitude

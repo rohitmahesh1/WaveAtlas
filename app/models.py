@@ -173,6 +173,9 @@ class Wave(SQLModel, table=True):
     track_id: Optional[UUID] = Field(default=None, foreign_key="tracks.id", index=True)
 
     wave_index: Optional[int] = Field(default=None, index=True)
+    event_polarity: Optional[str] = Field(default=None, index=True)
+    event_kind: Optional[str] = Field(default=None, index=True)
+    fit_target: Optional[str] = Field(default=None, index=True)
 
     x: Optional[int] = Field(default=None, index=True)
     y: Optional[int] = Field(default=None, index=True)
@@ -205,6 +208,9 @@ class Peak(SQLModel, table=True):
 
     pos: Optional[float] = Field(default=None, index=True)
     value: Optional[float] = None
+    event_polarity: Optional[str] = Field(default=None, index=True)
+    event_kind: Optional[str] = Field(default=None, index=True)
+    fit_target: Optional[str] = Field(default=None, index=True)
 
     metrics: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
     created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
@@ -281,6 +287,9 @@ class WaveRead(SQLModel):
     job_id: UUID
     track_id: Optional[UUID]
     wave_index: Optional[int]
+    event_polarity: Optional[str]
+    event_kind: Optional[str]
+    fit_target: Optional[str]
     x: Optional[int]
     y: Optional[int]
     amplitude: Optional[float]
