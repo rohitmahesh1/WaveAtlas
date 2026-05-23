@@ -50,6 +50,7 @@ Used when removing baseline trends from track signals (RANSAC + polynomial fit).
 
 ## peaks
 Used for peak detection on the detrended residual.
+- `peaks.event_polarity` (string): Which residual events to extract. Use `both` for maxima and minima, `maxima` for positive peaks only, or `minima` for negative troughs only. Change when: you want a single event polarity or need to compare against older positive-peak-only output.
 - `peaks.adaptive` (bool): Use period-aware adaptive peak thresholds instead of the explicit prominence/width/distance values. Change when: tracks vary enough that fixed thresholds miss peaks or over-detect noise.
 - `peaks.minimum_per_track` (int): Minimum peak anchors required for each non-empty track. The default keeps one fallback anchor when thresholds miss every peak.
 - `peaks.prominence` (number): Minimum peak prominence for detection. Change when: you’re getting too many weak peaks (increase) or missing real peaks (decrease).
@@ -78,12 +79,15 @@ Visualization toggles used by the legacy pipeline (not currently used by the new
 
 ## features
 Controls derived metrics and wave classification.
+- `features.fit_target` (string): Primary local sine fit target. `raw_wave` fits the base track position and is the default; `residual` fits the detrended residual. Change when: you want the reported `fit_*` columns to use residual-based fitting for older workflows.
+- `features.compare_fit_targets` (bool): Also compute the non-primary fit target and include `raw_fit_*` / `residual_fit_*` metadata. Change when: you want smaller output or faster feature computation and only need the primary fit.
 - `features.fit_window_period_frac` (number): Window size (as a fraction of period) used for local fits when computing features. Change when: fits are too noisy (increase) or oversmoothed (decrease).
 - `features.classify.ripple_max_deg` (number): Max angle (degrees) to classify a wave as ripple-like. Change when: ripple classification is too strict/lenient.
 - `features.classify.surf_min_deg` (number): Min angle (degrees) to classify a wave as surf-like. Change when: surf classification is too strict/lenient.
 - `features.classify.prominence_min_px` (number): Minimum peak prominence (in pixels) required for ripple classification. Change when: weak peaks are being misclassified.
 Notes:
 - Wave rows are peak-centered: each detected peak creates one wave row, with frame windows estimated from neighboring peaks or the global period.
+- With the default config, both minima and maxima are extracted, both raw-wave and residual fit metrics are recorded, and the unprefixed `fit_*` fields come from the configured primary target.
 
 ## service
 Service and pipeline runtime settings.
@@ -168,6 +172,7 @@ Post-processing after skeletonization.
 - `kymo.onnx.postproc.max_dx` (int): Max horizontal delta allowed when bridging. Change when: you want to allow more/less horizontal deviation.
 - `kymo.onnx.postproc.prob_bridge_min` (number): Minimum probability to bridge gaps. Change when: bridging is too aggressive (raise) or too conservative (lower).
 - `kymo.onnx.postproc.endpoint_link.enabled` (bool): Link compatible track endpoints after the normal extension pass. Change when: you want to merge fragmented or slightly overlapping traces (true) or preserve raw extracted fragments (false).
+- `kymo.onnx.postproc.endpoint_link.level` (string): Preset strength for endpoint linking. Available levels are `minimal`, `conservative`, `balanced`, `maximal`, `aggressive`, and `experimental`. The default is `maximal`; `aggressive` and `experimental` are more permissive. Change when: links are too sparse or too eager and you want a simpler knob than tuning every value below.
 - `kymo.onnx.postproc.endpoint_link.max_gap_rows` (int): Largest row gap considered for endpoint linking. Change when: desired fragments are farther apart or false merges appear over long gaps.
 - `kymo.onnx.postproc.endpoint_link.max_dx` (number): Max projected horizontal mismatch for endpoint links. Change when: valid tracks drift more/less between fragments.
 - `kymo.onnx.postproc.endpoint_link.min_bridge_prob` (number): Minimum average probability along a proposed link. Change when: links are too permissive (raise) or missed across faint regions (lower).
@@ -178,6 +183,8 @@ Post-processing after skeletonization.
 - `kymo.onnx.postproc.endpoint_link.overlap_enabled` (bool): Allow endpoint linking through short overlapping track sections. Change when: duplicate/overlapping fragments should be merged.
 - `kymo.onnx.postproc.endpoint_link.min_overlap_rows` / `max_overlap_rows` (int): Overlap-size range considered for overlap links. Change when: valid overlaps are shorter or longer.
 - `kymo.onnx.postproc.endpoint_link.overlap_dx_tol` (number): Horizontal tolerance for overlap-link consensus. Change when: overlapping fragments are slightly offset or false overlap links appear.
+- Endpoint-link presets: `minimal` is shortest/strictest, `conservative` is cautious for dense or noisy images, `balanced` is moderate, `maximal` is the default, `aggressive` goes beyond `maximal` for very fragmented traces, and `experimental` is the most permissive inspection mode.
+- Numeric endpoint-link keys can still be set next to `level`; explicit values override the preset for that one run.
 - `kymo.onnx.postproc.dedupe.enabled` (bool): Remove duplicate tracks. Change when: duplicates appear (enable) or you want to keep overlapping tracks (disable).
 - `kymo.onnx.postproc.dedupe.min_rows` (int): Minimum rows for dedupe consideration. Change when: shorter tracks should be deduped or ignored.
 - `kymo.onnx.postproc.dedupe.min_score` (number): Minimum score to keep a track during dedupe. Change when: dedupe is too aggressive (raise) or too lax (lower).
