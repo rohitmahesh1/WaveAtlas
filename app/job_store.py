@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
+from enum import Enum
+import math
+from numbers import Integral, Real
 from typing import Any, Dict, List, Optional, Sequence
 from uuid import UUID
 
@@ -51,13 +54,55 @@ _PEAK_MODEL_KEYS = {
 }
 
 
+def _json_safe(value: Any) -> Any:
+    """
+    Convert Python/NumPy-ish values into strict JSON values.
+
+    PostgreSQL's json type rejects NaN/Infinity even though Python's json.dumps
+    emits them by default, so sanitize at the persistence boundary.
+    """
+    if value is None or isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, Enum):
+        return _json_safe(value.value)
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(_json_safe(key)): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        try:
+            return _json_safe(tolist())
+        except Exception:
+            pass
+
+    if isinstance(value, Integral):
+        return int(value)
+    if isinstance(value, Real):
+        number = float(value)
+        return number if math.isfinite(number) else None
+
+    try:
+        number = float(value)
+    except Exception:
+        return str(value)
+    return number if math.isfinite(number) else None
+
+
 def _row_for_metric_model(row: Dict[str, Any], *, model_keys: set[str]) -> Dict[str, Any]:
     out = {key: value for key, value in row.items() if key in model_keys}
     metrics = dict(out.get("metrics") or {})
     for key, value in row.items():
         if key not in model_keys:
             metrics.setdefault(key, value)
-    out["metrics"] = metrics
+    out["metrics"] = _json_safe(metrics)
     return out
 
 
@@ -93,7 +138,7 @@ class JobStore:
             cancel_requested=False,
             created_at=now,
             updated_at=now,
-            config=config or {},
+            config=_json_safe(config or {}),
             progress={},
         )
         self.session.add(job)
@@ -183,7 +228,7 @@ class JobStore:
             "updated_at": now,
         }
         if config is not None:
-            values["config"] = dict(config)
+            values["config"] = _json_safe(config)
 
         result = self.session.execute(
             update(Job)
@@ -221,7 +266,7 @@ class JobStore:
             "updated_at": now,
         }
         if config is not None:
-            values["config"] = dict(config)
+            values["config"] = _json_safe(config)
 
         result = self.session.execute(
             update(Job)
@@ -320,11 +365,11 @@ class JobStore:
         now = datetime.utcnow()
 
         if replace:
-            job.progress = dict(progress)
+            job.progress = _json_safe(progress)
         else:
             merged = dict(job.progress or {})
             merged.update(progress)
-            job.progress = merged
+            job.progress = _json_safe(merged)
 
         job.updated_at = now
         self.session.add(job)
@@ -353,7 +398,7 @@ class JobStore:
                 job_id=job_id,
                 seq=seq,
                 type=event_type,
-                payload=payload,
+                payload=_json_safe(payload),
                 created_at=datetime.utcnow(),
             )
             self.session.add(ev)
@@ -423,8 +468,8 @@ class JobStore:
                 error=error,
                 x0=x0,
                 y0=y0,
-                metrics=metrics or {},
-                overlay=overlay or {},
+                metrics=_json_safe(metrics or {}),
+                overlay=_json_safe(overlay or {}),
             )
             self.session.add(track)
         else:
@@ -443,9 +488,9 @@ class JobStore:
             if metrics is not None:
                 merged = dict(track.metrics or {})
                 merged.update(metrics)
-                track.metrics = merged
+                track.metrics = _json_safe(merged)
             if overlay is not None:
-                track.overlay = overlay
+                track.overlay = _json_safe(overlay)
             self.session.add(track)
 
         self.session.commit()
@@ -453,7 +498,17 @@ class JobStore:
         return track
 
     def insert_tracks_batch(self, job_id: UUID, rows: Sequence[Dict[str, Any]]) -> int:
-        objs = [Track(job_id=job_id, **r) for r in rows]
+        objs = [
+            Track(
+                job_id=job_id,
+                **{
+                    **r,
+                    "metrics": _json_safe(r.get("metrics") or {}),
+                    "overlay": _json_safe(r.get("overlay") or {}),
+                },
+            )
+            for r in rows
+        ]
         self.session.add_all(objs)
         self.session.commit()
         return len(objs)
@@ -533,7 +588,7 @@ class JobStore:
             blob_path=blob_path,
             content_type=content_type,
             byte_size=byte_size,
-            meta=meta_in or {},  # IMPORTANT: use `meta`, not `metadata`
+            meta=_json_safe(meta_in or {}),  # IMPORTANT: use `meta`, not `metadata`
             created_at=datetime.utcnow(),
         )
         self.session.add(art)

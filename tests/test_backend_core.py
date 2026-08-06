@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -13,7 +14,7 @@ import yaml
 
 from app.extract_core import _detect_peak_sets, _flatten_onnx_cfg_for_runner, process_track
 from app.api.routes_jobs import _detect_peak_sets_for_detail, _detail_fit_meta_for_original_polarity
-from app.job_store import _PEAK_MODEL_KEYS, _WAVE_MODEL_KEYS, _row_for_metric_model
+from app.job_store import _PEAK_MODEL_KEYS, _WAVE_MODEL_KEYS, _json_safe, _row_for_metric_model
 from app.modules.kb_adapter import link_track_endpoints
 from app.modules.tracker import Track
 
@@ -231,7 +232,12 @@ class BackendCoreTests(unittest.TestCase):
 
     def test_metric_model_rows_keep_event_labels_as_columns_and_fit_scores_as_metrics(self) -> None:
         wave = _row_for_metric_model(
-            {"wave_index": 1, "event_kind": "min", "fit_error_vnmse": 0.2, "metrics": {"fit_target": "raw_wave"}},
+            {
+                "wave_index": 1,
+                "event_kind": "min",
+                "fit_error_vnmse": 0.2,
+                "metrics": {"fit_target": "raw_wave", "empty_quality": float("nan")},
+            },
             model_keys=_WAVE_MODEL_KEYS,
         )
         peak = _row_for_metric_model(
@@ -242,7 +248,26 @@ class BackendCoreTests(unittest.TestCase):
         self.assertEqual(wave["event_kind"], "min")
         self.assertEqual(wave["metrics"]["fit_error_vnmse"], 0.2)
         self.assertEqual(wave["metrics"]["fit_target"], "raw_wave")
+        self.assertIsNone(wave["metrics"]["empty_quality"])
         self.assertEqual(peak["event_polarity"], "minima")
+        json.dumps(wave, allow_nan=False)
+        json.dumps(peak, allow_nan=False)
+
+    def test_json_safe_converts_non_finite_values_for_postgres_json(self) -> None:
+        payload = {
+            "nan": float("nan"),
+            "inf": np.float32(np.inf),
+            "array": np.array([1.0, np.nan, np.inf]),
+            "nested": [{"count": np.int64(4), "ok": True}],
+        }
+
+        safe = _json_safe(payload)
+
+        self.assertIsNone(safe["nan"])
+        self.assertIsNone(safe["inf"])
+        self.assertEqual(safe["array"], [1.0, None, None])
+        self.assertEqual(safe["nested"][0]["count"], 4)
+        json.dumps(safe, allow_nan=False)
 
     def test_endpoint_linker_merges_clean_fragments(self) -> None:
         prob = np.full((16, 16), 0.2, dtype=np.float32)

@@ -625,7 +625,19 @@ def run_job(
         emit(EventType.done, {"ok": True, "duration_s": (datetime.utcnow() - started_at).total_seconds()})
 
     except Exception as e:
-        user_log("Run failed", stage="failed", level="error")
-        job_store.set_status(job_id, JobStatus.failed, error=str(e), emit_event=True)
-        emit(EventType.error, {"error": str(e)})
+        error_text = str(e)
+        try:
+            job_store.session.rollback()
+        except Exception:
+            pass
+
+        try:
+            job_store.set_status(job_id, JobStatus.failed, error=error_text, emit_event=True)
+            user_log("Run failed", stage="failed", level="error")
+            emit(EventType.error, {"error": error_text})
+        except Exception:
+            try:
+                job_store.session.rollback()
+            except Exception:
+                pass
         raise
