@@ -1,5 +1,5 @@
 // src/pages/AdvancedViewerPage.tsx
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { OverlayCanvas } from "../OverlayCanvas";
 import type { OverlayTrackEvent } from "../OverlayCanvas";
@@ -54,7 +54,6 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
   const { onViewAllRuns } = props;
   const [file, setFile] = useState<File | null>(null);
   const [selectedTrackId, setSelectedTrackId] = useState<string | number | null>(null);
-  const [hoveredTrackId, setHoveredTrackId] = useState<string | number | null>(null);
   const [selectedDebugLabel, setSelectedDebugLabel] = useState<string>("none");
   const [debugOpacity, setDebugOpacity] = useState<number>(0.6);
   const [runName, setRunName] = useState<string>("");
@@ -148,12 +147,6 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
     return filteredTracks.find((t) => String(t.id ?? t.track_index) === String(activeSelectedTrackId)) ?? null;
   }, [filteredTracks, activeSelectedTrackId]);
 
-  const hoverColorFn = useMemo(() => {
-    if (hoveredTrackId == null) return undefined;
-    return (t: OverlayTrackEvent) =>
-      String(t.id ?? t.track_index) === String(hoveredTrackId) ? "rgba(255,215,0,0.9)" : undefined;
-  }, [hoveredTrackId]);
-
   const activeDebugLabel = useMemo(() => {
     if (selectedDebugLabel === "none") return "none";
     return debugOverlays.some((o) => o.label === selectedDebugLabel) ? selectedDebugLabel : "none";
@@ -223,6 +216,10 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
     });
   };
 
+  const handleClickTrack = useCallback((t: OverlayTrackEvent | null) => {
+    setSelectedTrackId(t ? (t.id ?? t.track_index) : null);
+  }, []);
+
   return (
     <div className="app-shell">
       <header className="app-header">
@@ -247,7 +244,6 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
             onRun={() => {
               if (!file) return;
               setSelectedTrackId(null);
-              setHoveredTrackId(null);
               setSelectedDebugLabel("none");
               resetTrackDetail();
               runJob(file, mergeRunConfigWithImageProcessing({}, imageProcessingDimensions), runName);
@@ -429,9 +425,7 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
               hideBaseImage={hideBaseImage}
               hideTracks={hideTracks}
               selectedTrackId={activeSelectedTrackId}
-              onClickTrack={(t) => setSelectedTrackId(t ? (t.id ?? t.track_index) : null)}
-              onHoverTrack={(t) => setHoveredTrackId(t ? (t.id ?? t.track_index) : null)}
-              colorOverrideFn={hoverColorFn}
+              onClickTrack={handleClickTrack}
             />
           </div>
           {tracks.length > 0 && filteredTracks.length === 0 ? (

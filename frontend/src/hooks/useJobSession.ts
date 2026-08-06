@@ -165,6 +165,8 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
   const pollForBaseHeatmapRef = useRef<(id: string) => void>(() => undefined);
   const connectWsWithRetryRef = useRef<(id: string, afterSeq: number) => void>(() => undefined);
   const resumeSavedJobRef = useRef<(id: string) => void>(() => undefined);
+  const pendingTracksRef = useRef<Map<number, OverlayTrackEvent>>(new Map());
+  const trackFlushRafRef = useRef<number | null>(null);
 
   const addActivity = (message: string, level: "info" | "warn" | "error" = "info", stage?: string) => {
     const ts = new Date().toLocaleTimeString();
@@ -172,13 +174,39 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     setActivity((x) => [{ id, ts, message, level, stage }, ...x].slice(0, 200));
   };
 
-  function upsertTrack(t: OverlayTrackEvent) {
+  function flushPendingTracks() {
+    trackFlushRafRef.current = null;
+    const pending = pendingTracksRef.current;
+    if (pending.size === 0) return;
+
+    const batch = Array.from(pending.values());
+    pending.clear();
+
     setTracks((prev) => {
       const m = new Map<number, OverlayTrackEvent>();
       for (const p of prev) m.set(p.track_index, p);
-      m.set(t.track_index, t);
+      for (const t of batch) m.set(t.track_index, t);
       return Array.from(m.values()).sort((a, b) => a.track_index - b.track_index);
     });
+  }
+
+  function queueTrack(t: OverlayTrackEvent) {
+    pendingTracksRef.current.set(t.track_index, t);
+    if (trackFlushRafRef.current != null) return;
+    trackFlushRafRef.current = window.requestAnimationFrame(flushPendingTracks);
+  }
+
+  function cancelPendingTrackFlush() {
+    pendingTracksRef.current.clear();
+    if (trackFlushRafRef.current != null) {
+      window.cancelAnimationFrame(trackFlushRafRef.current);
+      trackFlushRafRef.current = null;
+    }
+  }
+
+  function clearTracks() {
+    cancelPendingTrackFlush();
+    setTracks([]);
   }
 
   function upsertDebugOverlay(entry: { label: string; url: string }) {
@@ -210,7 +238,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     jobIdRef.current = null;
     setJobId(null);
     setStatus("idle");
-    setTracks([]);
+    clearTracks();
     setBaseImageUrl(null);
     setBaseImageInfo(null);
     setOriginalImageUrl(null);
@@ -451,7 +479,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
 
         if (msg.type === "overlay_track") {
           const t = normalizeOverlayTrack(msg.payload);
-          if (t) upsertTrack(t);
+          if (t) queueTrack(t);
           return;
         }
 
@@ -554,7 +582,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
 
   async function runJob(file: File, configOverride?: unknown, runName?: string) {
     setStatus("creating job…");
-    setTracks([]);
+    clearTracks();
     setBaseImageUrl(null);
     setBaseImageInfo(null);
     setOriginalImageUrl(null);
@@ -625,7 +653,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     jobIdRef.current = id;
     setJobId(id);
     setStatus("resuming…");
-    setTracks([]);
+    clearTracks();
     setBaseImageUrl(null);
     setOriginalImageUrl(null);
     setCurrentStage("resuming");
@@ -669,7 +697,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     jobIdRef.current = null;
     setJobId(null);
     setStatus("idle");
-    setTracks([]);
+    clearTracks();
     setBaseImageUrl(null);
     setOriginalImageUrl(null);
     lastSeqRef.current = 0;
@@ -705,6 +733,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
   useEffect(() => {
     return () => {
       pollTokenRef.current += 1;
+      cancelPendingTrackFlush();
       closeWs("unmount");
     };
   }, []);

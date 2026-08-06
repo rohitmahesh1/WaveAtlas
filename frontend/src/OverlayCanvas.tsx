@@ -95,6 +95,7 @@ export function OverlayCanvas(props: {
   const imgRef = useRef<HTMLImageElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const highlightCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const tooltipRef = useRef<HTMLDivElement | null>(null);
   const hitCacheRef = useRef<HitEntry[] | null>(null);
   const hoverRef = useRef<string | number | null>(null);
@@ -106,6 +107,7 @@ export function OverlayCanvas(props: {
   const [stageSize, setStageSize] = useState<{ width: number; height: number }>({ width: 1, height: 1 });
   const [zoom, setZoom] = useState<number>(1);
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [hoveredTrack, setHoveredTrack] = useState<OverlayTrackEvent | null>(null);
 
   useEffect(() => {
     const image = imgRef.current;
@@ -308,6 +310,34 @@ export function OverlayCanvas(props: {
     };
   }, [imageUrl, tracks, filterFn, colorOverrideFn, selectedTrackId, overlayColor, hideTracks]);
 
+  useEffect(() => {
+    const canvas = highlightCanvasRef.current;
+    if (!canvas || !imageSize) return;
+
+    canvas.width = imageSize.width;
+    canvas.height = imageSize.height;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (hideTracks || !hoveredTrack) return;
+
+    const pts = hoveredTrack.poly || [];
+    if (pts.length < 2) return;
+
+    ctx.save();
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = "rgba(255,215,0,0.9)";
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.stroke();
+    ctx.restore();
+  }, [hoveredTrack, imageSize, hideTracks]);
+
   // Rebuild hit cache when tracks or transforms change
   useEffect(() => {
     if (hideTracks) {
@@ -412,12 +442,11 @@ export function OverlayCanvas(props: {
       const cx = localX * scaleX;
       const cy = localY * scaleY;
       const hit = findNearestTrack(cx, cy);
-      if (onHoverTrack) {
-        const hitId = hit ? (hit.id ?? hit.track_index) : null;
-        if (String(hitId ?? "") !== String(hoverRef.current ?? "")) {
-          hoverRef.current = hitId;
-          onHoverTrack(hit);
-        }
+      const hitId = hit ? (hit.id ?? hit.track_index) : null;
+      if (String(hitId ?? "") !== String(hoverRef.current ?? "")) {
+        hoverRef.current = hitId;
+        setHoveredTrack(hit);
+        onHoverTrack?.(hit);
       }
 
       const w = canvas.width || 1;
@@ -433,10 +462,9 @@ export function OverlayCanvas(props: {
   };
 
   const handlePointerLeave = () => {
-    if (onHoverTrack) {
-      hoverRef.current = null;
-      onHoverTrack(null);
-    }
+    hoverRef.current = null;
+    setHoveredTrack(null);
+    onHoverTrack?.(null);
     dragStartRef.current = null;
     setHoverPoint(null);
   };
@@ -593,6 +621,16 @@ export function OverlayCanvas(props: {
                 onPointerDown={handlePointerDown}
                 onPointerUp={handlePointerUp}
                 onClick={handleClick}
+              />
+              <canvas
+                ref={highlightCanvasRef}
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  width: "100%",
+                  height: "100%",
+                  pointerEvents: "none",
+                }}
               />
             </div>
             {hoverPoint ? (
