@@ -9,11 +9,17 @@ io:
   table_globs: ["*.csv", "*.tsv", "*.xls", "*.xlsx"]
 
 heatmap:
+  table_mode: auto
   lower: -1e20
   upper: 1e16
   binarize: true
   origin: lower
   cmap: hot
+  area:
+    binarize: false
+    cmap: plasma
+    vmin: null
+    vmax: null
 
 image_input:
   grayscale: true

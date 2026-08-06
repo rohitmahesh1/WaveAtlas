@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import tempfile
@@ -11,9 +12,11 @@ os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "waveatl
 
 import numpy as np
 import yaml
+from PIL import Image
 
 from app.extract_core import _detect_peak_sets, _flatten_onnx_cfg_for_runner, process_track
 from app.api.routes_jobs import _detect_peak_sets_for_detail, _detail_fit_meta_for_original_polarity
+from app.io.table_to_heatmap import table_to_heatmap_bytes
 from app.job_store import _PEAK_MODEL_KEYS, _WAVE_MODEL_KEYS, _json_safe, _row_for_metric_model
 from app.modules.kb_adapter import link_track_endpoints
 from app.modules.tracker import Track
@@ -56,6 +59,9 @@ class BackendCoreTests(unittest.TestCase):
         self.assertEqual(config["peaks"]["event_polarity"], "both")
         self.assertEqual(config["features"]["fit_target"], "raw_wave")
         self.assertTrue(config["features"]["compare_fit_targets"])
+        self.assertEqual(config["heatmap"]["table_mode"], "auto")
+        self.assertEqual(config["heatmap"]["area"]["cmap"], "plasma")
+        self.assertFalse(config["heatmap"]["area"]["binarize"])
         endpoint_link = config["kymo"]["onnx"]["postproc"]["endpoint_link"]
         self.assertTrue(endpoint_link["enabled"])
         self.assertNotIn("level", endpoint_link)
@@ -73,6 +79,58 @@ class BackendCoreTests(unittest.TestCase):
         self.assertEqual(runner_cfg["endpoint_link_max_slope_delta"], 0.7)
         self.assertEqual(runner_cfg["endpoint_link_fit_rows"], 16)
         self.assertTrue(runner_cfg["endpoint_link_overlap_enabled"])
+
+    def test_area_named_table_uses_continuous_heatmap_mode(self) -> None:
+        csv = b"0,0.5,1\n0.25,0.75,1\n"
+
+        png, meta = table_to_heatmap_bytes(
+            csv,
+            config={
+                "heatmap": {
+                    "table_mode": "auto",
+                    "origin": "upper",
+                    "area": {"cmap": "gray", "vmin": 0, "vmax": 1},
+                }
+            },
+            filename_hint="DCPM2-DIES-CD1-CON-1-BH_Area_Vertical_Edge.csv",
+        )
+
+        image = Image.open(io.BytesIO(png)).convert("RGBA")
+        row = [image.getpixel((x, 0))[0] for x in range(3)]
+
+        self.assertEqual(image.size, (3, 2))
+        self.assertEqual(meta["resolved_table_mode"], "area")
+        self.assertFalse(meta["binarize"])
+        self.assertEqual(meta["cmap"], "gray")
+        self.assertLess(row[0], row[1])
+        self.assertLess(row[1], row[2])
+
+    def test_non_area_table_keeps_extreme_mask_heatmap_mode(self) -> None:
+        csv = b"0,2e16,-3e20\n1,2,3\n"
+
+        png, meta = table_to_heatmap_bytes(
+            csv,
+            config={
+                "heatmap": {
+                    "table_mode": "auto",
+                    "lower": -1e20,
+                    "upper": 1e16,
+                    "binarize": True,
+                    "origin": "upper",
+                    "cmap": "gray",
+                }
+            },
+            filename_hint="DCPM2-DIES-CD1-CON-1-BH_Mean_intensities_Vertical_Edge_Filtered.csv",
+        )
+
+        image = Image.open(io.BytesIO(png)).convert("RGBA")
+        first_row = [image.getpixel((x, 0))[0] for x in range(3)]
+        second_row = [image.getpixel((x, 1))[0] for x in range(3)]
+
+        self.assertEqual(meta["resolved_table_mode"], "extreme_mask")
+        self.assertTrue(meta["binarize"])
+        self.assertEqual(first_row, [0, 255, 255])
+        self.assertEqual(second_row, [0, 0, 0])
 
     def test_endpoint_link_levels_resolve_from_preset_and_allow_overrides(self) -> None:
         maximal = _flatten_onnx_cfg_for_runner({
