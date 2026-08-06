@@ -277,7 +277,8 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     for (let i = 0; i < 60; i++) {
       if (pollTokenRef.current !== myToken) return;
       try {
-        const [overlayArts, baseArts, imageUploads] = await Promise.all([
+        const [job, overlayArts, baseArts, imageUploads] = await Promise.all([
+          getJob(id),
           listArtifacts(id, { kind: "overlay", limit: 2000 }),
           listArtifacts(id, { kind: "base_heatmap", limit: 1 }),
           listArtifacts(id, { kind: "upload_image", limit: 1 }),
@@ -317,6 +318,17 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
             setBaseImageInfo(null);
           }
         }
+        const statusText = String(job.status || "");
+        if (statusStopsArtifactPolling(statusText)) {
+          setStatus(statusText);
+          stopArtifactPolling();
+          if (statusText === "cancelled" || statusText === "cancel_requested") {
+            setCurrentStage(statusText);
+            setStageDetail(null);
+            setEtaText(null);
+          }
+          return;
+        }
       } catch (error) {
         if (isApiError(error, 404)) {
           clearMissingJobSession(id);
@@ -329,6 +341,14 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     if (pollTokenRef.current === myToken) {
       addActivity("Heatmap not found after polling", "warn");
     }
+  }
+
+  function stopArtifactPolling() {
+    pollTokenRef.current += 1;
+  }
+
+  function statusStopsArtifactPolling(statusText: string) {
+    return ["cancel_requested", "cancelled", "failed", "completed"].includes(statusText);
   }
 
   function closeWs(reason = "close") {
@@ -385,7 +405,11 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
         if (msg.type === "snapshot") {
           const payload = asRecord(msg.payload);
           const st = payload?.status;
-          if (st) setStatus(String(st));
+          if (st) {
+            const statusText = String(st);
+            setStatus(statusText);
+            if (statusStopsArtifactPolling(statusText)) stopArtifactPolling();
+          }
           const prog = asRecord(payload?.progress);
           if (prog?.stage) {
             const stage = String(prog.stage);
@@ -400,7 +424,14 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
           const payload = asRecord(msg.payload);
           const st = payload?.status;
           if (st) {
-            setStatus(String(st));
+            const statusText = String(st);
+            setStatus(statusText);
+            if (statusStopsArtifactPolling(statusText)) stopArtifactPolling();
+            if (statusText === "cancelled") {
+              setCurrentStage("cancelled");
+              setStageDetail(null);
+              setEtaText(null);
+            }
           }
           return;
         }
@@ -574,8 +605,16 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
 
   async function cancelCurrentJob() {
     if (!jobId) return;
+    stopArtifactPolling();
+    setStatus("cancel_requested");
+    setCurrentStage("cancel_requested");
+    setStageDetail("Stopping after current step…");
+    setEtaText(null);
     try {
-      await cancelJob(jobId);
+      const job = await cancelJob(jobId);
+      const statusText = String(job.status || "cancel_requested");
+      setStatus(statusText);
+      if (statusStopsArtifactPolling(statusText)) stopArtifactPolling();
       addActivity("Cancel requested", "warn", "cancel");
     } catch {
       addActivity("Cancel failed", "error", "cancel");

@@ -4,7 +4,7 @@ from __future__ import annotations
 import io
 import os
 import re
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -15,10 +15,17 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 import matplotlib  # noqa: E402
 matplotlib.use("Agg", force=True)  # noqa: E402
 
+from ..cancel import CancellationRequested
+
 
 _AREA_FILENAME_RE = re.compile(r"(^|[^a-z0-9])area([^a-z0-9]|$)", re.IGNORECASE)
 _EXTREME_TABLE_MODES = {"extreme", "extremes", "extreme_mask", "intensity", "legacy"}
 _CONTINUOUS_TABLE_MODES = {"area", "continuous", "raw"}
+
+
+def _check_cancel(cancel_cb: Optional[Callable[[], bool]]) -> None:
+    if cancel_cb is not None and cancel_cb():
+        raise CancellationRequested("cancel_requested")
 
 
 def _is_xlsx_magic(header: bytes) -> bool:
@@ -135,6 +142,7 @@ def table_to_heatmap_bytes(
     *,
     config: Optional[Dict[str, Any]] = None,
     filename_hint: Optional[str] = None,
+    cancel_cb: Optional[Callable[[], bool]] = None,
 ) -> Tuple[bytes, Dict[str, Any]]:
     """
     Ideal pipeline API:
@@ -154,6 +162,7 @@ def table_to_heatmap_bytes(
     Returns:
       (png_bytes, meta)
     """
+    _check_cancel(cancel_cb)
     cfg = config or {}
     heat_cfg = cfg.get("heatmap", cfg)
     requested_table_mode, resolved_table_mode = _resolve_table_mode(heat_cfg, filename_hint)
@@ -163,10 +172,13 @@ def table_to_heatmap_bytes(
     dpi = heat_cfg.get("dpi", 180)
     dpi_val: Optional[int] = int(dpi) if dpi is not None else None
 
+    _check_cancel(cancel_cb)
     df, load_meta = _load_table_bytes(table_bytes, filename_hint=filename_hint)
+    _check_cancel(cancel_cb)
 
     # Convert to float and sanitize NaN/Inf
     data = df.to_numpy(dtype=float)
+    _check_cancel(cancel_cb)
     if not np.isfinite(data).all():
         data = np.nan_to_num(data, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -194,6 +206,7 @@ def table_to_heatmap_bytes(
             filtered = (filtered > 0).astype(int)
         vmax = float(np.max(filtered)) if filtered.size else 1.0
 
+    _check_cancel(cancel_cb)
     nrows, ncols = filtered.shape
     if vmin is None:
         vmin = float(np.min(filtered)) if filtered.size else 0.0
@@ -207,14 +220,17 @@ def table_to_heatmap_bytes(
     scale = float(vmax) - float(vmin)
     if scale > 0:
         norm = np.clip((render.astype(np.float32) - float(vmin)) / scale, 0.0, 1.0)
+    _check_cancel(cancel_cb)
 
     cmap_fn = matplotlib.colormaps.get_cmap(cmap)
     rgba = np.asarray(cmap_fn(norm, bytes=True), dtype=np.uint8)
     out_img = Image.fromarray(rgba, mode="RGBA")
+    _check_cancel(cancel_cb)
 
     buf = io.BytesIO()
     out_img.save(buf, format="PNG")
     png_bytes = buf.getvalue()
+    _check_cancel(cancel_cb)
 
     meta: Dict[str, Any] = {
         **load_meta,
@@ -250,14 +266,22 @@ def table_to_heatmap_file(
     out_path: str,
     config: Optional[Dict[str, Any]] = None,
     filename_hint: Optional[str] = None,
+    cancel_cb: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
     """
     Optional compatibility helper:
     If any legacy code still wants a file on disk (scratch), this saves it
     and returns meta. Durable publishing should still be done via ArtifactStore.
     """
-    png, meta = table_to_heatmap_bytes(table_bytes, config=config, filename_hint=filename_hint)
+    png, meta = table_to_heatmap_bytes(
+        table_bytes,
+        config=config,
+        filename_hint=filename_hint,
+        cancel_cb=cancel_cb,
+    )
+    _check_cancel(cancel_cb)
     with open(out_path, "wb") as f:
         f.write(png)
+    _check_cancel(cancel_cb)
     meta["out_path"] = out_path
     return meta

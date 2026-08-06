@@ -302,8 +302,9 @@ class JobStore:
         return job
 
     def is_cancel_requested(self, job_id: UUID) -> bool:
-        job = self.get_job(job_id)
-        return bool(job.cancel_requested) or job.status == JobStatus.cancel_requested
+        row = self.session.exec(select(Job.cancel_requested, Job.status).where(Job.id == job_id)).one()
+        cancel_requested, status = row
+        return bool(cancel_requested) or status == JobStatus.cancel_requested
 
     def clear_cancel(self, job_id: UUID, *, emit_event: bool = True) -> Job:
         job = self.get_job(job_id)

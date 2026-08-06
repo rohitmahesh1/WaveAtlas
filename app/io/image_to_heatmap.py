@@ -2,10 +2,17 @@
 from __future__ import annotations
 
 import io
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import numpy as np
 from PIL import Image
+
+from ..cancel import CancellationRequested
+
+
+def _check_cancel(cancel_cb: Optional[Callable[[], bool]]) -> None:
+    if cancel_cb is not None and cancel_cb():
+        raise CancellationRequested("cancel_requested")
 
 
 def _parse_hex_color(value: Optional[str]) -> Optional[np.ndarray]:
@@ -72,7 +79,9 @@ def image_to_heatmap_bytes(
     *,
     config: Optional[Dict[str, Any]] = None,
     filename_hint: Optional[str] = None,
+    cancel_cb: Optional[Callable[[], bool]] = None,
 ) -> Tuple[bytes, Dict[str, Any]]:
+    _check_cancel(cancel_cb)
     cfg = config or {}
     image_cfg = dict(cfg.get("image_input") or {})
 
@@ -87,14 +96,17 @@ def image_to_heatmap_bytes(
     low_hex = image_cfg.get("low_hex")
     high_hex = image_cfg.get("high_hex")
 
+    _check_cancel(cancel_cb)
     with Image.open(io.BytesIO(image_bytes)) as img:
         original_mode = img.mode
         original_width, original_height = img.size
         rgb = _composite_rgba(img, alpha_background)
+    _check_cancel(cancel_cb)
 
     output_width, output_height = _resize_size(original_width, original_height, image_cfg)
     if (output_width, output_height) != rgb.size:
         rgb = rgb.resize((output_width, output_height), Image.Resampling.BILINEAR)
+    _check_cancel(cancel_cb)
 
     rgb01 = np.asarray(rgb, dtype=np.float32) / 255.0
     method = "rgb_passthrough"
@@ -119,10 +131,12 @@ def image_to_heatmap_bytes(
         out_img = Image.fromarray((gray01 * 255.0).astype(np.uint8), mode="L")
     else:
         out_img = rgb
+    _check_cancel(cancel_cb)
 
     buf = io.BytesIO()
     out_img.save(buf, format="PNG")
     png_bytes = buf.getvalue()
+    _check_cancel(cancel_cb)
 
     meta: Dict[str, Any] = {
         "filename_hint": filename_hint,

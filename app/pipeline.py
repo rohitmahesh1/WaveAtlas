@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 
 from .artifact_store import ArtifactStore
+from .cancel import CancellationRequested
 from .job_store import JobStore
 from .models import ArtifactKind, EventType, JobStatus
 
@@ -46,6 +47,10 @@ def run_job(
 
     def cancelled() -> bool:
         return job_store.is_cancel_requested(job_id)
+
+    def check_cancel(reason: str = "cancel_requested") -> None:
+        if cancelled():
+            raise CancellationRequested(reason)
 
     def emit(event_type: EventType, payload: Dict[str, Any]) -> None:
         job_store.append_event(job_id, event_type, payload)
@@ -187,6 +192,7 @@ def run_job(
             emit(EventType.progress, {"artifact": {"kind": kind.value, "label": label, "blob_path": blob_path}})
 
     def publish_debug_overlays(image_id: str, base_dir: Path) -> None:
+        check_cancel("cancel_requested_before_debug_overlays")
         dbg = base_dir / "debug"
         if not dbg.exists():
             return
@@ -202,6 +208,7 @@ def run_job(
         ]
 
         for overlay_name, fname, ctype in file_map:
+            check_cancel("cancel_requested_during_debug_overlays")
             p = dbg / fname
             if p.exists():
                 label = f"{image_id}:{overlay_name}"
@@ -216,6 +223,7 @@ def run_job(
 
         ot = base_dir / "overlay_tracks.png"
         if ot.exists():
+            check_cancel("cancel_requested_during_debug_overlays")
             label = f"{image_id}:overlay_tracks"
             publish_file(
                 kind=ArtifactKind.overlay,
@@ -236,14 +244,13 @@ def run_job(
         job_store.set_status(job_id, JobStatus.in_progress, emit_event=True)
         set_progress("init")
         user_log("Starting analysis", stage="init")
+        check_cancel("cancel_requested_before_start")
 
         if resume_enabled:
+            check_cancel("cancel_requested_before_resume_counts")
             job_store.recompute_counts(job_id)
 
-        if cancelled():
-            job_store.set_status(job_id, JobStatus.cancelled, emit_event=True)
-            emit(EventType.cancelled, {"reason": "cancel_requested_before_start"})
-            return
+        check_cancel("cancel_requested_before_start")
 
         # -----------------------------
         # Base heatmap (resume-aware)
@@ -251,12 +258,15 @@ def run_job(
         heatmap_png: Optional[bytes] = None
         heatmap_meta: Optional[Dict[str, Any]] = None
         if resume_enabled:
+            check_cancel("cancel_requested_before_heatmap_resume")
             existing = job_store.list_artifacts(
                 job_id, kind=ArtifactKind.base_heatmap, label="base_heatmap", limit=1
             )
             if existing:
+                check_cancel("cancel_requested_before_heatmap_resume")
                 heatmap_png = artifact_store.get_bytes(existing[0].blob_path)
                 heatmap_meta = dict(getattr(existing[0], "meta", {}) or {})
+                check_cancel("cancel_requested_after_heatmap_resume")
                 set_progress("heatmap_ready", extra={"resume": True})
                 user_log("Using existing heatmap", stage="heatmap_ready")
 
@@ -265,6 +275,7 @@ def run_job(
             # Load uploaded input from artifact store
             # -----------------------------
             user_log("Loading input", stage="load_input")
+            check_cancel("cancel_requested_before_input_load")
             uploads = [
                 *job_store.list_artifacts(job_id, kind=ArtifactKind.upload_image, limit=10),
                 *job_store.list_artifacts(job_id, kind=ArtifactKind.upload_csv, limit=10),
@@ -274,39 +285,43 @@ def run_job(
             uploads.sort(key=lambda art: art.created_at)
 
             upload = uploads[0]
+            check_cancel("cancel_requested_before_input_download")
             input_bytes = artifact_store.get_bytes(upload.blob_path)
             input_filename = (upload.meta or {}).get("filename")
+            check_cancel("cancel_requested_after_input_download")
 
             loaded_stage = "image_loaded" if upload.kind == ArtifactKind.upload_image else "table_loaded"
             set_progress(loaded_stage, extra={"upload_blob": upload.blob_path, "input_kind": upload.kind.value})
             emit(EventType.progress, {"stage": loaded_stage, "bytes": len(input_bytes), "input_kind": upload.kind.value})
 
-            if cancelled():
-                job_store.set_status(job_id, JobStatus.cancelled, emit_event=True)
-                emit(EventType.cancelled, {"reason": "cancel_requested_after_input_loaded"})
-                return
+            check_cancel("cancel_requested_after_input_loaded")
 
             # -----------------------------
             # Input -> base heatmap
             # -----------------------------
             user_log("Generating heatmap", stage="heatmap")
+            check_cancel("cancel_requested_before_heatmap")
             if upload.kind == ArtifactKind.upload_image:
                 heatmap_png, heatmap_meta = image_to_heatmap_bytes(
                     input_bytes,
                     config=config,
                     filename_hint=str(input_filename) if input_filename else None,
+                    cancel_cb=cancelled,
                 )
             else:
                 heatmap_png, heatmap_meta = table_to_heatmap_bytes(
                     input_bytes,
                     config=config,
                     filename_hint=str(input_filename) if input_filename else None,
+                    cancel_cb=cancelled,
                 )
+            check_cancel("cancel_requested_after_heatmap")
             heatmap_meta = {
                 **(heatmap_meta or {}),
                 "source_artifact_id": str(upload.id),
                 "source_artifact_kind": upload.kind.value,
             }
+            check_cancel("cancel_requested_before_heatmap_publish")
             publish_bytes(
                 kind=ArtifactKind.base_heatmap,
                 filename="base_heatmap.png",
@@ -315,18 +330,18 @@ def run_job(
                 label="base_heatmap",
                 meta=heatmap_meta,
             )
+            check_cancel("cancel_requested_after_heatmap_publish")
             set_progress("heatmap_ready")
             user_log("Heatmap ready", stage="heatmap_ready")
 
         if heatmap_png is None:
             raise PipelineError("Heatmap bytes missing (resume or generation failed)")
         heatmap_path = scratch_dir / "base_heatmap.png"
+        check_cancel("cancel_requested_before_heatmap_write")
         heatmap_path.write_bytes(heatmap_png)
+        check_cancel("cancel_requested_after_heatmap_write")
 
-        if cancelled():
-            job_store.set_status(job_id, JobStatus.cancelled, emit_event=True)
-            emit(EventType.cancelled, {"reason": "cancel_requested_after_heatmap"})
-            return
+        check_cancel("cancel_requested_after_heatmap")
 
         # -----------------------------
         # Heatmap -> tracks (kymo runner) or resume from artifacts
@@ -350,11 +365,13 @@ def run_job(
         def _load_tracks_from_artifacts(total_tracks: int) -> Optional[List[Path]]:
             if total_tracks <= 0:
                 return None
+            check_cancel("cancel_requested_before_track_resume")
             arts = job_store.list_artifacts(
                 job_id, kind=ArtifactKind.track_npy, limit=max(2000, total_tracks + 10)
             )
             mapping: Dict[int, Any] = {}
             for art in arts:
+                check_cancel("cancel_requested_during_track_resume")
                 idx = _parse_track_index(getattr(art, "meta", {}) or {}, art.label)
                 if idx is None:
                     continue
@@ -367,24 +384,32 @@ def run_job(
             dest_dir.mkdir(parents=True, exist_ok=True)
             paths: List[Path] = []
             for i in range(total_tracks):
+                check_cancel("cancel_requested_during_track_resume")
                 art = mapping[i]
                 data = artifact_store.get_bytes(art.blob_path)
+                check_cancel("cancel_requested_during_track_resume")
                 p = dest_dir / f"track_{i}.npy"
                 p.write_bytes(data)
                 paths.append(p)
             return paths
 
         def _load_track_manifest() -> Optional[Dict[str, Any]]:
+            check_cancel("cancel_requested_before_track_manifest")
             arts = job_store.list_artifacts(job_id, kind=ArtifactKind.track_manifest, label="tracks_manifest", limit=1)
             if not arts:
                 return None
             try:
+                check_cancel("cancel_requested_before_track_manifest")
                 raw = artifact_store.get_bytes(arts[0].blob_path)
+                check_cancel("cancel_requested_after_track_manifest")
                 return json.loads(raw.decode("utf-8"))
+            except CancellationRequested:
+                raise
             except Exception:
                 return None
 
         if resume_enabled:
+            check_cancel("cancel_requested_before_track_resume")
             manifest = _load_track_manifest()
             if manifest and isinstance(manifest.get("total_tracks"), int):
                 maybe_paths = _load_tracks_from_artifacts(int(manifest["total_tracks"]))
@@ -394,8 +419,10 @@ def run_job(
                     user_log(f"Using cached tracks ({len(track_paths)})", stage="kymo_done")
 
         if not track_paths:
+            check_cancel("cancel_requested_before_kymo")
             user_log("Extracting tracks (KymoButler)", stage="kymo_start")
             set_progress("kymo_start", extra={"detail": "Extracting tracks"})
+            check_cancel("cancel_requested_before_kymo")
             runner = select_kymo_runner(config=config)
 
             kymo_stage_labels = {
@@ -420,13 +447,21 @@ def run_job(
                     user_log(label, stage=f"kymo_{stage}")
                     last_kymo_stage = stage
 
-            kymo_out = runner.run(heatmap_path=heatmap_path, scratch_dir=scratch_dir, progress_cb=kymo_progress)
+            kymo_out = runner.run(
+                heatmap_path=heatmap_path,
+                scratch_dir=scratch_dir,
+                progress_cb=kymo_progress,
+                cancel_cb=cancelled,
+            )
+            check_cancel("cancel_requested_after_kymo")
 
             image_id: str = kymo_out.image_id
             base_dir: Path = kymo_out.base_dir
             track_paths = list(kymo_out.track_paths)
 
+            check_cancel("cancel_requested_before_debug_overlays")
             publish_debug_overlays(image_id, base_dir)
+            check_cancel("cancel_requested_after_debug_overlays")
             emit(EventType.progress, {"stage": "kymo_done", "tracks_found": len(track_paths), "image_id": image_id})
             user_log(f"Found {len(track_paths)} tracks", stage="kymo_done")
 
@@ -435,6 +470,7 @@ def run_job(
 
             if resume_enabled:
                 # Persist all tracks for resume
+                check_cancel("cancel_requested_before_track_persist")
                 existing = job_store.list_artifacts(
                     job_id, kind=ArtifactKind.track_npy, limit=max(2000, len(track_paths) + 10)
                 )
@@ -442,6 +478,7 @@ def run_job(
                     idx for idx in (_parse_track_index(getattr(a, "meta", {}) or {}, a.label) for a in existing) if idx is not None
                 )
                 for track_index, track_path in enumerate(track_paths):
+                    check_cancel("cancel_requested_during_track_persist")
                     if track_index in existing_idx:
                         continue
                     label = f"track:{track_index}"
@@ -464,6 +501,7 @@ def run_job(
                     )
 
                 manifest_payload = {"total_tracks": len(track_paths)}
+                check_cancel("cancel_requested_before_track_manifest_write")
                 publish_bytes(
                     kind=ArtifactKind.track_manifest,
                     filename="tracks_manifest.json",
@@ -476,10 +514,12 @@ def run_job(
         # -----------------------------
         # Process tracks -> DB rows + overlay events
         # -----------------------------
+        check_cancel("cancel_requested_before_processing_tracks")
         user_log("Analyzing tracks", stage="processing_tracks")
         job_store.bump_counts(job_id, tracks_total=len(track_paths))
 
         processed_set = set(job_store.get_processed_track_indices(job_id)) if resume_enabled else set()
+        check_cancel("cancel_requested_before_processing_tracks")
         processed = len(processed_set)
         set_progress("processing_tracks", processed=processed, total=len(track_paths))
 
@@ -495,11 +535,7 @@ def run_job(
         ema_alpha = 0.2
 
         for track_index, track_path in enumerate(track_paths):
-            if cancelled():
-                job_store.set_status(job_id, JobStatus.cancelled, emit_event=True)
-                emit(EventType.cancelled, {"reason": "cancel_requested_mid_run", "processed": processed})
-                set_progress("cancelled", processed=processed, total=len(track_paths))
-                return
+            check_cancel("cancel_requested_during_processing_tracks")
 
             if resume_enabled and track_index in processed_set:
                 processed += 1
@@ -509,6 +545,7 @@ def run_job(
             track_detail_cfg = (config.get("track_detail") or {})
             store_track_npy = bool(track_detail_cfg.get("store_npy", True)) or resume_enabled
             if store_track_npy:
+                check_cancel("cancel_requested_before_track_artifact")
                 label = f"track:{track_index}"
                 existing = job_store.list_artifacts(job_id, kind=ArtifactKind.track_npy, label=label, limit=1)
                 if not existing:
@@ -530,6 +567,7 @@ def run_job(
                         meta={"track_index": int(track_index)},
                     )
 
+            check_cancel("cancel_requested_before_track_analysis")
             track_row, wave_rows, peak_rows, overlay_track = process_track(
                 job_id=job_id,
                 track_index=track_index,
@@ -537,6 +575,7 @@ def run_job(
                 config=config,
                 heatmap_meta=heatmap_meta,
             )
+            check_cancel("cancel_requested_after_track_analysis")
 
             # print("Processed track #", track_row, " Wave", wave_rows)
 
@@ -566,10 +605,12 @@ def run_job(
             batch_new_processed += 1
 
             if settings.emit_overlay_every_tracks > 0 and (new_processed % settings.emit_overlay_every_tracks == 0):
+                check_cancel("cancel_requested_before_overlay_event")
                 emit(EventType.overlay_track, overlay_track)
                 #print("emitting overlay")
 
             if settings.db_batch_size > 0 and (new_processed % settings.db_batch_size == 0):
+                check_cancel("cancel_requested_before_batch_write")
                 if waves_buf:
                     job_store.insert_waves_batch(job_id, waves_buf)
                     job_store.bump_counts(job_id, waves_done_delta=len(waves_buf))
@@ -605,24 +646,47 @@ def run_job(
                 last_progress_ts = now
 
         if waves_buf:
+            check_cancel("cancel_requested_before_final_batch_write")
             job_store.insert_waves_batch(job_id, waves_buf)
             job_store.bump_counts(job_id, waves_done_delta=len(waves_buf))
             waves_buf.clear()
 
         if peaks_buf:
+            check_cancel("cancel_requested_before_final_batch_write")
             job_store.insert_peaks_batch(job_id, peaks_buf)
             job_store.bump_counts(job_id, peaks_done_delta=len(peaks_buf))
             peaks_buf.clear()
 
         # Final counts
         if batch_new_processed:
+            check_cancel("cancel_requested_before_final_counts")
             job_store.bump_counts(job_id, tracks_done_delta=batch_new_processed)
 
+        check_cancel("cancel_requested_before_completion")
         set_progress("completed", processed=len(track_paths), total=len(track_paths), extra={"eta_secs": 0.0})
 
         user_log("Completed", stage="completed")
         job_store.set_status(job_id, JobStatus.completed, emit_event=True)
         emit(EventType.done, {"ok": True, "duration_s": (datetime.utcnow() - started_at).total_seconds()})
+
+    except CancellationRequested as e:
+        try:
+            job_store.session.rollback()
+        except Exception:
+            pass
+
+        reason = str(e) or "cancel_requested"
+        try:
+            job_store.set_status(job_id, JobStatus.cancelled, emit_event=True)
+            set_progress("cancelled")
+            emit(EventType.cancelled, {"reason": reason})
+            user_log("Run cancelled", stage="cancelled", level="warn")
+        except Exception:
+            try:
+                job_store.session.rollback()
+            except Exception:
+                pass
+        return
 
     except Exception as e:
         error_text = str(e)

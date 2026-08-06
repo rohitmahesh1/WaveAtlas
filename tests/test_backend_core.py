@@ -13,13 +13,18 @@ os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "waveatl
 import numpy as np
 import yaml
 from PIL import Image
+from sqlalchemy.pool import StaticPool
+from sqlmodel import SQLModel, Session, create_engine
 
+from app.cancel import CancellationRequested
 from app.extract_core import _detect_peak_sets, _flatten_onnx_cfg_for_runner, process_track
 from app.api.routes_jobs import _detect_peak_sets_for_detail, _detail_fit_meta_for_original_polarity
+from app.io.image_to_heatmap import image_to_heatmap_bytes
 from app.io.table_to_heatmap import table_to_heatmap_bytes
-from app.job_store import _PEAK_MODEL_KEYS, _WAVE_MODEL_KEYS, _json_safe, _row_for_metric_model
+from app.job_store import JobStore, _PEAK_MODEL_KEYS, _WAVE_MODEL_KEYS, _json_safe, _row_for_metric_model
 from app.modules.kb_adapter import link_track_endpoints
-from app.modules.tracker import Track
+from app.modules.kymobutler_pt import KymoButlerPT
+from app.modules.tracker import CrossingTracker, Track
 
 
 def _synthetic_track_path(tmp: str, position: np.ndarray) -> Path:
@@ -131,6 +136,56 @@ class BackendCoreTests(unittest.TestCase):
         self.assertTrue(meta["binarize"])
         self.assertEqual(first_row, [0, 255, 255])
         self.assertEqual(second_row, [0, 0, 0])
+
+    def test_crossing_tracker_honors_cancel_callback(self) -> None:
+        tracker = CrossingTracker(object(), max_iters=1)
+        raw = np.zeros((5, 5), dtype=np.uint8)
+        skel = np.zeros((5, 5), dtype=np.uint8)
+        skel[1:4, 2] = 1
+
+        with self.assertRaises(CancellationRequested):
+            tracker.extract_tracks(raw, skel, cancel_cb=lambda: True)
+
+    def test_heatmap_converters_honor_cancel_callback(self) -> None:
+        with self.assertRaises(CancellationRequested):
+            table_to_heatmap_bytes(b"0,1\n", cancel_cb=lambda: True)
+
+        buf = io.BytesIO()
+        Image.new("RGB", (2, 2), color=(255, 255, 255)).save(buf, format="PNG")
+        with self.assertRaises(CancellationRequested):
+            image_to_heatmap_bytes(buf.getvalue(), cancel_cb=lambda: True)
+
+    def test_kymobutler_tiled_inference_honors_cancel_callback(self) -> None:
+        class DummyKymo:
+            seg_hw = (2, 2)
+            tile_stride = 1
+
+        with self.assertRaises(CancellationRequested):
+            KymoButlerPT._tile_infer_2d(
+                DummyKymo(),
+                np.ones((3, 3), dtype=np.float32),
+                lambda _: {},
+                out_kind="bi",
+                cancel_cb=lambda: True,
+            )
+
+    def test_cancel_check_reads_current_database_state(self) -> None:
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        SQLModel.metadata.create_all(engine)
+
+        with Session(engine) as worker_session:
+            worker_store = JobStore(worker_session)
+            job = worker_store.create_job(owner_session_id=uuid4(), run_name="cancel test")
+            worker_store.get_job(job.id)
+
+            with Session(engine) as request_session:
+                JobStore(request_session).request_cancel(job.id)
+
+            self.assertTrue(worker_store.is_cancel_requested(job.id))
 
     def test_endpoint_link_levels_resolve_from_preset_and_allow_overrides(self) -> None:
         maximal = _flatten_onnx_cfg_for_runner({

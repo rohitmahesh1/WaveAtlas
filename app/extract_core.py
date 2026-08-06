@@ -148,6 +148,7 @@ class KymoRunner(Protocol):
         heatmap_path: Path,
         scratch_dir: Path,
         progress_cb: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+        cancel_cb: Optional[Callable[[], bool]] = None,
     ) -> KymoOutput: ...
 
 
@@ -173,6 +174,7 @@ class OnnxKymoRunner:
         heatmap_path: Path,
         scratch_dir: Path,
         progress_cb: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+        cancel_cb: Optional[Callable[[], bool]] = None,
     ) -> KymoOutput:
         from .modules.kb_adapter import run_kymobutler as run_kymo
 
@@ -197,6 +199,7 @@ class OnnxKymoRunner:
             debug_save_images=debug_save_images,
             save_overlay_tracks=save_overlay_tracks,
             progress_cb=progress_cb,
+            cancel_cb=cancel_cb,
             **_flatten_onnx_cfg_for_runner(onnx_cfg),
         )
 
@@ -214,6 +217,7 @@ class WolframKymoRunner:
         heatmap_path: Path,
         scratch_dir: Path,
         progress_cb: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+        cancel_cb: Optional[Callable[[], bool]] = None,
     ) -> KymoOutput:
         from .modules.kymo_interface import run_kymobutler as run_kymo
 

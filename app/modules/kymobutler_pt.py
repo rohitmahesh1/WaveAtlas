@@ -6,7 +6,7 @@ import math
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Callable, Dict, Iterable, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -17,8 +17,15 @@ from skimage.measure import label, regionprops
 from skimage.morphology import skeletonize as _skel
 from skimage.morphology import thin as _thin
 
+from ..cancel import CancellationRequested
+
 
 REQUIRED_ONNX = ("uni_seg.onnx", "bi_seg.onnx", "classifier.onnx", "decision.onnx")
+
+
+def _check_cancel(cancel_cb: Optional[Callable[[], bool]]) -> None:
+    if cancel_cb is not None and cancel_cb():
+        raise CancellationRequested("cancel_requested")
 
 
 # ---------------------------
@@ -190,7 +197,12 @@ def prob_to_mask(prob: np.ndarray, thr: float = 0.20) -> np.ndarray:
     return (prob >= float(thr)).astype(np.uint8)
 
 
-def prune_endpoints(skel: np.ndarray, iterations: int = 1) -> np.ndarray:
+def prune_endpoints(
+    skel: np.ndarray,
+    iterations: int = 1,
+    *,
+    cancel_cb: Optional[Callable[[], bool]] = None,
+) -> np.ndarray:
     """
     Iteratively removes endpoints from a binary skeleton.
     """
@@ -211,15 +223,23 @@ def prune_endpoints(skel: np.ndarray, iterations: int = 1) -> np.ndarray:
         return out
 
     for _ in range(int(iterations)):
+        _check_cancel(cancel_cb)
         to_zero = endpoints(sk)
         if not to_zero:
             break
         for y, x in to_zero:
+            _check_cancel(cancel_cb)
             sk[y, x] = 0
     return sk
 
 
-def filter_components(mask: np.ndarray, min_px: int, min_rows: int) -> np.ndarray:
+def filter_components(
+    mask: np.ndarray,
+    min_px: int,
+    min_rows: int,
+    *,
+    cancel_cb: Optional[Callable[[], bool]] = None,
+) -> np.ndarray:
     """
     Removes small connected components by pixel count and vertical span.
     """
@@ -227,6 +247,7 @@ def filter_components(mask: np.ndarray, min_px: int, min_rows: int) -> np.ndarra
     keep = np.zeros_like(mask, dtype=np.uint8)
 
     for r in regionprops(lab):
+        _check_cancel(cancel_cb)
         y0, x0, y1, x1 = r.bbox
         vertical_span = int(y1 - y0)
         if int(r.area) >= int(min_px) and vertical_span >= int(min_rows):
@@ -361,7 +382,14 @@ class KymoButlerPT:
         img01 = _resize_hw(img01, hw)
         return img01[None, None, ...].astype(np.float32)
 
-    def _tile_infer_2d(self, img01: np.ndarray, run_fn, *, out_kind: str):
+    def _tile_infer_2d(
+        self,
+        img01: np.ndarray,
+        run_fn,
+        *,
+        out_kind: str,
+        cancel_cb: Optional[Callable[[], bool]] = None,
+    ):
         seg_h, seg_w = self.seg_hw
         H, W = img01.shape
 
@@ -386,9 +414,11 @@ class KymoButlerPT:
 
         for y in wy:
             for x in wx:
+                _check_cancel(cancel_cb)
                 tile = img01[y : y + seg_h, x : x + seg_w]
                 tile_nchw = tile[None, None, ...].astype(np.float32)
                 out = run_fn(tile_nchw)
+                _check_cancel(cancel_cb)
 
                 if out_kind == "bi":
                     ypred = list(out.values())[0]
@@ -422,9 +452,16 @@ class KymoButlerPT:
             ret_full = acc_ret / np.maximum(wsum, eps)
             return {"ant": ant_full.astype(np.float32), "ret": ret_full.astype(np.float32)}
 
-    def classify(self, img_gray: np.ndarray) -> dict:
+    def classify(
+        self,
+        img_gray: np.ndarray,
+        *,
+        cancel_cb: Optional[Callable[[], bool]] = None,
+    ) -> dict:
+        _check_cancel(cancel_cb)
         x = self._prep_gray(img_gray, self.clf_hw, wl_preproc=True)
         out = self.clf.run(x)
+        _check_cancel(cancel_cb)
         y = list(out.values())[0]
         y = np.asarray(y)
         if y.ndim >= 2 and y.shape[-1] >= 2:
@@ -455,7 +492,13 @@ class KymoButlerPT:
             prob = _as_prob(y).squeeze()
         return prob.astype(np.float32)
 
-    def segment_bi_full(self, img_gray: np.ndarray) -> np.ndarray:
+    def segment_bi_full(
+        self,
+        img_gray: np.ndarray,
+        *,
+        cancel_cb: Optional[Callable[[], bool]] = None,
+    ) -> np.ndarray:
+        _check_cancel(cancel_cb)
         img01 = _preproc_like_wl(img_gray)
         seg_h, seg_w = self.seg_hw
 
@@ -466,10 +509,12 @@ class KymoButlerPT:
             return self.bi.run(tile_nchw)
 
         if self.use_tiling:
-            prob_full = self._tile_infer_2d(img01, run, out_kind="bi")
+            prob_full = self._tile_infer_2d(img01, run, out_kind="bi", cancel_cb=cancel_cb)
         else:
+            _check_cancel(cancel_cb)
             x = self._prep_gray(img_gray, self.bi_hw, wl_preproc=True)
             out = self.bi.run(x)
+            _check_cancel(cancel_cb)
             y = np.squeeze(list(out.values())[0])
             prob = _as_prob(y).astype(np.float32)
             H0, W0 = img_gray.shape
@@ -483,9 +528,16 @@ class KymoButlerPT:
         pt = pt1 + pt2
         pl = pl1 + pl2
         prob = prob_full[pt : pt + H0, pl : pl + W0]
+        _check_cancel(cancel_cb)
         return prob.astype(np.float32)
 
-    def segment_uni_full(self, img_gray: np.ndarray) -> dict[str, np.ndarray]:
+    def segment_uni_full(
+        self,
+        img_gray: np.ndarray,
+        *,
+        cancel_cb: Optional[Callable[[], bool]] = None,
+    ) -> dict[str, np.ndarray]:
+        _check_cancel(cancel_cb)
         img01 = _preproc_like_wl(img_gray)
         seg_h, seg_w = self.seg_hw
 
@@ -496,10 +548,12 @@ class KymoButlerPT:
             return self.uni.run(tile_nchw)
 
         if self.use_tiling:
-            out_full = self._tile_infer_2d(img01, run, out_kind="uni")
+            out_full = self._tile_infer_2d(img01, run, out_kind="uni", cancel_cb=cancel_cb)
         else:
+            _check_cancel(cancel_cb)
             x = self._prep_gray(img_gray, self.uni_hw, wl_preproc=True)
             out = self.uni.run(x)
+            _check_cancel(cancel_cb)
             y = list(out.values())[0]
             y = np.asarray(y)
             if y.ndim == 4 and y.shape[-1] == 2:
@@ -523,6 +577,7 @@ class KymoButlerPT:
         pl = pl1 + pl2
         ant = out_full["ant"][pt : pt + H0, pl : pl + W0]
         ret = out_full["ret"][pt : pt + H0, pl : pl + W0]
+        _check_cancel(cancel_cb)
         return {"ant": ant.astype(np.float32), "ret": ret.astype(np.float32)}
 
     def segment_bi(self, img_gray: np.ndarray) -> np.ndarray:

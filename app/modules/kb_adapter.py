@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 from typing import Callable, Dict, List, Optional, Tuple, Union, Iterable
 
 import cv2
@@ -9,8 +10,14 @@ import numpy as np
 from skimage.filters import apply_hysteresis_threshold
 from skimage.morphology import thin as _thin
 
+from ..cancel import CancellationRequested
 from .kymobutler_pt import get_kymobutler, filter_components, prob_to_mask, prune_endpoints
 from .tracker import CrossingTracker, Track, enforce_one_point_per_row
+
+
+def _check_cancel(cancel_cb: Optional[Callable[[], bool]]) -> None:
+    if cancel_cb is not None and cancel_cb():
+        raise CancellationRequested("cancel_requested")
 
 
 # ---------------------------
@@ -91,12 +98,14 @@ def _auto_threshold(
     prob: np.ndarray,
     sweep: Tuple[float, float, int] = (0.12, 0.30, 19),
     target_mask_pct: Tuple[float, float] = (15.0, 25.0),
+    cancel_cb: Optional[Callable[[], bool]] = None,
 ) -> float:
     lo, hi, n = float(sweep[0]), float(sweep[1]), int(sweep[2])
     thr_candidates = np.linspace(lo, hi, max(2, n))
     target_mid = 0.5 * (float(target_mask_pct[0]) + float(target_mask_pct[1]))
     best_thr, best_err = float(thr_candidates[0]), 1e18
     for t in thr_candidates:
+        _check_cancel(cancel_cb)
         m = prob_to_mask(prob, thr=float(t))
         pct = float(m.mean()) * 100.0
         err = abs(pct - target_mid)
@@ -186,9 +195,11 @@ def filter_and_dedupe_tracks(
     min_score: float = 0.11,
     overlap_iou: float = 0.80,
     dx_tol: float = 2.5,
+    cancel_cb: Optional[Callable[[], bool]] = None,
 ) -> List[Track]:
     enriched = []
     for t in tracks:
+        _check_cancel(cancel_cb)
         pts = sorted(t.points, key=lambda p: (p[0], p[1]))
         if len(pts) < min_rows:
             continue
@@ -202,8 +213,10 @@ def filter_and_dedupe_tracks(
 
     kept = []
     for t, pts, score, ln, row_set, row_x in enriched:
+        _check_cancel(cancel_cb)
         dup = False
         for kt, kpts, kscore, kln, krow_set, krow_x in kept:
+            _check_cancel(cancel_cb)
             if (
                 _row_overlap_index(row_set, krow_set) >= overlap_iou
                 and _mean_dx_on_overlap_index(row_x, krow_x) <= dx_tol
@@ -240,12 +253,18 @@ def _degree_map(skel: np.ndarray) -> np.ndarray:
     return cv2.filter2D(skel.astype(np.uint8), ddepth=cv2.CV_8U, kernel=k, borderType=cv2.BORDER_CONSTANT)
 
 
-def _junction_nms(skel: np.ndarray, prob: np.ndarray) -> np.ndarray:
+def _junction_nms(
+    skel: np.ndarray,
+    prob: np.ndarray,
+    *,
+    cancel_cb: Optional[Callable[[], bool]] = None,
+) -> np.ndarray:
     h, w = skel.shape
     deg = _degree_map(skel)
     keep = skel.copy().astype(np.uint8)
     ys, xs = np.where((skel == 1) & (deg >= 3))
     for y, x in zip(ys, xs):
+        _check_cancel(cancel_cb)
         p0 = prob[y, x]
         y0, y1 = max(0, y - 1), min(h, y + 2)
         x0, x1 = max(0, x - 1), min(w, x + 2)
@@ -255,10 +274,15 @@ def _junction_nms(skel: np.ndarray, prob: np.ndarray) -> np.ndarray:
     return keep
 
 
-def _endpoints(skel: np.ndarray) -> List[Tuple[int, int]]:
+def _endpoints(
+    skel: np.ndarray,
+    *,
+    cancel_cb: Optional[Callable[[], bool]] = None,
+) -> List[Tuple[int, int]]:
     h, w = skel.shape
     out: List[Tuple[int, int]] = []
     for y, x in zip(*np.where(skel == 1)):
+        _check_cancel(cancel_cb)
         deg = 0
         for ny, nx in _neighbors8(int(y), int(x), h, w):
             if skel[ny, nx] == 1:
@@ -297,9 +321,10 @@ def _bridge_skeleton_gaps(
     max_dx: int = 7,
     prob_min: float = 0.11,
     max_bridges: int = 2000,
+    cancel_cb: Optional[Callable[[], bool]] = None,
 ) -> np.ndarray:
     h, w = skel.shape
-    ends = _endpoints(skel)
+    ends = _endpoints(skel, cancel_cb=cancel_cb)
     if not ends:
         return skel
 
@@ -311,11 +336,14 @@ def _bridge_skeleton_gaps(
     out = skel.copy().astype(np.uint8)
 
     for y0, x0 in sorted(ends):
+        _check_cancel(cancel_cb)
         for dy in range(1, max_gap_rows + 1):
+            _check_cancel(cancel_cb)
             y1 = y0 + dy
             if y1 >= h or y1 not in by_row:
                 break
             for yy, xx in by_row[y1]:
+                _check_cancel(cancel_cb)
                 if abs(xx - x0) > max_dx:
                     continue
                 pts = _bresenham(y0, x0, yy, xx)
@@ -351,11 +379,13 @@ def _extend_one_end(
     max_rows: int = 8,
     dx_win: int = 3,
     prob_min: float = 0.12,
+    cancel_cb: Optional[Callable[[], bool]] = None,
 ) -> List[Tuple[int, int]]:
     h, w = prob.shape
     y, x = int(start_y), int(start_x)
     out: List[Tuple[int, int]] = []
     for _ in range(int(max_rows)):
+        _check_cancel(cancel_cb)
         y2 = y + int(step)
         if not (0 <= y2 < h):
             break
@@ -378,6 +408,7 @@ def _merge_pairwise(
     max_gap_rows: int = 6,
     max_dx: int = 4,
     prob_bridge_min: float = 0.10,
+    cancel_cb: Optional[Callable[[], bool]] = None,
 ) -> List[Track]:
     if not tracks:
         return []
@@ -393,14 +424,17 @@ def _merge_pairwise(
     order = sorted(range(len(tracks)), key=lambda i: start(tracks[i])[0])
 
     for i in order:
+        _check_cancel(cancel_cb)
         if used[i]:
             continue
         ti = tracks[i]
         changed = True
         while changed:
+            _check_cancel(cancel_cb)
             changed = False
             ey, ex = end(ti)
             for j in order:
+                _check_cancel(cancel_cb)
                 if used[j] or j == i:
                     continue
                 sjy, sjx = start(tracks[j])
@@ -431,19 +465,39 @@ def refine_tracks(
     max_gap_rows: int = 6,
     max_dx: int = 4,
     prob_bridge_min: float = 0.10,
+    cancel_cb: Optional[Callable[[], bool]] = None,
 ) -> List[Track]:
     if not tracks:
         return []
 
     refined: List[Track] = []
     for t in tracks:
+        _check_cancel(cancel_cb)
         if not t.points:
             continue
         pts = sorted(t.points, key=lambda p: (p[0], p[1]))
         hy, hx = pts[0]
         ty, tx = pts[-1]
-        head_ext = _extend_one_end(prob, hy, hx, step=-1, max_rows=extend_rows, dx_win=dx_win, prob_min=prob_min)
-        tail_ext = _extend_one_end(prob, ty, tx, step=+1, max_rows=extend_rows, dx_win=dx_win, prob_min=prob_min)
+        head_ext = _extend_one_end(
+            prob,
+            hy,
+            hx,
+            step=-1,
+            max_rows=extend_rows,
+            dx_win=dx_win,
+            prob_min=prob_min,
+            cancel_cb=cancel_cb,
+        )
+        tail_ext = _extend_one_end(
+            prob,
+            ty,
+            tx,
+            step=+1,
+            max_rows=extend_rows,
+            dx_win=dx_win,
+            prob_min=prob_min,
+            cancel_cb=cancel_cb,
+        )
         pts = list(reversed(head_ext)) + pts + tail_ext
         refined.append(type(t)(points=pts, id=t.id))
 
@@ -453,7 +507,9 @@ def refine_tracks(
         max_gap_rows=max_gap_rows,
         max_dx=max_dx,
         prob_bridge_min=prob_bridge_min,
+        cancel_cb=cancel_cb,
     )
+    _check_cancel(cancel_cb)
     return [type(t)(points=enforce_one_point_per_row(t.points), id=t.id) for t in merged]
 
 
@@ -584,7 +640,9 @@ def link_track_endpoints(
     min_overlap_rows: int = 5,
     max_overlap_rows: int = 45,
     overlap_dx_tol: float = 3.0,
+    cancel_cb: Optional[Callable[[], bool]] = None,
 ) -> Tuple[List[Track], Dict[str, object]]:
+    _check_cancel(cancel_cb)
     if not tracks:
         return [], {
             "input_tracks": 0,
@@ -597,11 +655,13 @@ def link_track_endpoints(
             "output_tracks": 0,
         }
 
-    norm_tracks = [
-        type(t)(points=enforce_one_point_per_row(sorted(t.points, key=lambda p: (p[0], p[1]))), id=t.id)
-        for t in tracks
-        if t.points
-    ]
+    norm_tracks: List[Track] = []
+    for t in tracks:
+        _check_cancel(cancel_cb)
+        if t.points:
+            norm_tracks.append(
+                type(t)(points=enforce_one_point_per_row(sorted(t.points, key=lambda p: (p[0], p[1]))), id=t.id)
+            )
     if not norm_tracks:
         return [], {
             "input_tracks": len(tracks),
@@ -621,6 +681,7 @@ def link_track_endpoints(
     head_slopes: List[float] = []
     tail_slopes: List[float] = []
     for idx, t in enumerate(norm_tracks):
+        _check_cancel(cancel_cb)
         starts.append(t.points[0])
         ends.append(t.points[-1])
         starts_by_row.setdefault(int(t.points[0][0]), []).append(idx)
@@ -640,8 +701,11 @@ def link_track_endpoints(
     candidate_overlap_links = 0
 
     for i, (ey, ex) in enumerate(ends):
+        _check_cancel(cancel_cb)
         for gap in range(1, max_gap + 1):
+            _check_cancel(cancel_cb)
             for j in starts_by_row.get(int(ey) + gap, []):
+                _check_cancel(cancel_cb)
                 if i == j:
                     continue
 
@@ -689,7 +753,9 @@ def link_track_endpoints(
 
         iy0 = int(starts[i][0])
         for overlap_start_y in range(max(iy0 + 1, int(ey) - max_overlap + 1), int(ey) + 1):
+            _check_cancel(cancel_cb)
             for j in starts_by_row.get(overlap_start_y, []):
+                _check_cancel(cancel_cb)
                 if i == j:
                     continue
 
@@ -746,6 +812,7 @@ def link_track_endpoints(
     accepted_gap_links = 0
     accepted_overlap_links = 0
     for _, i, j, kind, connector_points, overlap_start, overlap_end in candidates:
+        _check_cancel(cancel_cb)
         if i in linked_from or j in linked_to:
             continue
         linked_from[i] = j
@@ -762,12 +829,14 @@ def link_track_endpoints(
     chain_starts.sort(key=lambda idx: (norm_tracks[idx].points[0][0], norm_tracks[idx].points[0][1]))
 
     for start_idx in chain_starts:
+        _check_cancel(cancel_cb)
         if start_idx in seen:
             continue
         chain_points: List[Tuple[int, int]] = []
         cur = start_idx
         skip_until_y: Optional[int] = None
         while cur not in seen:
+            _check_cancel(cancel_cb)
             seen.add(cur)
             cur_points = norm_tracks[cur].points
             if skip_until_y is not None:
@@ -797,6 +866,7 @@ def link_track_endpoints(
         out.append(type(norm_tracks[start_idx])(points=enforce_one_point_per_row(chain_points), id=norm_tracks[start_idx].id))
 
     for idx, t in enumerate(norm_tracks):
+        _check_cancel(cancel_cb)
         if idx not in seen:
             out.append(t)
 
@@ -828,12 +898,15 @@ def _scale_tracks_to_original(
     tracks: List[Track],
     seg_hw: Tuple[int, int],
     orig_hw: Tuple[int, int],
+    *,
+    cancel_cb: Optional[Callable[[], bool]] = None,
 ) -> List[Track]:
     seg_h, seg_w = seg_hw
     h, w = orig_hw
     sy, sx = h / seg_h, w / seg_w
     out: List[Track] = []
     for t in tracks:
+        _check_cancel(cancel_cb)
         # Center-aware scaling to reduce systematic pixel-center bias.
         pts = [
             (int(round((y + 0.5) * sy - 0.5)), int(round((x + 0.5) * sx - 0.5)))
@@ -843,10 +916,17 @@ def _scale_tracks_to_original(
     return out
 
 
-def _save_npy_tracks(tracks: List[Track], out_dir: Path, *, min_length: int) -> int:
+def _save_npy_tracks(
+    tracks: List[Track],
+    out_dir: Path,
+    *,
+    min_length: int,
+    cancel_cb: Optional[Callable[[], bool]] = None,
+) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     saved = 0
     for i, t in enumerate(tracks):
+        _check_cancel(cancel_cb)
         arr = np.asarray(t.points, dtype=float)
         if arr.shape[0] < int(min_length):
             continue
@@ -923,19 +1003,40 @@ def run_kymobutler(
     debug_save_images: bool = True,
     save_overlay_tracks: bool = True,
     progress_cb: Optional[Callable[[str, Dict[str, object]], None]] = None,
+    cancel_cb: Optional[Callable[[], bool]] = None,
     **_: object,
 ) -> Path:
     """
     Compute tracks and overlay layers from a heatmap image.
     """
+    last_cancel_check = 0.0
+
+    def _cancelled_throttled() -> bool:
+        nonlocal last_cancel_check
+        if cancel_cb is None:
+            return False
+        now = time.monotonic()
+        if (now - last_cancel_check) < 0.25:
+            return False
+        last_cancel_check = now
+        return cancel_cb()
+
+    def _check_cancel() -> None:
+        if cancel_cb is not None and cancel_cb():
+            raise CancellationRequested("cancel_requested")
+
     def _progress(stage: str, **data: object) -> None:
+        _check_cancel()
         if progress_cb is None:
             return
         try:
             progress_cb(stage, data)
+        except CancellationRequested:
+            raise
         except Exception:
             # Don't fail the pipeline on progress hooks.
             return
+        _check_cancel()
 
     heatmap_path = Path(heatmap_path)
     base_dir = Path(output_dir)
@@ -953,8 +1054,10 @@ def run_kymobutler(
 
     _progress("segmenting")
     kb = get_kymobutler(export_dir=export_dir, seg_size=int(seg_size), providers=providers)
+    _check_cancel()
 
-    cls = kb.classify(gray_orig)
+    cls = kb.classify(gray_orig, cancel_cb=_cancelled_throttled)
+    _check_cancel()
     mode = "bi" if cls.get("label", 1) == 1 else "uni"
     if force_mode in {"uni", "bi"}:
         mode = force_mode
@@ -963,13 +1066,16 @@ def run_kymobutler(
     t_bi = float(thr if thr_bi is None else thr_bi)
 
     if mode == "uni":
-        out = kb.segment_uni_full(gray_orig)
+        out = kb.segment_uni_full(gray_orig, cancel_cb=_cancelled_throttled)
+        _check_cancel()
         prob = np.maximum(out["ant"], out["ret"]).astype(np.float32)
         used_thr = t_uni
     else:
-        prob_bi = kb.segment_bi_full(gray_orig).astype(np.float32)
+        prob_bi = kb.segment_bi_full(gray_orig, cancel_cb=_cancelled_throttled).astype(np.float32)
+        _check_cancel()
         if fuse_uni_into_bi:
-            outu = kb.segment_uni_full(gray_orig)
+            outu = kb.segment_uni_full(gray_orig, cancel_cb=_cancelled_throttled)
+            _check_cancel()
             prob_uni = np.maximum(outu["ant"], outu["ret"]).astype(np.float32)
             if prob_uni.shape != prob_bi.shape:
                 prob_uni = cv2.resize(prob_uni, (prob_bi.shape[1], prob_bi.shape[0]), interpolation=cv2.INTER_LINEAR)
@@ -991,9 +1097,15 @@ def run_kymobutler(
 
     pct0 = float(mask0.mean()) * 100.0
     if auto_threshold and (pct0 < auto_trigger_pct[0] or pct0 > auto_trigger_pct[1]):
-        used_thr = _auto_threshold(prob, sweep=auto_sweep, target_mask_pct=auto_target_pct)
+        used_thr = _auto_threshold(
+            prob,
+            sweep=auto_sweep,
+            target_mask_pct=auto_target_pct,
+            cancel_cb=_cancelled_throttled,
+        )
         mask0 = prob_to_mask(prob, thr=float(used_thr))
 
+    _check_cancel()
     mask = apply_morphology(
         mask0,
         prob,
@@ -1005,11 +1117,19 @@ def run_kymobutler(
         weak_shave_enable=bool(weak_shave_enable),
         p_shave=float(weak_shave_p),
     )
+    _check_cancel()
 
-    mask_f = filter_components(mask, min_px=int(comp_min_px), min_rows=int(comp_min_rows))
+    mask_f = filter_components(
+        mask,
+        min_px=int(comp_min_px),
+        min_rows=int(comp_min_rows),
+        cancel_cb=_cancelled_throttled,
+    )
+    _check_cancel()
 
     _progress("skeletonizing")
     skel_base = _thin(mask_f.astype(bool)).astype(np.uint8)
+    _check_cancel()
     base_px = int(skel_base.sum())
     keep_floor = (
         max(2000, int(float(skel_keep_ratio) * max(1, base_px)))
@@ -1035,13 +1155,14 @@ def run_kymobutler(
         if int(skel.sum()) < keep_floor:
             skel = skel_base.copy()
 
-        skel_nms = _junction_nms(skel, prob)
+        skel_nms = _junction_nms(skel, prob, cancel_cb=_cancelled_throttled)
         skel_nms = _thin(skel_nms.astype(bool)).astype(np.uint8)
+        _check_cancel()
         if int(skel_nms.sum()) >= keep_floor:
             skel = skel_nms
 
     if int(prune_iters) > 0:
-        skel = prune_endpoints(skel, iterations=int(prune_iters))
+        skel = prune_endpoints(skel, iterations=int(prune_iters), cancel_cb=_cancelled_throttled)
 
     skel = _bridge_skeleton_gaps(
         skel,
@@ -1049,15 +1170,23 @@ def run_kymobutler(
         max_gap_rows=int(max_gap_rows),
         max_dx=int(max_dx),
         prob_min=float(prob_bridge_min),
+        cancel_cb=_cancelled_throttled,
     )
+    _check_cancel()
 
     if debug_save_images:
+        _check_cancel()
         cv2.imwrite(str(dbg_dir / "prob.png"), (prob * 255).astype(np.uint8))
+        _check_cancel()
         cv2.imwrite(str(dbg_dir / "mask_raw.png"), (mask0 * 255))
+        _check_cancel()
         cv2.imwrite(str(dbg_dir / "mask_clean.png"), (mask * 255))
+        _check_cancel()
         cv2.imwrite(str(dbg_dir / "mask_filtered.png"), (mask_f * 255))
+        _check_cancel()
         cv2.imwrite(str(dbg_dir / "skeleton.png"), (skel * 255))
         if hmask is not None:
+            _check_cancel()
             cv2.imwrite(str(dbg_dir / "mask_hysteresis.png"), (hmask.astype(np.uint8) * 255))
         with open(dbg_dir / "stats.txt", "w") as f:
             f.write(f"prob_min={float(prob.min()):.6f} prob_max={float(prob.max()):.6f}\n")
@@ -1069,6 +1198,7 @@ def run_kymobutler(
 
     _progress("tracking")
     gray_seg = kb.preproc_for_seg(gray_orig, hw=prob.shape)
+    _check_cancel()
     tracker = CrossingTracker(
         kb,
         max_branch_steps=256,
@@ -1084,9 +1214,11 @@ def run_kymobutler(
         skel,
         progress_cb=_tracking_progress,
         progress_every_secs=1.0,
+        cancel_cb=cancel_cb,
     )
 
     if refine_enable and tracks_seg:
+        _check_cancel()
         _progress("refining")
         tracks_seg = refine_tracks(
             tracks_seg,
@@ -1097,10 +1229,12 @@ def run_kymobutler(
             max_gap_rows=int(max_gap_rows),
             max_dx=int(max_dx),
             prob_bridge_min=float(prob_bridge_min),
+            cancel_cb=_cancelled_throttled,
         )
 
     endpoint_link_stats: Dict[str, object] = {}
     if endpoint_link_enable and tracks_seg:
+        _check_cancel()
         _progress("endpoint_linking", before_tracks=len(tracks_seg))
         tracks_seg, endpoint_link_stats = link_track_endpoints(
             tracks_seg,
@@ -1116,10 +1250,12 @@ def run_kymobutler(
             min_overlap_rows=int(endpoint_link_min_overlap_rows),
             max_overlap_rows=int(endpoint_link_max_overlap_rows),
             overlap_dx_tol=float(endpoint_link_overlap_dx_tol),
+            cancel_cb=_cancelled_throttled,
         )
         _progress("endpoint_linking_done", **endpoint_link_stats)
 
     if dedupe_enable and tracks_seg:
+        _check_cancel()
         _progress("deduping")
         tracks_seg = filter_and_dedupe_tracks(
             tracks_seg,
@@ -1128,9 +1264,11 @@ def run_kymobutler(
             min_score=float(dedupe_min_score),
             overlap_iou=float(dedupe_overlap_iou),
             dx_tol=float(dedupe_dx_tol),
+            cancel_cb=_cancelled_throttled,
         )
 
     if debug_save_images and endpoint_link_stats:
+        _check_cancel()
         with open(dbg_dir / "stats.txt", "a") as f:
             f.write(
                 "endpoint_link "
@@ -1145,15 +1283,23 @@ def run_kymobutler(
             )
 
     _progress("scaling")
-    tracks = _scale_tracks_to_original(tracks_seg, seg_hw=prob.shape, orig_hw=(h0, w0))
+    tracks = _scale_tracks_to_original(
+        tracks_seg,
+        seg_hw=prob.shape,
+        orig_hw=(h0, w0),
+        cancel_cb=_cancelled_throttled,
+    )
     _progress("saving")
-    _save_npy_tracks(tracks, out_dir, min_length=int(min_length))
+    _save_npy_tracks(tracks, out_dir, min_length=int(min_length), cancel_cb=_cancelled_throttled)
 
     if save_overlay_tracks:
+        _check_cancel()
         overlay = cv2.cvtColor(gray_orig, cv2.COLOR_GRAY2BGR)
         for t in tracks:
+            _check_cancel()
             for y, x in t.points:
                 cv2.circle(overlay, (int(x), int(y)), 1, (0, 255, 0), -1)
+        _check_cancel()
         cv2.imwrite(str(base_dir / "overlay_tracks.png"), overlay)
 
     if verbose:
