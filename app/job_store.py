@@ -24,6 +24,7 @@ from .models import (
     Track,
     Wave,
 )
+from .time_utils import utc_isoformat, utc_now
 
 
 _WAVE_MODEL_KEYS = {
@@ -68,7 +69,7 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, UUID):
         return str(value)
     if isinstance(value, datetime):
-        return value.isoformat()
+        return utc_isoformat(value)
     if isinstance(value, date):
         return value.isoformat()
     if isinstance(value, dict):
@@ -130,7 +131,7 @@ class JobStore:
         run_name: str = "untitled",
         config: Optional[Dict[str, Any]] = None,
     ) -> Job:
-        now = datetime.utcnow()
+        now = utc_now()
         job = Job(
             owner_session_id=owner_session_id,
             run_name=run_name,
@@ -178,7 +179,7 @@ class JobStore:
         emit_event: bool = True,
     ) -> Job:
         job = self.get_job(job_id)
-        now = datetime.utcnow()
+        now = utc_now()
 
         # Lifecycle timestamps
         if status == JobStatus.in_progress and job.started_at is None:
@@ -220,7 +221,7 @@ class JobStore:
         already moved the job out of the startable state and callers should not
         enqueue duplicate work.
         """
-        now = datetime.utcnow()
+        now = utc_now()
         values: Dict[str, Any] = {
             "status": JobStatus.in_progress,
             "started_at": now,
@@ -256,7 +257,7 @@ class JobStore:
         Active or completed jobs are returned unchanged with claimed=False, so
         repeated resume calls are safe no-ops.
         """
-        now = datetime.utcnow()
+        now = utc_now()
         values: Dict[str, Any] = {
             "status": JobStatus.in_progress,
             "cancel_requested": False,
@@ -287,7 +288,7 @@ class JobStore:
             return job
 
         job.cancel_requested = True
-        job.updated_at = datetime.utcnow()
+        job.updated_at = utc_now()
 
         # Optionally move status -> cancel_requested (your pipeline can treat either flag as canonical)
         if job.status not in (JobStatus.cancel_requested,):
@@ -311,7 +312,7 @@ class JobStore:
         job.cancel_requested = False
         if job.status in (JobStatus.cancel_requested, JobStatus.cancelled):
             job.status = JobStatus.queued
-        job.updated_at = datetime.utcnow()
+        job.updated_at = utc_now()
         self.session.add(job)
         self.session.commit()
         if emit_event:
@@ -344,7 +345,7 @@ class JobStore:
         job.tracks_done = int(tracks_done or 0)
         job.waves_done = int(waves_done or 0)
         job.peaks_done = int(peaks_done or 0)
-        job.updated_at = datetime.utcnow()
+        job.updated_at = utc_now()
         self.session.add(job)
         self.session.commit()
         return job
@@ -363,7 +364,7 @@ class JobStore:
         - replace=True replaces the whole progress dict
         """
         job = self.get_job(job_id)
-        now = datetime.utcnow()
+        now = utc_now()
 
         if replace:
             job.progress = _json_safe(progress)
@@ -400,7 +401,7 @@ class JobStore:
                 seq=seq,
                 type=event_type,
                 payload=_json_safe(payload),
-                created_at=datetime.utcnow(),
+                created_at=utc_now(),
             )
             self.session.add(ev)
             try:
@@ -541,7 +542,7 @@ class JobStore:
         job.peaks_done = int(job.peaks_done or 0) + int(peaks_done_delta)
         if tracks_total is not None:
             job.tracks_total = tracks_total
-        job.updated_at = datetime.utcnow()
+        job.updated_at = utc_now()
         self.session.add(job)
         self.session.commit()
         return job
@@ -549,7 +550,7 @@ class JobStore:
     def update_run_name(self, job_id: UUID, run_name: str) -> Job:
         job = self.get_job(job_id)
         job.run_name = run_name
-        job.updated_at = datetime.utcnow()
+        job.updated_at = utc_now()
         self.session.add(job)
         self.session.commit()
         return job
@@ -590,7 +591,7 @@ class JobStore:
             content_type=content_type,
             byte_size=byte_size,
             meta=_json_safe(meta_in or {}),  # IMPORTANT: use `meta`, not `metadata`
-            created_at=datetime.utcnow(),
+            created_at=utc_now(),
         )
         self.session.add(art)
         self.session.commit()

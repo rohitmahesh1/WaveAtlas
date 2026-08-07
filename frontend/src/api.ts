@@ -148,6 +148,7 @@ export async function listJobs(limit = 50, offset = 0): Promise<JobRead[]> {
   const res = await fetch(`${API_BASE}/api/jobs?limit=${limit}&offset=${offset}`, {
     method: "GET",
     credentials: "include",
+    cache: "no-store",
   });
   if (!res.ok) await throwApiError(res);
   return res.json();

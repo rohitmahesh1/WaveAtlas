@@ -23,12 +23,12 @@ Notes:
 
 ## heatmap
 These settings control how tabular data is converted into a heatmap image.
-- `heatmap.table_mode` (string): Table rendering mode. `auto` keeps the existing intensity-style extreme mask for most tables, but switches files with `Area` in the filename to continuous area rendering.
-- `heatmap.lower` (number): Lower bound for “mid-range” values that get zeroed out. Values outside `[lower, upper]` are kept. Change when: your heatmap is too dense/sparse and you need to widen or narrow the kept extremes.
-- `heatmap.upper` (number): Upper bound for “mid-range” values that get zeroed out. Change when: you need to keep or suppress higher-magnitude values.
-- `heatmap.binarize` (bool): When true, converts the filtered heatmap into a 0/1 mask. Change when: you want continuous intensity (false) versus a binary mask (true).
+- `heatmap.table_mode` (string): Table rendering mode. `auto` keeps the original intensity-style extreme mask for most tables, but switches files with `Area` in the filename to continuous area rendering.
+- `heatmap.lower` (number): Lower bound for “mid-range” intensity values that get zeroed out. Values outside `[lower, upper]` are kept before optional binarization.
+- `heatmap.upper` (number): Upper bound for “mid-range” intensity values that get zeroed out.
+- `heatmap.binarize` (bool): When true, converts the filtered intensity heatmap into a 0/1 mask. The default is `true`, matching the original intensity behavior.
 - `heatmap.origin` (string): Image origin for rendering. Typical values: `lower` or `upper`. Change when: the heatmap appears vertically flipped.
-- `heatmap.cmap` (string): Matplotlib colormap name used when rendering the heatmap. Change when: you want different visual contrast or need a colormap that produces better grayscale separation for tracking.
+- `heatmap.cmap` (string): Matplotlib colormap name used when rendering the default intensity path. The default is `hot`.
 - `heatmap.area` (object): Overrides used for auto-detected area tables. By default, area tables are rendered continuously with no extreme filtering or binarization.
 - `heatmap.area.cmap` (string): Matplotlib colormap for area tables. The default is `plasma`, which is close to the Plotly-exported HTML behavior.
 - `heatmap.area.vmin` / `heatmap.area.vmax` (number or null): Color scale bounds for area tables. `null` means use the table's own min/max.

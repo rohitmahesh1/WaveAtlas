@@ -10,6 +10,7 @@ from sqlmodel import Session, select
 from ..db import engine
 from ..job_store import JobStore
 from ..models import Job
+from ..time_utils import utc_isoformat
 from .deps import get_owner_session_id_ws
 
 router = APIRouter(tags=["ws"])
@@ -33,10 +34,10 @@ def _job_snapshot(job_id: UUID) -> dict:
             "cancel_requested": job.cancel_requested,
             "error": job.error,
             "error_code": job.error_code,
-            "created_at": job.created_at.isoformat(),
-            "started_at": job.started_at.isoformat() if job.started_at else None,
-            "finished_at": job.finished_at.isoformat() if job.finished_at else None,
-            "updated_at": job.updated_at.isoformat(),
+            "created_at": utc_isoformat(job.created_at),
+            "started_at": utc_isoformat(job.started_at) if job.started_at else None,
+            "finished_at": utc_isoformat(job.finished_at) if job.finished_at else None,
+            "updated_at": utc_isoformat(job.updated_at),
             "progress": job.progress or {},
             "tracks_total": job.tracks_total,
             "tracks_done": job.tracks_done,
@@ -93,7 +94,7 @@ async def ws_job_events(
                             "seq": ev.seq,
                             "type": ev.type,
                             "payload": ev.payload,
-                            "created_at": ev.created_at.isoformat(),
+                            "created_at": utc_isoformat(ev.created_at),
                         }
                     )
                     last = ev.seq

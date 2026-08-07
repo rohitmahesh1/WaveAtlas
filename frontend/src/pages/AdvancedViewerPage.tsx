@@ -20,6 +20,11 @@ import { useImageProcessingPrompt } from "../hooks/useImageProcessingPrompt";
 import { useSharedJobSession } from "../hooks/useSharedJobSession";
 import { downloadCsv, downloadFromUrl, downloadJson } from "../utils/download";
 import { mergeRunConfigWithImageProcessing } from "../utils/imageProcessing";
+import {
+  buildHeatmapOptionsConfig,
+  DEFAULT_HEATMAP_OPTIONS,
+  type HeatmapOptions,
+} from "../utils/heatmapOptions";
 
 const NUMERIC_OPS: FilterOp[] = [">", "<", ">=", "<=", "==", "!=", "between"];
 const STRING_OPS: FilterOp[] = ["contains", "==", "!="];
@@ -58,6 +63,7 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
   const [debugOpacity, setDebugOpacity] = useState<number>(0.6);
   const [runName, setRunName] = useState<string>("");
   const [runNameAuto, setRunNameAuto] = useState<boolean>(true);
+  const [heatmapOptions, setHeatmapOptions] = useState<HeatmapOptions>(DEFAULT_HEATMAP_OPTIONS);
   const runCounterRef = useRef<number>(1);
 
   const [hideBaseImage, setHideBaseImage] = useState<boolean>(false);
@@ -70,6 +76,7 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
     status,
     baseImageUrl,
     baseImageInfo,
+    heatmapValues,
     originalImageUrl,
     tracks,
     activity,
@@ -130,7 +137,6 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
   const stageText = stageDetail ? `${stageLabel(currentStage)} — ${stageDetail}` : stageLabel(currentStage);
   const statusLabel = String(status).replace(/_/g, " ");
   const showSpinner = !["completed", "failed", "cancelled", "idle"].includes(String(status));
-
   const activeSelectedTrackId = useMemo(() => {
     if (selectedTrackId == null) return null;
     const visible = filteredTracks.some((t) => String(t.id ?? t.track_index) === String(selectedTrackId));
@@ -246,7 +252,11 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
               setSelectedTrackId(null);
               setSelectedDebugLabel("none");
               resetTrackDetail();
-              runJob(file, mergeRunConfigWithImageProcessing({}, imageProcessingDimensions), runName);
+              runJob(
+                file,
+                mergeRunConfigWithImageProcessing(buildHeatmapOptionsConfig(heatmapOptions), imageProcessingDimensions),
+                runName
+              );
               refreshJobs();
             }}
             imageSizing={imageSizing}
@@ -257,6 +267,8 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
               setRunName(value);
               setRunNameAuto(false);
             }}
+            heatmapOptions={heatmapOptions}
+            onHeatmapOptionsChange={setHeatmapOptions}
             filteredCount={filteredTracks.length}
             totalCount={tracks.length}
             onCancel={cancelCurrentJob}
@@ -418,6 +430,7 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
             <OverlayCanvas
               imageUrl={baseImageUrl}
               coordInfo={baseImageInfo}
+              heatmapValues={heatmapValues}
               debugImageUrl={debugImageUrl}
               debugOpacity={debugOpacity}
               tracks={filteredTracks}

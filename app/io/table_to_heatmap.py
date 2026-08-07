@@ -137,16 +137,27 @@ def _optional_float(value: Any) -> Optional[float]:
     return float(value)
 
 
-def table_to_heatmap_bytes(
+def _value_range(values: np.ndarray) -> Tuple[Optional[float], Optional[float]]:
+    if not values.size:
+        return None, None
+    return float(np.min(values)), float(np.max(values))
+
+
+def _encode_heatmap_values(values: np.ndarray) -> bytes:
+    arr = np.ascontiguousarray(values, dtype="<f4")
+    return arr.tobytes(order="C")
+
+
+def table_to_heatmap_payload(
     table_bytes: bytes,
     *,
     config: Optional[Dict[str, Any]] = None,
     filename_hint: Optional[str] = None,
     cancel_cb: Optional[Callable[[], bool]] = None,
-) -> Tuple[bytes, Dict[str, Any]]:
+) -> Tuple[bytes, Dict[str, Any], bytes, Dict[str, Any]]:
     """
     Ideal pipeline API:
-      table_bytes -> heatmap PNG bytes
+      table_bytes -> heatmap PNG bytes + exact display values
 
     Config: either provide keys at top-level, or under config["heatmap"].
     Supported keys (with defaults):
@@ -160,7 +171,7 @@ def table_to_heatmap_bytes(
       area: dict = area-specific overrides for auto-detected area tables
 
     Returns:
-      (png_bytes, meta)
+      (png_bytes, meta, value_bytes, value_meta)
     """
     _check_cancel(cancel_cb)
     cfg = config or {}
@@ -212,6 +223,7 @@ def table_to_heatmap_bytes(
         vmin = float(np.min(filtered)) if filtered.size else 0.0
     if vmax is None:
         vmax = float(np.max(filtered)) if filtered.size else 1.0
+    z_min, z_max = _value_range(filtered)
 
     # Render a direct pixel-for-cell PNG so the output image dimensions match
     # the submitted table dimensions exactly.
@@ -255,8 +267,56 @@ def table_to_heatmap_bytes(
         "dpi": dpi_val,
         "vmin": vmin,
         "vmax": vmax,
+        "z_label": "z",
+        "z_min": z_min,
+        "z_max": z_max,
+        "z_vmin": vmin,
+        "z_vmax": vmax,
         "png_bytes": len(png_bytes),
     }
+    _check_cancel(cancel_cb)
+    value_bytes = _encode_heatmap_values(filtered)
+    _check_cancel(cancel_cb)
+    value_meta: Dict[str, Any] = {
+        "source_kind": "table",
+        "source_rows": int(nrows),
+        "source_cols": int(ncols),
+        "output_width": int(ncols),
+        "output_height": int(nrows),
+        "pixel_mapping": "table_cell",
+        "coord_origin": origin,
+        "coord_x_label": "col",
+        "coord_y_label": "row",
+        "table_mode": requested_table_mode,
+        "resolved_table_mode": resolved_table_mode,
+        "value_encoding": "float32_le",
+        "value_dtype": "float32",
+        "value_order": "row_major",
+        "value_row_order": "top_to_bottom_source",
+        "value_count": int(nrows * ncols),
+        "value_nbytes": len(value_bytes),
+        "z_label": "z",
+        "z_min": z_min,
+        "z_max": z_max,
+        "z_vmin": vmin,
+        "z_vmax": vmax,
+    }
+    return png_bytes, meta, value_bytes, value_meta
+
+
+def table_to_heatmap_bytes(
+    table_bytes: bytes,
+    *,
+    config: Optional[Dict[str, Any]] = None,
+    filename_hint: Optional[str] = None,
+    cancel_cb: Optional[Callable[[], bool]] = None,
+) -> Tuple[bytes, Dict[str, Any]]:
+    png_bytes, meta, _, _ = table_to_heatmap_payload(
+        table_bytes,
+        config=config,
+        filename_hint=filename_hint,
+        cancel_cb=cancel_cb,
+    )
     return png_bytes, meta
 
 

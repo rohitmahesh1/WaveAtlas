@@ -1,9 +1,19 @@
 import { useState } from "react";
 import type { JobRead } from "../api";
 
+const ISO_TIMEZONE_RE = /(?:Z|[+-]\d{2}:?\d{2})$/i;
+
+function normalizeApiTime(ts: string) {
+  const trimmed = ts.trim();
+  if (/^\d{4}-\d{2}-\d{2}T/.test(trimmed) && !ISO_TIMEZONE_RE.test(trimmed)) {
+    return `${trimmed}Z`;
+  }
+  return trimmed;
+}
+
 function fmtTime(ts?: string | null) {
   if (!ts) return "—";
-  const d = new Date(ts);
+  const d = new Date(normalizeApiTime(ts));
   if (Number.isNaN(d.getTime())) return "—";
   return d.toLocaleString();
 }

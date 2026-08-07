@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -20,11 +21,13 @@ from app.cancel import CancellationRequested
 from app.extract_core import _detect_peak_sets, _flatten_onnx_cfg_for_runner, process_track
 from app.api.routes_jobs import _detect_peak_sets_for_detail, _detail_fit_meta_for_original_polarity
 from app.io.image_to_heatmap import image_to_heatmap_bytes
-from app.io.table_to_heatmap import table_to_heatmap_bytes
+from app.io.table_to_heatmap import table_to_heatmap_bytes, table_to_heatmap_payload
 from app.job_store import JobStore, _PEAK_MODEL_KEYS, _WAVE_MODEL_KEYS, _json_safe, _row_for_metric_model
 from app.modules.kb_adapter import link_track_endpoints
 from app.modules.kymobutler_pt import KymoButlerPT
 from app.modules.tracker import CrossingTracker, Track
+from app.models import JobRead, JobStatus
+from app.time_utils import utc_isoformat
 
 
 def _synthetic_track_path(tmp: str, position: np.ndarray) -> Path:
@@ -65,6 +68,8 @@ class BackendCoreTests(unittest.TestCase):
         self.assertEqual(config["features"]["fit_target"], "raw_wave")
         self.assertTrue(config["features"]["compare_fit_targets"])
         self.assertEqual(config["heatmap"]["table_mode"], "auto")
+        self.assertTrue(config["heatmap"]["binarize"])
+        self.assertEqual(config["heatmap"]["cmap"], "hot")
         self.assertEqual(config["heatmap"]["area"]["cmap"], "plasma")
         self.assertFalse(config["heatmap"]["area"]["binarize"])
         endpoint_link = config["kymo"]["onnx"]["postproc"]["endpoint_link"]
@@ -85,7 +90,7 @@ class BackendCoreTests(unittest.TestCase):
         self.assertEqual(runner_cfg["endpoint_link_fit_rows"], 16)
         self.assertTrue(runner_cfg["endpoint_link_overlap_enabled"])
 
-    def test_area_named_table_uses_continuous_heatmap_mode(self) -> None:
+    def test_area_named_table_uses_continuous_area_heatmap_by_default(self) -> None:
         csv = b"0,0.5,1\n0.25,0.75,1\n"
 
         png, meta = table_to_heatmap_bytes(
@@ -110,17 +115,40 @@ class BackendCoreTests(unittest.TestCase):
         self.assertLess(row[0], row[1])
         self.assertLess(row[1], row[2])
 
-    def test_non_area_table_keeps_extreme_mask_heatmap_mode(self) -> None:
-        csv = b"0,2e16,-3e20\n1,2,3\n"
+    def test_table_heatmap_payload_preserves_continuous_display_values_by_default(self) -> None:
+        csv = b"0,0.5,1\n0.25,0.75,1\n"
 
-        png, meta = table_to_heatmap_bytes(
+        _, meta, value_bytes, value_meta = table_to_heatmap_payload(
+            csv,
+            config={
+                "heatmap": {
+                    "table_mode": "area",
+                    "origin": "lower",
+                    "area": {"cmap": "gray", "vmin": 0, "vmax": 1},
+                }
+            },
+            filename_hint="cells_area.csv",
+        )
+
+        values = np.frombuffer(value_bytes, dtype="<f4").reshape((2, 3))
+
+        self.assertEqual(meta["z_min"], 0.0)
+        self.assertEqual(meta["z_max"], 1.0)
+        self.assertFalse(meta["binarize"])
+        self.assertEqual(value_meta["value_encoding"], "float32_le")
+        self.assertEqual(value_meta["value_count"], 6)
+        np.testing.assert_allclose(values, np.array([[0, 0.5, 1], [0.25, 0.75, 1]], dtype=np.float32))
+
+    def test_non_area_table_uses_original_binarized_intensity_mode(self) -> None:
+        csv = b"-20,0,20\n5,11,-11\n"
+
+        png, meta, value_bytes, value_meta = table_to_heatmap_payload(
             csv,
             config={
                 "heatmap": {
                     "table_mode": "auto",
-                    "lower": -1e20,
-                    "upper": 1e16,
-                    "binarize": True,
+                    "lower": -10,
+                    "upper": 10,
                     "origin": "upper",
                     "cmap": "gray",
                 }
@@ -131,11 +159,48 @@ class BackendCoreTests(unittest.TestCase):
         image = Image.open(io.BytesIO(png)).convert("RGBA")
         first_row = [image.getpixel((x, 0))[0] for x in range(3)]
         second_row = [image.getpixel((x, 1))[0] for x in range(3)]
+        values = np.frombuffer(value_bytes, dtype="<f4").reshape((2, 3))
 
         self.assertEqual(meta["resolved_table_mode"], "extreme_mask")
         self.assertTrue(meta["binarize"])
-        self.assertEqual(first_row, [0, 255, 255])
-        self.assertEqual(second_row, [0, 0, 0])
+        self.assertEqual(first_row, [255, 0, 255])
+        self.assertEqual(second_row, [0, 255, 255])
+        self.assertEqual(value_meta["resolved_table_mode"], "extreme_mask")
+        np.testing.assert_allclose(values, np.array([[1, 0, 1], [0, 1, 1]], dtype=np.float32))
+
+    def test_api_timestamp_serialization_marks_utc_explicitly(self) -> None:
+        naive_utc = datetime(2026, 8, 6, 20, 8, 21)
+        local_offset = timezone(timedelta(hours=-5))
+        aware_local = datetime(2026, 8, 6, 15, 8, 21, tzinfo=local_offset)
+
+        self.assertEqual(utc_isoformat(naive_utc), "2026-08-06T20:08:21Z")
+        self.assertEqual(utc_isoformat(aware_local), "2026-08-06T20:08:21Z")
+        self.assertEqual(_json_safe({"updated_at": naive_utc}), {"updated_at": "2026-08-06T20:08:21Z"})
+
+        job = JobRead(
+            id=uuid4(),
+            owner_session_id=uuid4(),
+            run_name="timezone test",
+            status=JobStatus.completed,
+            cancel_requested=False,
+            error=None,
+            error_code=None,
+            created_at=naive_utc,
+            started_at=None,
+            finished_at=aware_local,
+            updated_at=naive_utc,
+            progress={},
+            tracks_total=None,
+            tracks_done=0,
+            waves_done=0,
+            peaks_done=0,
+        )
+
+        dumped = job.model_dump(mode="json")
+        self.assertEqual(dumped["created_at"], "2026-08-06T20:08:21Z")
+        self.assertIsNone(dumped["started_at"])
+        self.assertEqual(dumped["finished_at"], "2026-08-06T20:08:21Z")
+        self.assertEqual(dumped["updated_at"], "2026-08-06T20:08:21Z")
 
     def test_crossing_tracker_honors_cancel_callback(self) -> None:
         tracker = CrossingTracker(object(), max_iters=1)

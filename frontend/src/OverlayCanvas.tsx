@@ -31,6 +31,14 @@ function withAlpha(color: string, alpha: number) {
   return color;
 }
 
+function formatZValue(value: number) {
+  if (value === 0) return "0";
+  const abs = Math.abs(value);
+  if (abs >= 10000 || abs < 0.001) return value.toExponential(3);
+  const fixed = abs >= 100 ? value.toFixed(1) : abs >= 10 ? value.toFixed(2) : value.toFixed(3);
+  return fixed.replace(/\.?0+$/, "");
+}
+
 type HitEntry = {
   id: string | number;
   samples: { x: number; y: number }[];
@@ -45,6 +53,10 @@ type HoverPoint = {
   py: number;
   xLabel: string;
   yLabel: string;
+  valueCol: number;
+  valueRow: number;
+  z: number | null;
+  zLabel: string;
 };
 
 type CoordInfo = {
@@ -57,6 +69,21 @@ type CoordInfo = {
   pixelMapping?: string | null;
   xLabel?: string;
   yLabel?: string;
+  zLabel?: string;
+  zMin?: number | null;
+  zMax?: number | null;
+  zVmin?: number | null;
+  zVmax?: number | null;
+};
+
+export type HeatmapValues = {
+  values: Float32Array;
+  width: number;
+  height: number;
+  origin?: string | null;
+  label?: string | null;
+  min?: number | null;
+  max?: number | null;
 };
 
 export function OverlayCanvas(props: {
@@ -64,6 +91,7 @@ export function OverlayCanvas(props: {
   debugImageUrl?: string | null;
   debugOpacity?: number;
   coordInfo?: CoordInfo | null;
+  heatmapValues?: HeatmapValues | null;
   tracks: OverlayTrackEvent[];
   overlayColor?: string;
   hideBaseImage?: boolean;
@@ -80,6 +108,7 @@ export function OverlayCanvas(props: {
     debugImageUrl = null,
     debugOpacity = 0.5,
     coordInfo = null,
+    heatmapValues = null,
     tracks,
     overlayColor = "rgba(0,140,90,0.85)",
     hideBaseImage = false,
@@ -159,6 +188,15 @@ export function OverlayCanvas(props: {
     });
   }, [hoverPoint]);
 
+  useEffect(() => {
+    return () => {
+      if (hoverRaf.current) {
+        cancelAnimationFrame(hoverRaf.current);
+        hoverRaf.current = null;
+      }
+    };
+  }, []);
+
   function clampPan(nextPan: { x: number; y: number }, nextZoom: number) {
     const extraX = Math.max(0, (stageSize.width * nextZoom - stageSize.width) / 2);
     const extraY = Math.max(0, (stageSize.height * nextZoom - stageSize.height) / 2);
@@ -201,28 +239,52 @@ export function OverlayCanvas(props: {
     const xLabel = coordInfo?.xLabel || "x";
     const yLabel = coordInfo?.yLabel || "y";
     if (coordInfo?.sourceKind === "table" && coordInfo?.pixelMapping === "table_cell") {
+      const gridW = Math.max(1, Math.round(coordInfo.outputWidth || coordInfo.sourceCols || w));
       const gridH = Math.max(1, Math.round(coordInfo.outputHeight || coordInfo.sourceRows || h));
+      const col = Math.max(0, Math.min(gridW - 1, Math.floor(rawX)));
       const topRow = Math.max(0, Math.min(gridH - 1, Math.floor(rawY)));
       const row =
         String(coordInfo.coordOrigin || "").toLowerCase() === "lower" ? gridH - 1 - topRow : topRow;
       return {
-        x: Math.max(0, Math.floor(rawX)),
+        x: col,
         y: row,
         px: 0,
         py: 0,
         xLabel,
         yLabel,
+        valueCol: col,
+        valueRow: topRow,
+        z: null,
+        zLabel: coordInfo?.zLabel || heatmapValues?.label || "z",
       };
     }
 
+    const col = Math.max(0, Math.floor(rawX));
+    const row = Math.max(0, Math.floor(rawY));
     return {
-      x: Math.max(0, Math.floor(rawX)),
-      y: Math.max(0, Math.floor(rawY)),
+      x: col,
+      y: row,
       px: 0,
       py: 0,
       xLabel,
       yLabel,
+      valueCol: col,
+      valueRow: row,
+      z: null,
+      zLabel: coordInfo?.zLabel || heatmapValues?.label || "z",
     };
+  }
+
+  function lookupHeatmapValue(col: number, row: number): number | null {
+    if (!heatmapValues) return null;
+    const width = Math.max(0, Math.floor(heatmapValues.width));
+    const height = Math.max(0, Math.floor(heatmapValues.height));
+    if (width <= 0 || height <= 0 || heatmapValues.values.length < width * height) return null;
+
+    const valueCol = Math.max(0, Math.min(width - 1, col));
+    const valueRow = Math.max(0, Math.min(height - 1, row));
+    const value = heatmapValues.values[valueRow * width + valueCol];
+    return Number.isFinite(value) ? value : null;
   }
 
   // Draw whenever tracks change, transform changes, or image loads
@@ -395,7 +457,8 @@ export function OverlayCanvas(props: {
     const entries = hitCacheRef.current;
     if (!entries || entries.length === 0) return null;
     let best: OverlayTrackEvent | null = null;
-    let bestDist = Infinity;
+    let bestDistSq = Infinity;
+    const hitRadiusSq = hitRadiusPx * hitRadiusPx;
 
     for (const e of entries) {
       const { minX, minY, maxX, maxY } = e.bbox;
@@ -404,20 +467,21 @@ export function OverlayCanvas(props: {
       for (const s of e.samples) {
         const dx = s.x - cx;
         const dy = s.y - cy;
-        const d = Math.sqrt(dx * dx + dy * dy);
-        if (d < bestDist) {
-          bestDist = d;
+        const dSq = dx * dx + dy * dy;
+        if (dSq < bestDistSq) {
+          bestDistSq = dSq;
           best = e.track;
         }
       }
     }
 
-    return bestDist <= hitRadiusPx ? best : null;
+    return bestDistSq <= hitRadiusSq ? best : null;
   };
 
   const handlePointerMove = (ev: PointerEvent<HTMLCanvasElement>) => {
     if (hoverRaf.current) cancelAnimationFrame(hoverRaf.current);
     hoverRaf.current = requestAnimationFrame(() => {
+      hoverRaf.current = null;
       if (dragStartRef.current) {
         const dx = ev.clientX - dragStartRef.current.x;
         const dy = ev.clientY - dragStartRef.current.y;
@@ -441,27 +505,35 @@ export function OverlayCanvas(props: {
       const localY = ev.clientY - rect.top;
       const cx = localX * scaleX;
       const cy = localY * scaleY;
-      const hit = findNearestTrack(cx, cy);
+
+      const w = canvas.width || 1;
+      const h = canvas.height || 1;
+      const projected = projectHoverPoint(cx, cy, w, h);
+      const zValue = lookupHeatmapValue(projected.valueCol, projected.valueRow);
+      const nextPoint = {
+        ...projected,
+        px: Math.max(0, Math.min(rect.width, localX)),
+        py: Math.max(0, Math.min(rect.height, localY)),
+        z: zValue,
+        zLabel: projected.zLabel || heatmapValues?.label || coordInfo?.zLabel || "z",
+      };
+      setHoverPoint(nextPoint);
+
+      const hit = hideTracks ? null : findNearestTrack(cx, cy);
       const hitId = hit ? (hit.id ?? hit.track_index) : null;
       if (String(hitId ?? "") !== String(hoverRef.current ?? "")) {
         hoverRef.current = hitId;
         setHoveredTrack(hit);
         onHoverTrack?.(hit);
       }
-
-      const w = canvas.width || 1;
-      const h = canvas.height || 1;
-      const projected = projectHoverPoint(cx, cy, w, h);
-      const nextPoint = {
-        ...projected,
-        px: Math.max(0, Math.min(rect.width, localX)),
-        py: Math.max(0, Math.min(rect.height, localY)),
-      };
-      setHoverPoint(nextPoint);
     });
   };
 
   const handlePointerLeave = () => {
+    if (hoverRaf.current) {
+      cancelAnimationFrame(hoverRaf.current);
+      hoverRaf.current = null;
+    }
     hoverRef.current = null;
     setHoveredTrack(null);
     onHoverTrack?.(null);
@@ -642,7 +714,10 @@ export function OverlayCanvas(props: {
                   top: tooltipTop,
                 }}
               >
-                ({hoverPoint.x}, {hoverPoint.y})
+                <span>
+                  ({hoverPoint.x}, {hoverPoint.y}
+                  {hoverPoint.z != null ? `, ${formatZValue(hoverPoint.z)}` : ""})
+                </span>
               </div>
             ) : null}
           </div>

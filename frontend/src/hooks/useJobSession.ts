@@ -11,9 +11,11 @@ import {
   wsUrl,
   cancelJob,
   API_BASE,
+  apiUrl,
   isApiError,
 } from "../api";
-import type { OverlayTrackEvent } from "../OverlayCanvas";
+import type { ArtifactView } from "../api";
+import type { HeatmapValues, OverlayTrackEvent } from "../OverlayCanvas";
 import type { LogEntry } from "../types";
 import { formatEta } from "../utils/format";
 
@@ -38,6 +40,11 @@ type HeatmapCoordInfo = {
   pixelMapping: string | null;
   xLabel: string;
   yLabel: string;
+  zLabel: string;
+  zMin: number | null;
+  zMax: number | null;
+  zVmin: number | null;
+  zVmax: number | null;
 };
 
 function asRecord(value: unknown): UnknownRecord | null {
@@ -92,6 +99,56 @@ function parseHeatmapCoordInfo(meta: unknown): HeatmapCoordInfo | null {
     pixelMapping: typeof data.pixel_mapping === "string" ? data.pixel_mapping : null,
     xLabel: typeof data.coord_x_label === "string" ? data.coord_x_label : "x",
     yLabel: typeof data.coord_y_label === "string" ? data.coord_y_label : "y",
+    zLabel: typeof data.z_label === "string" ? data.z_label : "z",
+    zMin: finiteNumber(data.z_min),
+    zMax: finiteNumber(data.z_max),
+    zVmin: finiteNumber(data.z_vmin) ?? finiteNumber(data.vmin),
+    zVmax: finiteNumber(data.z_vmax) ?? finiteNumber(data.vmax),
+  };
+}
+
+async function loadHeatmapValuesArtifact(
+  artifact: ArtifactView,
+  fallbackInfo: HeatmapCoordInfo | null
+): Promise<HeatmapValues | null> {
+  if (!artifact.download_url) return null;
+  const meta = asRecord(artifact.meta);
+  const encoding = typeof meta?.value_encoding === "string" ? meta.value_encoding : "float32_le";
+  if (encoding !== "float32_le") return null;
+
+  const width = Math.floor(
+    finiteNumber(meta?.output_width) ?? finiteNumber(meta?.source_cols) ?? fallbackInfo?.outputWidth ?? 0
+  );
+  const height = Math.floor(
+    finiteNumber(meta?.output_height) ?? finiteNumber(meta?.source_rows) ?? fallbackInfo?.outputHeight ?? 0
+  );
+  if (width <= 0 || height <= 0) return null;
+
+  const res = await fetch(apiUrl(artifact.download_url), {
+    method: "GET",
+    credentials: "include",
+  });
+  if (!res.ok) return null;
+
+  const expectedBytes = width * height * Float32Array.BYTES_PER_ELEMENT;
+  const buffer = await res.arrayBuffer();
+  if (buffer.byteLength < expectedBytes) return null;
+  const valuesBuffer = buffer.byteLength === expectedBytes ? buffer : buffer.slice(0, expectedBytes);
+
+  return {
+    values: new Float32Array(valuesBuffer),
+    width,
+    height,
+    origin:
+      typeof meta?.coord_origin === "string"
+        ? meta.coord_origin
+        : fallbackInfo?.coordOrigin ?? null,
+    label:
+      typeof meta?.z_label === "string"
+        ? meta.z_label
+        : fallbackInfo?.zLabel ?? "z",
+    min: finiteNumber(meta?.z_min) ?? fallbackInfo?.zMin ?? null,
+    max: finiteNumber(meta?.z_max) ?? fallbackInfo?.zMax ?? null,
   };
 }
 
@@ -146,6 +203,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
   const [status, setStatus] = useState<string>(initialSession ? "resuming…" : "idle");
   const [baseImageUrl, setBaseImageUrl] = useState<string | null>(null);
   const [baseImageInfo, setBaseImageInfo] = useState<HeatmapCoordInfo | null>(null);
+  const [heatmapValues, setHeatmapValues] = useState<HeatmapValues | null>(null);
   const [originalImageUrl, setOriginalImageUrl] = useState<string | null>(null);
   const [tracks, setTracks] = useState<OverlayTrackEvent[]>([]);
   const [activity, setActivity] = useState<LogEntry[]>([]);
@@ -167,6 +225,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
   const resumeSavedJobRef = useRef<(id: string) => void>(() => undefined);
   const pendingTracksRef = useRef<Map<number, OverlayTrackEvent>>(new Map());
   const trackFlushRafRef = useRef<number | null>(null);
+  const heatmapValuesArtifactIdRef = useRef<string | null>(null);
 
   const addActivity = (message: string, level: "info" | "warn" | "error" = "info", stage?: string) => {
     const ts = new Date().toLocaleTimeString();
@@ -209,6 +268,11 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     setTracks([]);
   }
 
+  function clearHeatmapValues() {
+    heatmapValuesArtifactIdRef.current = null;
+    setHeatmapValues(null);
+  }
+
   function upsertDebugOverlay(entry: { label: string; url: string }) {
     setDebugOverlays((prev) => {
       const m = new Map<string, { label: string; url: string }>();
@@ -229,7 +293,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     return url;
   }
 
-  function clearMissingJobSession(id: string) {
+  function clearSavedJobSession(id: string, message: string) {
     if (jobIdRef.current !== id) return;
 
     closeWs("missing-job");
@@ -241,6 +305,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     clearTracks();
     setBaseImageUrl(null);
     setBaseImageInfo(null);
+    clearHeatmapValues();
     setOriginalImageUrl(null);
     lastSeqRef.current = 0;
     setCurrentStage("idle");
@@ -248,7 +313,11 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     setEtaText(null);
     setDebugOverlays([]);
     setActivity([]);
-    addActivity("Saved run is no longer available; cleared session", "warn", "resume");
+    addActivity(message, "warn", "resume");
+  }
+
+  function clearMissingJobSession(id: string) {
+    clearSavedJobSession(id, "Saved run is no longer available; cleared session");
   }
 
   async function refreshDebugOverlays(id: string) {
@@ -291,6 +360,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
         if (showAsBase) {
           setBaseImageUrl(url);
           setBaseImageInfo(null);
+          clearHeatmapValues();
         }
       }
     } catch (error) {
@@ -305,10 +375,11 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     for (let i = 0; i < 60; i++) {
       if (pollTokenRef.current !== myToken) return;
       try {
-        const [job, overlayArts, baseArts, imageUploads] = await Promise.all([
+        const [job, overlayArts, baseArts, valueArts, imageUploads] = await Promise.all([
           getJob(id),
           listArtifacts(id, { kind: "overlay", limit: 2000 }),
           listArtifacts(id, { kind: "base_heatmap", limit: 1 }),
+          listArtifacts(id, { kind: "other", label: "base_heatmap_values", limit: 1 }),
           listArtifacts(id, { kind: "upload_image", limit: 1 }),
         ]);
         if (pollTokenRef.current !== myToken) return;
@@ -333,9 +404,18 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
           setDebugOverlays(list);
         }
         const base = baseArts.find((a) => a.kind === "base_heatmap" || a.label === "base_heatmap");
+        let info: HeatmapCoordInfo | null = null;
         if (base?.download_url) {
           setBaseImageUrl(base.download_url);
-          setBaseImageInfo(parseHeatmapCoordInfo(base.meta));
+          info = parseHeatmapCoordInfo(base.meta);
+          setBaseImageInfo(info);
+        }
+        const valuesArtifact = valueArts.find((a) => a.label === "base_heatmap_values");
+        if (valuesArtifact && valuesArtifact.id !== heatmapValuesArtifactIdRef.current) {
+          const loaded = await loadHeatmapValuesArtifact(valuesArtifact, info);
+          if (pollTokenRef.current !== myToken) return;
+          heatmapValuesArtifactIdRef.current = valuesArtifact.id;
+          setHeatmapValues(loaded);
         }
         const original = imageUploads.find((a) => a.kind === "upload_image" || a.label === "upload");
         if (original?.download_url) {
@@ -344,6 +424,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
           if (!base?.download_url) {
             setBaseImageUrl(url);
             setBaseImageInfo(null);
+            clearHeatmapValues();
           }
         }
         const statusText = String(job.status || "");
@@ -585,6 +666,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     clearTracks();
     setBaseImageUrl(null);
     setBaseImageInfo(null);
+    clearHeatmapValues();
     setOriginalImageUrl(null);
     setCurrentStage("init");
     setStageDetail(null);
@@ -655,6 +737,8 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     setStatus("resuming…");
     clearTracks();
     setBaseImageUrl(null);
+    setBaseImageInfo(null);
+    clearHeatmapValues();
     setOriginalImageUrl(null);
     setCurrentStage("resuming");
     setStageDetail(null);
@@ -674,7 +758,8 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
         clearMissingJobSession(id);
         return;
       }
-      // For transient startup/network failures, keep the old retry path alive.
+      clearSavedJobSession(id, "Could not reconnect to saved run; cleared session");
+      return;
     }
 
     lastSeqRef.current = 0;
@@ -699,6 +784,8 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     setStatus("idle");
     clearTracks();
     setBaseImageUrl(null);
+    setBaseImageInfo(null);
+    clearHeatmapValues();
     setOriginalImageUrl(null);
     lastSeqRef.current = 0;
     setCurrentStage("idle");
@@ -743,6 +830,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     status,
     baseImageUrl,
     baseImageInfo,
+    heatmapValues,
     originalImageUrl,
     tracks,
     activity,

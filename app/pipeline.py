@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 import os
 import json
 from pathlib import Path
@@ -15,8 +14,9 @@ from .job_store import JobStore
 from .models import ArtifactKind, EventType, JobStatus
 
 from .io.image_to_heatmap import image_to_heatmap_bytes
-from .io.table_to_heatmap import table_to_heatmap_bytes
+from .io.table_to_heatmap import table_to_heatmap_payload
 from .extract_core import select_kymo_runner, process_track
+from .time_utils import utc_now, utc_now_iso
 
 
 @dataclass(frozen=True)
@@ -40,7 +40,7 @@ def run_job(
     settings: PipelineSettings,
     resume: bool = False,
 ) -> None:
-    started_at = datetime.utcnow()
+    started_at = utc_now()
 
     scratch_dir = settings.scratch_root / str(job_id)
     scratch_dir.mkdir(parents=True, exist_ok=True)
@@ -73,7 +73,7 @@ def run_job(
             "processed": int(processed),
             "total": int(total),
             "pct": (float(processed) / float(total)) if total > 0 else 0.0,
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": utc_now_iso(),
         }
         if extra:
             progress.update(extra)
@@ -257,6 +257,8 @@ def run_job(
         # -----------------------------
         heatmap_png: Optional[bytes] = None
         heatmap_meta: Optional[Dict[str, Any]] = None
+        heatmap_value_bytes: Optional[bytes] = None
+        heatmap_value_meta: Optional[Dict[str, Any]] = None
         if resume_enabled:
             check_cancel("cancel_requested_before_heatmap_resume")
             existing = job_store.list_artifacts(
@@ -309,7 +311,7 @@ def run_job(
                     cancel_cb=cancelled,
                 )
             else:
-                heatmap_png, heatmap_meta = table_to_heatmap_bytes(
+                heatmap_png, heatmap_meta, heatmap_value_bytes, heatmap_value_meta = table_to_heatmap_payload(
                     input_bytes,
                     config=config,
                     filename_hint=str(input_filename) if input_filename else None,
@@ -330,6 +332,20 @@ def run_job(
                 label="base_heatmap",
                 meta=heatmap_meta,
             )
+            if heatmap_value_bytes is not None:
+                check_cancel("cancel_requested_before_heatmap_values_publish")
+                publish_bytes(
+                    kind=ArtifactKind.other,
+                    filename="base_heatmap_values.f32",
+                    data=heatmap_value_bytes,
+                    content_type="application/octet-stream",
+                    label="base_heatmap_values",
+                    meta={
+                        **(heatmap_value_meta or {}),
+                        "source_artifact_id": str(upload.id),
+                        "source_artifact_kind": upload.kind.value,
+                    },
+                )
             check_cancel("cancel_requested_after_heatmap_publish")
             set_progress("heatmap_ready")
             user_log("Heatmap ready", stage="heatmap_ready")
@@ -527,8 +543,8 @@ def run_job(
         peaks_buf: List[Dict[str, Any]] = []
         new_processed = 0
         batch_new_processed = 0
-        last_progress_ts = datetime.utcnow()
-        processing_started_at = datetime.utcnow()
+        last_progress_ts = utc_now()
+        processing_started_at = utc_now()
         last_rate_ts = processing_started_at
         last_processed_for_rate = processed
         ema_rate_tps: Optional[float] = None
@@ -582,7 +598,7 @@ def run_job(
             track = job_store.upsert_track_by_index(
                 job_id,
                 track_index,
-                processed_at=datetime.utcnow(),
+                processed_at=utc_now(),
                 amplitude=track_row.get("amplitude"),
                 frequency=track_row.get("frequency"),
                 error=track_row.get("error"),
@@ -623,7 +639,7 @@ def run_job(
                 job_store.bump_counts(job_id, tracks_done_delta=batch_new_processed)
                 batch_new_processed = 0
 
-            now = datetime.utcnow()
+            now = utc_now()
             if (now - last_progress_ts).total_seconds() >= settings.progress_every_secs:
                 rate_elapsed = (now - last_rate_ts).total_seconds()
                 delta = processed - last_processed_for_rate
@@ -667,7 +683,7 @@ def run_job(
 
         user_log("Completed", stage="completed")
         job_store.set_status(job_id, JobStatus.completed, emit_event=True)
-        emit(EventType.done, {"ok": True, "duration_s": (datetime.utcnow() - started_at).total_seconds()})
+        emit(EventType.done, {"ok": True, "duration_s": (utc_now() - started_at).total_seconds()})
 
     except CancellationRequested as e:
         try:

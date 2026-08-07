@@ -5,7 +5,6 @@ import io
 import math
 import os
 import tempfile
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from uuid import UUID
@@ -44,6 +43,7 @@ from ..models import (
     Wave,
 )
 from ..pipeline import PipelineSettings, run_job
+from ..time_utils import utc_now_iso
 from ..extract_core import PEAK_POLARITY_ALIASES, _suppress_cross_polarity_peak_sets
 from ..signal.detrend import fit_baseline_ransac
 from ..signal.peaks import detect_peaks, detect_peaks_adaptive, ensure_minimum_peaks
@@ -653,7 +653,7 @@ def upload_complete(
         meta={
             "filename": payload.filename,
             "input_type": "image" if kind == ArtifactKind.upload_image else "table",
-            "uploaded_at": datetime.utcnow().isoformat(),
+            "uploaded_at": utc_now_iso(),
             "upload_method": "gcs_resumable",
         },
     )
@@ -720,7 +720,7 @@ async def upload_table(
             meta={
                 "filename": filename,
                 "input_type": "image" if kind == ArtifactKind.upload_image else "table",
-                "uploaded_at": datetime.utcnow().isoformat(),
+                "uploaded_at": utc_now_iso(),
                 "upload_method": "api_stream",
             },
         )

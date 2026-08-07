@@ -448,6 +448,104 @@ body {
   color: #a33f32;
 }
 
+.run-options-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px dashed color-mix(in srgb, var(--border) 75%, #ffffff);
+}
+
+.run-options-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #1f2a2e;
+}
+
+.run-options-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.option-group {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.option-group legend {
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.segmented-control {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  padding: 4px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--border) 72%, #ffffff);
+  background: #f7f4ee;
+}
+
+.segmented-btn,
+.palette-btn {
+  min-width: 0;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #314047;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.segmented-btn {
+  min-height: 32px;
+  padding: 6px 8px;
+  border-radius: 9px;
+}
+
+.segmented-btn.active,
+.palette-btn.active {
+  border-color: color-mix(in srgb, var(--accent) 32%, #ffffff);
+  background: #ffffff;
+  color: var(--accent-strong);
+  box-shadow: 0 6px 14px rgba(23, 40, 44, 0.08);
+}
+
+.palette-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.palette-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 7px;
+  min-height: 34px;
+  padding: 6px 8px;
+  border-radius: 10px;
+  border-color: color-mix(in srgb, var(--border) 72%, #ffffff);
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.palette-swatch {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  border: 1px solid rgba(31, 42, 46, 0.16);
+}
+
 .run-panel .run-actions {
   padding-top: 10px;
   border-top: 1px dashed color-mix(in srgb, var(--border) 75%, #ffffff);
@@ -1070,6 +1168,9 @@ body {
 .coord-tooltip {
   position: absolute;
   z-index: 4;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   padding: 6px 8px;
   border-radius: 8px;
   background: rgba(27, 36, 42, 0.92);
