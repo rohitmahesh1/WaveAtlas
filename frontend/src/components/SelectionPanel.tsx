@@ -4,6 +4,19 @@ import { TrackDetailChart } from "./TrackDetailChart";
 
 export function SelectionPanel(props: {
   selectedTrack: OverlayTrackEvent | null;
+  selectionScope?: "family" | "track" | null;
+  selectedFamilySummary?: {
+    familyId: string;
+    label: string;
+    color: string;
+    trackCount: number;
+    avgSlope: number | null;
+    avgSpeed: number | null;
+    avgAngle: number | null;
+    avgFrequency: number | null;
+    directions: string[];
+  } | null;
+  familyIsolated?: boolean;
   trackDetail: TrackDetail | null;
   trackDetailLoading: boolean;
   trackDetailError: string | null;
@@ -12,9 +25,14 @@ export function SelectionPanel(props: {
   debugImageUrl?: string | null;
   debugOpacity?: number;
   onDownloadTrackDetail?: () => void;
+  onIsolateFamily?: (familyId: string) => void;
+  onClearFamilyIsolation?: () => void;
 }) {
   const {
     selectedTrack,
+    selectionScope = null,
+    selectedFamilySummary = null,
+    familyIsolated = false,
     trackDetail,
     trackDetailLoading,
     trackDetailError,
@@ -23,10 +41,19 @@ export function SelectionPanel(props: {
     debugImageUrl,
     debugOpacity,
     onDownloadTrackDetail,
+    onIsolateFamily,
+    onClearFamilyIsolation,
   } = props;
   const detailReady = Boolean(
     selectedTrack && trackDetail && trackDetail.track_index === selectedTrack.track_index
   );
+  const rippleMode = selectedTrack?.metrics?.analysis_mode === "ripple_family";
+  const familyHighlighted = rippleMode && selectionScope === "family" && selectedFamilySummary;
+  const selectedVelocity = selectedTrack?.metrics?.velocity_px_per_s ?? null;
+  const selectedSpeed = selectedTrack?.metrics?.speed_px_per_s ?? (
+    selectedVelocity != null ? Math.abs(selectedVelocity) : null
+  );
+  const selectedAngle = selectedTrack?.metrics?.angle_from_time_axis_deg ?? selectedTrack?.metrics?.angle_deg ?? null;
 
   return (
     <section className="panel">
@@ -45,6 +72,68 @@ export function SelectionPanel(props: {
       <div className="panel-body">
         {selectedTrack ? (
           <>
+            {familyHighlighted ? (
+              <div className="family-summary">
+                <div className="family-summary-header">
+                  <div className="family-summary-title">
+                    <span
+                      className="family-swatch"
+                      style={{ backgroundColor: selectedFamilySummary.color }}
+                      aria-hidden="true"
+                    />
+                    <span>{selectedFamilySummary.label}</span>
+                  </div>
+                  {familyIsolated ? (
+                    <button className="ghost-btn compact-btn" onClick={onClearFamilyIsolation}>
+                      Show all
+                    </button>
+                  ) : (
+                    <button
+                      className="ghost-btn compact-btn"
+                      onClick={() => onIsolateFamily?.(selectedFamilySummary.familyId)}
+                    >
+                      Isolate
+                    </button>
+                  )}
+                </div>
+                <div className="stats-grid">
+                  <div>
+                    Tracks
+                    <div className="meta-value">{selectedFamilySummary.trackCount}</div>
+                  </div>
+                  <div>
+                    Direction
+                    <div className="meta-value">{selectedFamilySummary.directions.join(", ") || "—"}</div>
+                  </div>
+                  <div>
+                    Avg slope
+                    <div className="meta-value">
+                      {selectedFamilySummary.avgSlope != null ? selectedFamilySummary.avgSlope.toFixed(3) : "—"}
+                    </div>
+                  </div>
+                  <div>
+                    Avg speed
+                    <div className="meta-value">
+                      {selectedFamilySummary.avgSpeed != null ? selectedFamilySummary.avgSpeed.toFixed(2) : "—"}
+                    </div>
+                  </div>
+                  <div>
+                    Avg angle
+                    <div className="meta-value">
+                      {selectedFamilySummary.avgAngle != null ? selectedFamilySummary.avgAngle.toFixed(1) : "—"}
+                    </div>
+                  </div>
+                  <div>
+                    Avg frequency
+                    <div className="meta-value">
+                      {selectedFamilySummary.avgFrequency != null
+                        ? selectedFamilySummary.avgFrequency.toFixed(3)
+                        : "—"}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : null}
             <div className="stats-grid">
               <div>
                 ID
@@ -58,32 +147,95 @@ export function SelectionPanel(props: {
                 Points
                 <div className="meta-value">{selectedTrack.poly?.length ?? 0}</div>
               </div>
-              <div>
-                Peaks
-                <div className="meta-value">{selectedTrack.metrics?.num_peaks ?? 0}</div>
-              </div>
-              <div>
-                Mean amplitude
-                <div className="meta-value">
-                  {selectedTrack.metrics?.mean_amplitude != null
-                    ? selectedTrack.metrics.mean_amplitude.toFixed(2)
-                    : "—"}
-                </div>
-              </div>
-              <div>
-                Dominant freq
-                <div className="meta-value">
-                  {selectedTrack.metrics?.dominant_frequency != null
-                    ? selectedTrack.metrics.dominant_frequency.toFixed(2)
-                    : "—"}
-                </div>
-              </div>
-              <div>
-                Period
-                <div className="meta-value">
-                  {selectedTrack.metrics?.period != null ? selectedTrack.metrics.period.toFixed(2) : "—"}
-                </div>
-              </div>
+              {rippleMode ? (
+                <>
+                  <div>
+                    Family
+                    <div className="meta-value">{selectedTrack.metrics?.family_id ?? "Unassigned"}</div>
+                  </div>
+                  <div>
+                    Direction
+                    <div className="meta-value">{selectedTrack.metrics?.direction ?? "—"}</div>
+                  </div>
+                  <div>
+                    Slope
+                    <div className="meta-value">
+                      {selectedTrack.metrics?.slope_px_per_frame != null
+                        ? selectedTrack.metrics.slope_px_per_frame.toFixed(3)
+                        : "—"}
+                    </div>
+                  </div>
+                  <div>
+                    Velocity
+                    <div className="meta-value">
+                      {selectedVelocity != null
+                        ? selectedVelocity.toFixed(2)
+                        : "—"}
+                    </div>
+                  </div>
+                  <div>
+                    Speed
+                    <div className="meta-value">
+                      {selectedSpeed != null
+                        ? selectedSpeed.toFixed(2)
+                        : "—"}
+                    </div>
+                  </div>
+                  <div>
+                    Angle
+                    <div className="meta-value">
+                      {selectedAngle != null
+                        ? selectedAngle.toFixed(1)
+                        : "—"}
+                    </div>
+                  </div>
+                  <div>
+                    Frequency
+                    <div className="meta-value">
+                      {selectedTrack.metrics?.dominant_frequency != null
+                        ? selectedTrack.metrics.dominant_frequency.toFixed(3)
+                        : "—"}
+                    </div>
+                  </div>
+                  <div>
+                    Line error
+                    <div className="meta-value">
+                      {selectedTrack.metrics?.line_rmse_px != null
+                        ? selectedTrack.metrics.line_rmse_px.toFixed(2)
+                        : "—"}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div>
+                    Peaks
+                    <div className="meta-value">{selectedTrack.metrics?.num_peaks ?? 0}</div>
+                  </div>
+                  <div>
+                    Mean amplitude
+                    <div className="meta-value">
+                      {selectedTrack.metrics?.mean_amplitude != null
+                        ? selectedTrack.metrics.mean_amplitude.toFixed(2)
+                        : "—"}
+                    </div>
+                  </div>
+                  <div>
+                    Dominant freq
+                    <div className="meta-value">
+                      {selectedTrack.metrics?.dominant_frequency != null
+                        ? selectedTrack.metrics.dominant_frequency.toFixed(2)
+                        : "—"}
+                    </div>
+                  </div>
+                  <div>
+                    Period
+                    <div className="meta-value">
+                      {selectedTrack.metrics?.period != null ? selectedTrack.metrics.period.toFixed(2) : "—"}
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
             <div className="track-detail">
               <div className="track-detail-title">Track preview</div>

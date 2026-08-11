@@ -5,8 +5,11 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 from uuid import UUID, uuid4
 
+from pydantic import field_serializer
 from sqlmodel import SQLModel, Field, Relationship
 from sqlalchemy import Column, UniqueConstraint, Index, JSON
+
+from .time_utils import utc_isoformat, utc_now
 
 
 # -----------------------------
@@ -78,10 +81,10 @@ class Job(SQLModel, table=True):
     error: Optional[str] = Field(default=None)
     error_code: Optional[str] = Field(default=None, index=True)
 
-    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    created_at: datetime = Field(default_factory=utc_now, index=True)
     started_at: Optional[datetime] = Field(default=None, index=True)
     finished_at: Optional[datetime] = Field(default=None, index=True)
-    updated_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    updated_at: datetime = Field(default_factory=utc_now, index=True)
 
     config: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
     progress: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
@@ -128,7 +131,7 @@ class Artifact(SQLModel, table=True):
         sa_column=Column("metadata", JSON, nullable=False),
     )
 
-    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    created_at: datetime = Field(default_factory=utc_now, index=True)
 
     job: Job = Relationship(back_populates="artifacts")
 
@@ -189,7 +192,7 @@ class Wave(SQLModel, table=True):
     t_end: Optional[float] = None
 
     metrics: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
-    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    created_at: datetime = Field(default_factory=utc_now, index=True)
 
     job: Job = Relationship(back_populates="waves")
     track: Optional[Track] = Relationship(back_populates="waves")
@@ -213,7 +216,7 @@ class Peak(SQLModel, table=True):
     fit_target: Optional[str] = Field(default=None, index=True)
 
     metrics: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
-    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    created_at: datetime = Field(default_factory=utc_now, index=True)
 
     job: Job = Relationship(back_populates="peaks")
     track: Optional[Track] = Relationship(back_populates="peaks")
@@ -234,7 +237,7 @@ class JobEvent(SQLModel, table=True):
     type: EventType = Field(index=True)
 
     payload: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
-    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    created_at: datetime = Field(default_factory=utc_now, index=True)
 
     job: Job = Relationship(back_populates="events")
 
@@ -243,12 +246,20 @@ class JobEvent(SQLModel, table=True):
 # API Schemas (MVP)
 # -----------------------------
 
+class UtcDatetimeSchema(SQLModel):
+    @field_serializer("created_at", "started_at", "finished_at", "updated_at", check_fields=False, when_used="json")
+    def _serialize_utc_datetime(self, value: Optional[datetime]) -> Optional[str]:
+        if value is None:
+            return None
+        return utc_isoformat(value)
+
+
 class JobCreate(SQLModel):
     run_name: str = "untitled"
     config: Union[Dict[str, Any], str] = Field(default_factory=dict)
 
 
-class JobRead(SQLModel):
+class JobRead(UtcDatetimeSchema):
     id: UUID
     owner_session_id: UUID
     run_name: str
@@ -266,9 +277,10 @@ class JobRead(SQLModel):
     waves_done: int
     peaks_done: int
     input_filename: Optional[str] = None
+    analysis_mode: str = "standard"
 
 
-class ArtifactRead(SQLModel):
+class ArtifactRead(UtcDatetimeSchema):
     id: UUID
     job_id: UUID
     kind: ArtifactKind
@@ -282,7 +294,7 @@ class ArtifactRead(SQLModel):
     created_at: datetime
 
 
-class WaveRead(SQLModel):
+class WaveRead(UtcDatetimeSchema):
     id: UUID
     job_id: UUID
     track_id: Optional[UUID]
@@ -302,7 +314,7 @@ class WaveRead(SQLModel):
     created_at: datetime
 
 
-class JobEventRead(SQLModel):
+class JobEventRead(UtcDatetimeSchema):
     job_id: UUID
     seq: int
     type: EventType

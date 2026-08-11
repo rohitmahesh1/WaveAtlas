@@ -148,6 +148,7 @@ class KymoRunner(Protocol):
         heatmap_path: Path,
         scratch_dir: Path,
         progress_cb: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+        cancel_cb: Optional[Callable[[], bool]] = None,
     ) -> KymoOutput: ...
 
 
@@ -173,6 +174,7 @@ class OnnxKymoRunner:
         heatmap_path: Path,
         scratch_dir: Path,
         progress_cb: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+        cancel_cb: Optional[Callable[[], bool]] = None,
     ) -> KymoOutput:
         from .modules.kb_adapter import run_kymobutler as run_kymo
 
@@ -181,6 +183,7 @@ class OnnxKymoRunner:
         base_dir.mkdir(parents=True, exist_ok=True)
 
         onnx_cfg = ((self.config.get("kymo") or {}).get("onnx") or {})
+        analysis_cfg = (self.config.get("analysis") or {})
 
         export_dir = onnx_cfg.get("export_dir", None)
         providers = _parse_providers(onnx_cfg.get("providers", None))
@@ -197,7 +200,8 @@ class OnnxKymoRunner:
             debug_save_images=debug_save_images,
             save_overlay_tracks=save_overlay_tracks,
             progress_cb=progress_cb,
-            **_flatten_onnx_cfg_for_runner(onnx_cfg),
+            cancel_cb=cancel_cb,
+            **_flatten_onnx_cfg_for_runner(onnx_cfg, analysis_cfg=analysis_cfg),
         )
 
         track_paths = _discover_tracks(base_dir)
@@ -214,6 +218,7 @@ class WolframKymoRunner:
         heatmap_path: Path,
         scratch_dir: Path,
         progress_cb: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+        cancel_cb: Optional[Callable[[], bool]] = None,
     ) -> KymoOutput:
         from .modules.kymo_interface import run_kymobutler as run_kymo
 
@@ -271,7 +276,11 @@ def _image_id_from_path(p: Path) -> str:
     return stem
 
 
-def _flatten_onnx_cfg_for_runner(onnx_cfg: Dict[str, Any]) -> Dict[str, Any]:
+def _flatten_onnx_cfg_for_runner(
+    onnx_cfg: Dict[str, Any],
+    *,
+    analysis_cfg: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     thresholds = (onnx_cfg.get("thresholds") or {})
     hyst = (onnx_cfg.get("hysteresis") or {})
     auto = (onnx_cfg.get("auto_threshold") or {})
@@ -283,6 +292,11 @@ def _flatten_onnx_cfg_for_runner(onnx_cfg: Dict[str, Any]) -> Dict[str, Any]:
     endpoint_link_resolved = _resolve_endpoint_link_cfg(endpoint_link)
     dedupe = (post.get("dedupe") or {})
     tracking = (onnx_cfg.get("tracking") or {})
+    analysis_cfg = analysis_cfg or {}
+    ripple_cfg = (analysis_cfg.get("ripple") or {})
+    ripple_linking = (ripple_cfg.get("endpoint_link") or {})
+    analysis_mode = str(analysis_cfg.get("mode", "standard")).strip().lower()
+    ripple_mode = analysis_mode in {"ripple", "ripple_family", "ripple_waves", "ripple-wave", "ripple-waves"}
 
     return {
         "min_length": int(tracking.get("min_length", 30)),
@@ -330,6 +344,10 @@ def _flatten_onnx_cfg_for_runner(onnx_cfg: Dict[str, Any]) -> Dict[str, Any]:
         "endpoint_link_min_overlap_rows": int(endpoint_link_resolved["min_overlap_rows"]),
         "endpoint_link_max_overlap_rows": int(endpoint_link_resolved["max_overlap_rows"]),
         "endpoint_link_overlap_dx_tol": float(endpoint_link_resolved["overlap_dx_tol"]),
+        "endpoint_link_prefer_long_linear": bool(ripple_linking.get("prefer_long_linear", ripple_mode)),
+        "endpoint_link_length_weight": float(ripple_linking.get("length_weight", 0.25)),
+        "endpoint_link_linearity_weight": float(ripple_linking.get("linearity_weight", 0.25)),
+        "endpoint_link_min_abs_slope": float(ripple_linking.get("min_abs_slope", 0.05)),
         "dedupe_enable": bool(dedupe.get("enabled", True)),
         "dedupe_min_rows": int(dedupe.get("min_rows", 30)),
         "dedupe_min_score": float(dedupe.get("min_score", 0.11)),

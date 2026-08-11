@@ -5,7 +5,6 @@ import io
 import math
 import os
 import tempfile
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from uuid import UUID
@@ -44,6 +43,8 @@ from ..models import (
     Wave,
 )
 from ..pipeline import PipelineSettings, run_job
+from ..analysis_mode import RIPPLE_ANALYSIS_MODE, resolve_analysis_mode
+from ..time_utils import utc_now_iso
 from ..extract_core import PEAK_POLARITY_ALIASES, _suppress_cross_polarity_peak_sets
 from ..signal.detrend import fit_baseline_ransac
 from ..signal.peaks import detect_peaks, detect_peaks_adaptive, ensure_minimum_peaks
@@ -94,6 +95,7 @@ def _get_upload_filename(session: Session, job_id: UUID) -> Optional[str]:
 def _job_read_with_filename(session: Session, job: Job) -> JobRead:
     out = JobRead.model_validate(job)  # type: ignore
     out.input_filename = _get_upload_filename(session, job.id)
+    out.analysis_mode = resolve_analysis_mode(dict(job.config or {}))
     return out
 
 
@@ -653,7 +655,7 @@ def upload_complete(
         meta={
             "filename": payload.filename,
             "input_type": "image" if kind == ArtifactKind.upload_image else "table",
-            "uploaded_at": datetime.utcnow().isoformat(),
+            "uploaded_at": utc_now_iso(),
             "upload_method": "gcs_resumable",
         },
     )
@@ -720,7 +722,7 @@ async def upload_table(
             meta={
                 "filename": filename,
                 "input_type": "image" if kind == ArtifactKind.upload_image else "table",
-                "uploaded_at": datetime.utcnow().isoformat(),
+                "uploaded_at": utc_now_iso(),
                 "upload_method": "api_stream",
             },
         )
@@ -875,6 +877,36 @@ def get_track_detail(
     config = _effective_pipeline_config(job)
     order = _track_xy_order_from_config(config)
     frame, position = _load_track_frame_position_from_bytes(track_bytes, order=order)
+
+    if resolve_analysis_mode(config) == RIPPLE_ANALYSIS_MODE:
+        track_model = session.exec(
+            select(Track).where(Track.job_id == job_id, Track.track_index == int(track_index))
+        ).first()
+        metrics = dict((track_model.metrics if track_model else {}) or {})
+        slope = float(metrics.get("slope_px_per_frame", 0.0) or 0.0)
+        intercept = float(metrics.get("line_intercept_px", position[0] if position.size else 0.0) or 0.0)
+        baseline = (slope * frame + intercept).astype(float)
+        residual = (position - baseline).astype(float)
+        lo, hi = 0, len(frame) - 1
+        if index_range:
+            lo, hi = _parse_index_range(index_range, len(frame))
+        return {
+            "track_index": int(track_index),
+            "analysis_mode": RIPPLE_ANALYSIS_MODE,
+            "coords": {"poly_format": "[x, y]", "x_name": "time_index", "y_name": "position_px"},
+            "time_index": frame[lo : hi + 1].tolist(),
+            "position": position[lo : hi + 1].tolist(),
+            "baseline": baseline[lo : hi + 1].tolist(),
+            "residual": residual[lo : hi + 1].tolist() if include_residual else None,
+            "sine_fit": None,
+            "regression": {"method": "robust_linear", "slope": slope, "intercept": intercept},
+            "peaks": [],
+            "peaks_in_slice": [],
+            "peak_points": [],
+            "peak_regressions": [],
+            "strongest_peak_idx": None,
+            "metrics": metrics,
+        }
 
     detrend_cfg = (config.get("detrend") or {}).copy()
     degree = int(detrend_cfg.pop("degree", 1))
@@ -1053,6 +1085,42 @@ def download_artifact(
         "Content-Disposition": f'inline; filename="{filename}"',
     }
     return Response(content=data, media_type=media, headers=headers)
+
+
+@router.get("/jobs/{job_id}/ripple/{export_name}.csv")
+def export_ripple_csv(
+    job_id: UUID,
+    export_name: str,
+    response: Response,
+    owner_session_id: UUID = Depends(get_owner_session_id),
+    session: Session = Depends(get_db_session),
+    artifact_store: ArtifactStore = Depends(get_artifact_store),
+) -> Response:
+    _get_job_owned(session, job_id, owner_session_id)
+    labels = {
+        "tracks": "ripple_tracks",
+        "intervals": "ripple_intervals",
+        "families": "ripple_families",
+    }
+    label = labels.get(export_name.strip().lower())
+    if label is None:
+        raise HTTPException(status_code=404, detail="Unknown ripple export")
+    artifact = session.exec(
+        select(Artifact)
+        .where(Artifact.job_id == job_id, Artifact.kind == ArtifactKind.other, Artifact.label == label)
+        .order_by(Artifact.created_at.desc())
+        .limit(1)
+    ).first()
+    if artifact is None:
+        raise HTTPException(status_code=404, detail=f"Ripple {export_name} export is not available")
+    data = artifact_store.get_bytes(artifact.blob_path)
+    filename = ((artifact.meta or {}).get("filename") if isinstance(artifact.meta, dict) else None) or {
+        "tracks": "tracks.csv",
+        "intervals": "waves.csv",
+        "families": "families.csv",
+    }[export_name.strip().lower()]
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    return Response(content=data, media_type="text/csv", headers=headers)
 
 
 @router.get("/jobs/{job_id}/waves.csv")

@@ -52,6 +52,7 @@ export type JobRead = {
   waves_done: number;
   peaks_done: number;
   input_filename?: string | null;
+  analysis_mode?: string;
 };
 export type ArtifactView = {
   id: string;
@@ -89,6 +90,7 @@ export type TrackPeakRegression = TrackPeakPoint & {
 
 export type TrackDetail = {
   track_index: number;
+  analysis_mode?: string;
   time_index: number[];
   position: number[];
   baseline: number[];
@@ -104,6 +106,23 @@ export type TrackDetail = {
     period?: number | null;
     num_peaks?: number | null;
     mean_amplitude?: number | null;
+    family_id?: string | null;
+    direction?: string | null;
+    slope_px_per_frame?: number | null;
+    velocity_px_per_s?: number | null;
+    speed_px_per_s?: number | null;
+    angle_deg?: number | null;
+    angle_from_time_axis_deg?: number | null;
+    line_rmse_px?: number | null;
+    line_fit_rmse_px?: number | null;
+    line_r2?: number | null;
+    duration_s?: number | null;
+    neighbor_interval_count?: number | null;
+    ripple_period_frames?: number | null;
+    ripple_period_s?: number | null;
+    frequency_hz?: number | null;
+    ripple_frequency_hz?: number | null;
+    frequency_method?: string | null;
   };
 };
 
@@ -148,6 +167,7 @@ export async function listJobs(limit = 50, offset = 0): Promise<JobRead[]> {
   const res = await fetch(`${API_BASE}/api/jobs?limit=${limit}&offset=${offset}`, {
     method: "GET",
     credentials: "include",
+    cache: "no-store",
   });
   if (!res.ok) await throwApiError(res);
   return res.json();
@@ -164,6 +184,10 @@ export async function getJob(jobId: string): Promise<JobRead> {
 
 export function jobWavesCsvUrl(jobId: string) {
   return apiUrl(`/api/jobs/${jobId}/waves.csv`);
+}
+
+export function jobRippleCsvUrl(jobId: string, exportName: "tracks" | "intervals" | "families") {
+  return apiUrl(`/api/jobs/${jobId}/ripple/${exportName}.csv`);
 }
 
 export async function cancelJob(jobId: string): Promise<JobRead> {

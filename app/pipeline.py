@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 import os
 import json
 from pathlib import Path
@@ -10,12 +9,17 @@ from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 
 from .artifact_store import ArtifactStore
+from .cancel import CancellationRequested
 from .job_store import JobStore
 from .models import ArtifactKind, EventType, JobStatus
 
 from .io.image_to_heatmap import image_to_heatmap_bytes
-from .io.table_to_heatmap import table_to_heatmap_bytes
+from .io.table_to_heatmap import table_to_heatmap_payload
 from .extract_core import select_kymo_runner, process_track
+from .analysis_mode import RIPPLE_ANALYSIS_MODE, resolve_analysis_mode
+from .ripple_analysis import analyze_ripple_tracks
+from .ripple_extraction import run_ripple_extraction
+from .time_utils import utc_now, utc_now_iso
 
 
 @dataclass(frozen=True)
@@ -39,13 +43,17 @@ def run_job(
     settings: PipelineSettings,
     resume: bool = False,
 ) -> None:
-    started_at = datetime.utcnow()
+    started_at = utc_now()
 
     scratch_dir = settings.scratch_root / str(job_id)
     scratch_dir.mkdir(parents=True, exist_ok=True)
 
     def cancelled() -> bool:
         return job_store.is_cancel_requested(job_id)
+
+    def check_cancel(reason: str = "cancel_requested") -> None:
+        if cancelled():
+            raise CancellationRequested(reason)
 
     def emit(event_type: EventType, payload: Dict[str, Any]) -> None:
         job_store.append_event(job_id, event_type, payload)
@@ -68,7 +76,7 @@ def run_job(
             "processed": int(processed),
             "total": int(total),
             "pct": (float(processed) / float(total)) if total > 0 else 0.0,
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": utc_now_iso(),
         }
         if extra:
             progress.update(extra)
@@ -187,6 +195,7 @@ def run_job(
             emit(EventType.progress, {"artifact": {"kind": kind.value, "label": label, "blob_path": blob_path}})
 
     def publish_debug_overlays(image_id: str, base_dir: Path) -> None:
+        check_cancel("cancel_requested_before_debug_overlays")
         dbg = base_dir / "debug"
         if not dbg.exists():
             return
@@ -202,6 +211,7 @@ def run_job(
         ]
 
         for overlay_name, fname, ctype in file_map:
+            check_cancel("cancel_requested_during_debug_overlays")
             p = dbg / fname
             if p.exists():
                 label = f"{image_id}:{overlay_name}"
@@ -216,6 +226,7 @@ def run_job(
 
         ot = base_dir / "overlay_tracks.png"
         if ot.exists():
+            check_cancel("cancel_requested_during_debug_overlays")
             label = f"{image_id}:overlay_tracks"
             publish_file(
                 kind=ArtifactKind.overlay,
@@ -226,8 +237,36 @@ def run_job(
                 meta={"image_id": image_id, "overlay": "overlay_tracks"},
             )
 
+    def publish_ripple_manifest(image_id: str, base_dir: Path) -> None:
+        manifest_path = base_dir / "ripple_track_manifest.json"
+        if not manifest_path.exists():
+            return
+        check_cancel("cancel_requested_before_ripple_manifest_publish")
+        publish_file(
+            kind=ArtifactKind.debug_text,
+            filename=f"{image_id}_ripple_track_manifest.json",
+            local_path=manifest_path,
+            content_type="application/json",
+            label=f"{image_id}:ripple_track_manifest",
+            meta={
+                "image_id": image_id,
+                "analysis_mode": RIPPLE_ANALYSIS_MODE,
+                "extractor": "ripple_multiscale_hough",
+            },
+        )
+
+    def load_heatmap_values_artifact() -> Tuple[Optional[bytes], Optional[Dict[str, Any]]]:
+        check_cancel("cancel_requested_before_heatmap_values_resume")
+        arts = job_store.list_artifacts(job_id, kind=ArtifactKind.other, label="base_heatmap_values", limit=1)
+        if not arts:
+            return None, None
+        data = artifact_store.get_bytes(arts[0].blob_path)
+        check_cancel("cancel_requested_after_heatmap_values_resume")
+        return data, dict(getattr(arts[0], "meta", {}) or {})
+
     resume_cfg = (config.get("service") or {}).get("resume") or {}
     resume_enabled = bool(resume_cfg.get("enabled", False)) or bool(resume)
+    analysis_mode = resolve_analysis_mode(config)
 
     try:
         # -----------------------------
@@ -236,27 +275,31 @@ def run_job(
         job_store.set_status(job_id, JobStatus.in_progress, emit_event=True)
         set_progress("init")
         user_log("Starting analysis", stage="init")
+        check_cancel("cancel_requested_before_start")
 
         if resume_enabled:
+            check_cancel("cancel_requested_before_resume_counts")
             job_store.recompute_counts(job_id)
 
-        if cancelled():
-            job_store.set_status(job_id, JobStatus.cancelled, emit_event=True)
-            emit(EventType.cancelled, {"reason": "cancel_requested_before_start"})
-            return
+        check_cancel("cancel_requested_before_start")
 
         # -----------------------------
         # Base heatmap (resume-aware)
         # -----------------------------
         heatmap_png: Optional[bytes] = None
         heatmap_meta: Optional[Dict[str, Any]] = None
+        heatmap_value_bytes: Optional[bytes] = None
+        heatmap_value_meta: Optional[Dict[str, Any]] = None
         if resume_enabled:
+            check_cancel("cancel_requested_before_heatmap_resume")
             existing = job_store.list_artifacts(
                 job_id, kind=ArtifactKind.base_heatmap, label="base_heatmap", limit=1
             )
             if existing:
+                check_cancel("cancel_requested_before_heatmap_resume")
                 heatmap_png = artifact_store.get_bytes(existing[0].blob_path)
                 heatmap_meta = dict(getattr(existing[0], "meta", {}) or {})
+                check_cancel("cancel_requested_after_heatmap_resume")
                 set_progress("heatmap_ready", extra={"resume": True})
                 user_log("Using existing heatmap", stage="heatmap_ready")
 
@@ -265,6 +308,7 @@ def run_job(
             # Load uploaded input from artifact store
             # -----------------------------
             user_log("Loading input", stage="load_input")
+            check_cancel("cancel_requested_before_input_load")
             uploads = [
                 *job_store.list_artifacts(job_id, kind=ArtifactKind.upload_image, limit=10),
                 *job_store.list_artifacts(job_id, kind=ArtifactKind.upload_csv, limit=10),
@@ -274,39 +318,43 @@ def run_job(
             uploads.sort(key=lambda art: art.created_at)
 
             upload = uploads[0]
+            check_cancel("cancel_requested_before_input_download")
             input_bytes = artifact_store.get_bytes(upload.blob_path)
             input_filename = (upload.meta or {}).get("filename")
+            check_cancel("cancel_requested_after_input_download")
 
             loaded_stage = "image_loaded" if upload.kind == ArtifactKind.upload_image else "table_loaded"
             set_progress(loaded_stage, extra={"upload_blob": upload.blob_path, "input_kind": upload.kind.value})
             emit(EventType.progress, {"stage": loaded_stage, "bytes": len(input_bytes), "input_kind": upload.kind.value})
 
-            if cancelled():
-                job_store.set_status(job_id, JobStatus.cancelled, emit_event=True)
-                emit(EventType.cancelled, {"reason": "cancel_requested_after_input_loaded"})
-                return
+            check_cancel("cancel_requested_after_input_loaded")
 
             # -----------------------------
             # Input -> base heatmap
             # -----------------------------
             user_log("Generating heatmap", stage="heatmap")
+            check_cancel("cancel_requested_before_heatmap")
             if upload.kind == ArtifactKind.upload_image:
                 heatmap_png, heatmap_meta = image_to_heatmap_bytes(
                     input_bytes,
                     config=config,
                     filename_hint=str(input_filename) if input_filename else None,
+                    cancel_cb=cancelled,
                 )
             else:
-                heatmap_png, heatmap_meta = table_to_heatmap_bytes(
+                heatmap_png, heatmap_meta, heatmap_value_bytes, heatmap_value_meta = table_to_heatmap_payload(
                     input_bytes,
                     config=config,
                     filename_hint=str(input_filename) if input_filename else None,
+                    cancel_cb=cancelled,
                 )
+            check_cancel("cancel_requested_after_heatmap")
             heatmap_meta = {
                 **(heatmap_meta or {}),
                 "source_artifact_id": str(upload.id),
                 "source_artifact_kind": upload.kind.value,
             }
+            check_cancel("cancel_requested_before_heatmap_publish")
             publish_bytes(
                 kind=ArtifactKind.base_heatmap,
                 filename="base_heatmap.png",
@@ -315,18 +363,38 @@ def run_job(
                 label="base_heatmap",
                 meta=heatmap_meta,
             )
+            if heatmap_value_bytes is not None:
+                check_cancel("cancel_requested_before_heatmap_values_publish")
+                publish_bytes(
+                    kind=ArtifactKind.other,
+                    filename="base_heatmap_values.f32",
+                    data=heatmap_value_bytes,
+                    content_type="application/octet-stream",
+                    label="base_heatmap_values",
+                    meta={
+                        **(heatmap_value_meta or {}),
+                        "source_artifact_id": str(upload.id),
+                        "source_artifact_kind": upload.kind.value,
+                    },
+                )
+            check_cancel("cancel_requested_after_heatmap_publish")
             set_progress("heatmap_ready")
             user_log("Heatmap ready", stage="heatmap_ready")
 
         if heatmap_png is None:
             raise PipelineError("Heatmap bytes missing (resume or generation failed)")
         heatmap_path = scratch_dir / "base_heatmap.png"
+        check_cancel("cancel_requested_before_heatmap_write")
         heatmap_path.write_bytes(heatmap_png)
+        check_cancel("cancel_requested_after_heatmap_write")
 
-        if cancelled():
-            job_store.set_status(job_id, JobStatus.cancelled, emit_event=True)
-            emit(EventType.cancelled, {"reason": "cancel_requested_after_heatmap"})
-            return
+        check_cancel("cancel_requested_after_heatmap")
+
+        if analysis_mode == RIPPLE_ANALYSIS_MODE and heatmap_value_bytes is None:
+            cached_values, cached_meta = load_heatmap_values_artifact()
+            if cached_values is not None:
+                heatmap_value_bytes = cached_values
+                heatmap_value_meta = cached_meta or {}
 
         # -----------------------------
         # Heatmap -> tracks (kymo runner) or resume from artifacts
@@ -350,11 +418,13 @@ def run_job(
         def _load_tracks_from_artifacts(total_tracks: int) -> Optional[List[Path]]:
             if total_tracks <= 0:
                 return None
+            check_cancel("cancel_requested_before_track_resume")
             arts = job_store.list_artifacts(
                 job_id, kind=ArtifactKind.track_npy, limit=max(2000, total_tracks + 10)
             )
             mapping: Dict[int, Any] = {}
             for art in arts:
+                check_cancel("cancel_requested_during_track_resume")
                 idx = _parse_track_index(getattr(art, "meta", {}) or {}, art.label)
                 if idx is None:
                     continue
@@ -367,74 +437,160 @@ def run_job(
             dest_dir.mkdir(parents=True, exist_ok=True)
             paths: List[Path] = []
             for i in range(total_tracks):
+                check_cancel("cancel_requested_during_track_resume")
                 art = mapping[i]
                 data = artifact_store.get_bytes(art.blob_path)
+                check_cancel("cancel_requested_during_track_resume")
                 p = dest_dir / f"track_{i}.npy"
                 p.write_bytes(data)
                 paths.append(p)
             return paths
 
         def _load_track_manifest() -> Optional[Dict[str, Any]]:
+            check_cancel("cancel_requested_before_track_manifest")
             arts = job_store.list_artifacts(job_id, kind=ArtifactKind.track_manifest, label="tracks_manifest", limit=1)
             if not arts:
                 return None
             try:
+                check_cancel("cancel_requested_before_track_manifest")
                 raw = artifact_store.get_bytes(arts[0].blob_path)
+                check_cancel("cancel_requested_after_track_manifest")
                 return json.loads(raw.decode("utf-8"))
+            except CancellationRequested:
+                raise
             except Exception:
                 return None
 
         if resume_enabled:
+            check_cancel("cancel_requested_before_track_resume")
             manifest = _load_track_manifest()
             if manifest and isinstance(manifest.get("total_tracks"), int):
                 maybe_paths = _load_tracks_from_artifacts(int(manifest["total_tracks"]))
                 if maybe_paths:
                     track_paths = maybe_paths
-                    emit(EventType.progress, {"stage": "kymo_done", "tracks_found": len(track_paths), "resume": True})
-                    user_log(f"Using cached tracks ({len(track_paths)})", stage="kymo_done")
+                    cached_extractor = str(manifest.get("extractor") or "")
+                    cached_stage = "ripple_extract_done" if cached_extractor == "ripple_multiscale_hough" else "kymo_done"
+                    emit(
+                        EventType.progress,
+                        {
+                            "stage": cached_stage,
+                            "tracks_found": len(track_paths),
+                            "resume": True,
+                            "extractor": cached_extractor or None,
+                        },
+                    )
+                    user_log(f"Using cached tracks ({len(track_paths)})", stage=cached_stage)
 
         if not track_paths:
-            user_log("Extracting tracks (KymoButler)", stage="kymo_start")
-            set_progress("kymo_start", extra={"detail": "Extracting tracks"})
-            runner = select_kymo_runner(config=config)
+            check_cancel("cancel_requested_before_track_extraction")
+            image_id: str
+            base_dir: Path
+            ripple_extraction_cfg = (((config.get("analysis") or {}).get("ripple") or {}).get("extraction") or {})
+            use_ripple_extractor = (
+                analysis_mode == RIPPLE_ANALYSIS_MODE
+                and bool(ripple_extraction_cfg.get("enabled", True))
+            )
+            extractor_name = "ripple_multiscale_hough" if use_ripple_extractor else "kymobutler"
+            if use_ripple_extractor:
+                user_log("Extracting tracks", stage="ripple_extract_start")
+                set_progress("ripple_extract_start", extra={"detail": "Extracting tracks"})
+                check_cancel("cancel_requested_before_ripple_extraction")
+                ripple_stage_labels = {
+                    "load_values": "Loading heatmap",
+                    "smoothing": "Segmenting heatmap",
+                    "seeding": "Tracing tracks",
+                    "tracking": "Tracing tracks",
+                    "deduping": "Removing duplicates",
+                    "saving": "Saving tracks",
+                }
+                last_ripple_extract_stage: Optional[str] = None
 
-            kymo_stage_labels = {
-                "load_image": "Loading heatmap",
-                "segmenting": "Segmenting heatmap",
-                "masking": "Cleaning mask",
-                "skeletonizing": "Skeletonizing tracks",
-                "tracking": "Tracing tracks",
-                "refining": "Refining tracks",
-                "deduping": "Removing duplicates",
-                "scaling": "Scaling to original size",
-                "saving": "Saving tracks",
-            }
-            last_kymo_stage: Optional[str] = None
+                def ripple_extract_progress(stage: str, data: Dict[str, Any]) -> None:
+                    nonlocal last_ripple_extract_stage
+                    label = ripple_stage_labels.get(stage, stage)
+                    extra = dict(data) if data else {}
+                    if stage == "load_values" and heatmap_value_bytes is not None:
+                        extra["value_source"] = "base_heatmap_values"
+                    set_progress(f"ripple_extract_{stage}", extra=extra or None)
+                    if stage != last_ripple_extract_stage and stage in ripple_stage_labels:
+                        user_log(label, stage=f"ripple_extract_{stage}")
+                        last_ripple_extract_stage = stage
 
-            def kymo_progress(stage: str, data: Dict[str, Any]) -> None:
-                nonlocal last_kymo_stage
-                label = kymo_stage_labels.get(stage, stage)
-                extra = dict(data) if data else None
-                set_progress(f"kymo_{stage}", extra=extra)
-                if stage != last_kymo_stage and stage in kymo_stage_labels:
-                    user_log(label, stage=f"kymo_{stage}")
-                    last_kymo_stage = stage
+                ripple_out = run_ripple_extraction(
+                    heatmap_path=heatmap_path,
+                    scratch_dir=scratch_dir,
+                    config=config,
+                    heatmap_value_bytes=heatmap_value_bytes,
+                    heatmap_value_meta=heatmap_value_meta,
+                    progress_cb=ripple_extract_progress,
+                    cancel_cb=cancelled,
+                )
+                check_cancel("cancel_requested_after_ripple_extraction")
+                image_id = ripple_out.image_id
+                base_dir = ripple_out.base_dir
+                track_paths = list(ripple_out.track_paths)
+                publish_ripple_manifest(image_id, base_dir)
+            else:
+                user_log("Extracting tracks (KymoButler)", stage="kymo_start")
+                set_progress("kymo_start", extra={"detail": "Extracting tracks"})
+                check_cancel("cancel_requested_before_kymo")
+                runner = select_kymo_runner(config=config)
 
-            kymo_out = runner.run(heatmap_path=heatmap_path, scratch_dir=scratch_dir, progress_cb=kymo_progress)
+                kymo_stage_labels = {
+                    "load_image": "Loading heatmap",
+                    "segmenting": "Segmenting heatmap",
+                    "masking": "Cleaning mask",
+                    "skeletonizing": "Skeletonizing tracks",
+                    "tracking": "Tracing tracks",
+                    "refining": "Refining tracks",
+                    "deduping": "Removing duplicates",
+                    "scaling": "Scaling to original size",
+                    "saving": "Saving tracks",
+                }
+                last_kymo_stage: Optional[str] = None
 
-            image_id: str = kymo_out.image_id
-            base_dir: Path = kymo_out.base_dir
-            track_paths = list(kymo_out.track_paths)
+                def kymo_progress(stage: str, data: Dict[str, Any]) -> None:
+                    nonlocal last_kymo_stage
+                    label = kymo_stage_labels.get(stage, stage)
+                    extra = dict(data) if data else None
+                    set_progress(f"kymo_{stage}", extra=extra)
+                    if stage != last_kymo_stage and stage in kymo_stage_labels:
+                        user_log(label, stage=f"kymo_{stage}")
+                        last_kymo_stage = stage
 
+                kymo_out = runner.run(
+                    heatmap_path=heatmap_path,
+                    scratch_dir=scratch_dir,
+                    progress_cb=kymo_progress,
+                    cancel_cb=cancelled,
+                )
+                check_cancel("cancel_requested_after_kymo")
+
+                image_id = kymo_out.image_id
+                base_dir = kymo_out.base_dir
+                track_paths = list(kymo_out.track_paths)
+
+            check_cancel("cancel_requested_before_debug_overlays")
             publish_debug_overlays(image_id, base_dir)
-            emit(EventType.progress, {"stage": "kymo_done", "tracks_found": len(track_paths), "image_id": image_id})
-            user_log(f"Found {len(track_paths)} tracks", stage="kymo_done")
+            check_cancel("cancel_requested_after_debug_overlays")
+            done_stage = "ripple_extract_done" if use_ripple_extractor else "kymo_done"
+            emit(
+                EventType.progress,
+                {
+                    "stage": done_stage,
+                    "tracks_found": len(track_paths),
+                    "image_id": image_id,
+                    "extractor": extractor_name,
+                },
+            )
+            user_log(f"Found {len(track_paths)} tracks", stage=done_stage)
 
             if not track_paths:
-                raise PipelineError("Kymo runner produced no tracks")
+                raise PipelineError(f"{extractor_name} produced no tracks")
 
             if resume_enabled:
                 # Persist all tracks for resume
+                check_cancel("cancel_requested_before_track_persist")
                 existing = job_store.list_artifacts(
                     job_id, kind=ArtifactKind.track_npy, limit=max(2000, len(track_paths) + 10)
                 )
@@ -442,6 +598,7 @@ def run_job(
                     idx for idx in (_parse_track_index(getattr(a, "meta", {}) or {}, a.label) for a in existing) if idx is not None
                 )
                 for track_index, track_path in enumerate(track_paths):
+                    check_cancel("cancel_requested_during_track_persist")
                     if track_index in existing_idx:
                         continue
                     label = f"track:{track_index}"
@@ -463,7 +620,12 @@ def run_job(
                         meta={"track_index": int(track_index)},
                     )
 
-                manifest_payload = {"total_tracks": len(track_paths)}
+                manifest_payload = {
+                    "total_tracks": len(track_paths),
+                    "analysis_mode": analysis_mode,
+                    "extractor": extractor_name,
+                }
+                check_cancel("cancel_requested_before_track_manifest_write")
                 publish_bytes(
                     kind=ArtifactKind.track_manifest,
                     filename="tracks_manifest.json",
@@ -472,14 +634,146 @@ def run_job(
                     label="tracks_manifest",
                     meta=manifest_payload,
                 )
-        
+
+        if analysis_mode == RIPPLE_ANALYSIS_MODE:
+            # Ripple analysis intentionally separates track geometry, family
+            # assignment, and inter-track interval measurement.
+            check_cancel("cancel_requested_before_ripple_analysis")
+            user_log("Analyzing tracks", stage="ripple_track_geometry")
+            job_store.bump_counts(job_id, tracks_total=len(track_paths))
+            last_ripple_stage: Optional[str] = None
+            last_ripple_progress_at = utc_now()
+            ripple_stage_labels = {
+                "ripple_track_geometry": "Analyzing tracks",
+                "ripple_family_grouping": "Grouping tracks",
+                "ripple_interval_analysis": "Measuring waves",
+            }
+
+            def ripple_progress(stage: str, processed: int, total: int) -> None:
+                nonlocal last_ripple_stage, last_ripple_progress_at
+                check_cancel("cancel_requested_during_ripple_analysis")
+                now = utc_now()
+                stage_changed = stage != last_ripple_stage
+                should_publish = (
+                    stage_changed
+                    or total <= 0
+                    or processed >= total
+                    or (now - last_ripple_progress_at).total_seconds() >= settings.progress_every_secs
+                )
+                if should_publish:
+                    set_progress(stage, processed=processed, total=total)
+                    last_ripple_progress_at = now
+                if stage_changed:
+                    user_log(ripple_stage_labels.get(stage, stage), stage=stage)
+                    last_ripple_stage = stage
+
+            ripple_result = analyze_ripple_tracks(
+                job_id=job_id,
+                track_paths=track_paths,
+                config=config,
+                cancel_cb=cancelled,
+                progress_cb=ripple_progress,
+            )
+            check_cancel("cancel_requested_after_ripple_analysis")
+
+            track_detail_cfg = (config.get("track_detail") or {})
+            store_track_npy = bool(track_detail_cfg.get("store_npy", True)) or resume_enabled
+            for track_path, track_row, overlay_track in zip(
+                track_paths,
+                ripple_result.track_rows,
+                ripple_result.overlay_events,
+            ):
+                check_cancel("cancel_requested_during_ripple_persistence")
+                track_index = int(track_row["track_index"])
+                if store_track_npy:
+                    label = f"track:{track_index}"
+                    existing = job_store.list_artifacts(job_id, kind=ArtifactKind.track_npy, label=label, limit=1)
+                    if not existing:
+                        blob_path, byte_size = artifact_store.put_file(
+                            job_id=job_id,
+                            kind=ArtifactKind.track_npy.value,
+                            filename=f"track_{track_index}.npy",
+                            local_path=str(track_path),
+                            content_type="application/octet-stream",
+                            label=label,
+                        )
+                        job_store.create_artifact(
+                            job_id=job_id,
+                            kind=ArtifactKind.track_npy,
+                            blob_path=blob_path,
+                            label=label,
+                            content_type="application/octet-stream",
+                            byte_size=byte_size,
+                            meta={"track_index": track_index},
+                        )
+
+                job_store.upsert_track_by_index(
+                    job_id,
+                    track_index,
+                    processed_at=utc_now(),
+                    amplitude=track_row.get("amplitude"),
+                    frequency=track_row.get("frequency"),
+                    error=track_row.get("error"),
+                    x0=track_row.get("x0"),
+                    y0=track_row.get("y0"),
+                    metrics=track_row.get("metrics") or {},
+                    overlay=track_row.get("overlay") or {},
+                )
+                emit(EventType.overlay_track, overlay_track)
+
+            job_store.recompute_counts(job_id)
+
+            ripple_exports = [
+                ("ripple_tracks", "tracks.csv", ripple_result.tracks_csv, len(ripple_result.track_rows)),
+                ("ripple_intervals", "waves.csv", ripple_result.intervals_csv, len(ripple_result.intervals)),
+                ("ripple_families", "families.csv", ripple_result.families_csv, len(ripple_result.families)),
+            ]
+            for label, filename, data, row_count in ripple_exports:
+                check_cancel("cancel_requested_during_ripple_export")
+                existing = job_store.list_artifacts(job_id, kind=ArtifactKind.other, label=label, limit=1)
+                if existing:
+                    continue
+                publish_bytes(
+                    kind=ArtifactKind.other,
+                    filename=filename,
+                    data=data,
+                    content_type="text/csv",
+                    label=label,
+                    meta={
+                        "analysis_mode": RIPPLE_ANALYSIS_MODE,
+                        "row_count": row_count,
+                        "filename": filename,
+                    },
+                )
+
+            check_cancel("cancel_requested_before_completion")
+            completion_extra = {
+                "analysis_mode": RIPPLE_ANALYSIS_MODE,
+                "families_found": len(ripple_result.families),
+                "intervals_found": len(ripple_result.intervals),
+                "eta_secs": 0.0,
+            }
+            set_progress("completed", processed=len(track_paths), total=len(track_paths), extra=completion_extra)
+            user_log("Completed", stage="completed")
+            job_store.set_status(job_id, JobStatus.completed, emit_event=True)
+            emit(EventType.done, {
+                "ok": True,
+                "analysis_mode": RIPPLE_ANALYSIS_MODE,
+                "duration_s": (utc_now() - started_at).total_seconds(),
+                "families_found": len(ripple_result.families),
+                "intervals_found": len(ripple_result.intervals),
+            })
+            return
+
         # -----------------------------
-        # Process tracks -> DB rows + overlay events
+        # Standard tracks -> DB rows + overlay events
         # -----------------------------
+        check_cancel("cancel_requested_before_processing_tracks")
         user_log("Analyzing tracks", stage="processing_tracks")
         job_store.bump_counts(job_id, tracks_total=len(track_paths))
 
         processed_set = set(job_store.get_processed_track_indices(job_id)) if resume_enabled else set()
+        check_cancel("cancel_requested_before_processing_tracks")
         processed = len(processed_set)
         set_progress("processing_tracks", processed=processed, total=len(track_paths))
 
@@ -487,19 +781,15 @@ def run_job(
         peaks_buf: List[Dict[str, Any]] = []
         new_processed = 0
         batch_new_processed = 0
-        last_progress_ts = datetime.utcnow()
-        processing_started_at = datetime.utcnow()
+        last_progress_ts = utc_now()
+        processing_started_at = utc_now()
         last_rate_ts = processing_started_at
         last_processed_for_rate = processed
         ema_rate_tps: Optional[float] = None
         ema_alpha = 0.2
 
         for track_index, track_path in enumerate(track_paths):
-            if cancelled():
-                job_store.set_status(job_id, JobStatus.cancelled, emit_event=True)
-                emit(EventType.cancelled, {"reason": "cancel_requested_mid_run", "processed": processed})
-                set_progress("cancelled", processed=processed, total=len(track_paths))
-                return
+            check_cancel("cancel_requested_during_processing_tracks")
 
             if resume_enabled and track_index in processed_set:
                 processed += 1
@@ -509,6 +799,7 @@ def run_job(
             track_detail_cfg = (config.get("track_detail") or {})
             store_track_npy = bool(track_detail_cfg.get("store_npy", True)) or resume_enabled
             if store_track_npy:
+                check_cancel("cancel_requested_before_track_artifact")
                 label = f"track:{track_index}"
                 existing = job_store.list_artifacts(job_id, kind=ArtifactKind.track_npy, label=label, limit=1)
                 if not existing:
@@ -530,6 +821,7 @@ def run_job(
                         meta={"track_index": int(track_index)},
                     )
 
+            check_cancel("cancel_requested_before_track_analysis")
             track_row, wave_rows, peak_rows, overlay_track = process_track(
                 job_id=job_id,
                 track_index=track_index,
@@ -537,13 +829,14 @@ def run_job(
                 config=config,
                 heatmap_meta=heatmap_meta,
             )
+            check_cancel("cancel_requested_after_track_analysis")
 
             # print("Processed track #", track_row, " Wave", wave_rows)
 
             track = job_store.upsert_track_by_index(
                 job_id,
                 track_index,
-                processed_at=datetime.utcnow(),
+                processed_at=utc_now(),
                 amplitude=track_row.get("amplitude"),
                 frequency=track_row.get("frequency"),
                 error=track_row.get("error"),
@@ -566,10 +859,12 @@ def run_job(
             batch_new_processed += 1
 
             if settings.emit_overlay_every_tracks > 0 and (new_processed % settings.emit_overlay_every_tracks == 0):
+                check_cancel("cancel_requested_before_overlay_event")
                 emit(EventType.overlay_track, overlay_track)
                 #print("emitting overlay")
 
             if settings.db_batch_size > 0 and (new_processed % settings.db_batch_size == 0):
+                check_cancel("cancel_requested_before_batch_write")
                 if waves_buf:
                     job_store.insert_waves_batch(job_id, waves_buf)
                     job_store.bump_counts(job_id, waves_done_delta=len(waves_buf))
@@ -582,7 +877,7 @@ def run_job(
                 job_store.bump_counts(job_id, tracks_done_delta=batch_new_processed)
                 batch_new_processed = 0
 
-            now = datetime.utcnow()
+            now = utc_now()
             if (now - last_progress_ts).total_seconds() >= settings.progress_every_secs:
                 rate_elapsed = (now - last_rate_ts).total_seconds()
                 delta = processed - last_processed_for_rate
@@ -605,27 +900,62 @@ def run_job(
                 last_progress_ts = now
 
         if waves_buf:
+            check_cancel("cancel_requested_before_final_batch_write")
             job_store.insert_waves_batch(job_id, waves_buf)
             job_store.bump_counts(job_id, waves_done_delta=len(waves_buf))
             waves_buf.clear()
 
         if peaks_buf:
+            check_cancel("cancel_requested_before_final_batch_write")
             job_store.insert_peaks_batch(job_id, peaks_buf)
             job_store.bump_counts(job_id, peaks_done_delta=len(peaks_buf))
             peaks_buf.clear()
 
         # Final counts
         if batch_new_processed:
+            check_cancel("cancel_requested_before_final_counts")
             job_store.bump_counts(job_id, tracks_done_delta=batch_new_processed)
 
+        check_cancel("cancel_requested_before_completion")
         set_progress("completed", processed=len(track_paths), total=len(track_paths), extra={"eta_secs": 0.0})
 
         user_log("Completed", stage="completed")
         job_store.set_status(job_id, JobStatus.completed, emit_event=True)
-        emit(EventType.done, {"ok": True, "duration_s": (datetime.utcnow() - started_at).total_seconds()})
+        emit(EventType.done, {"ok": True, "duration_s": (utc_now() - started_at).total_seconds()})
+
+    except CancellationRequested as e:
+        try:
+            job_store.session.rollback()
+        except Exception:
+            pass
+
+        reason = str(e) or "cancel_requested"
+        try:
+            job_store.set_status(job_id, JobStatus.cancelled, emit_event=True)
+            set_progress("cancelled")
+            emit(EventType.cancelled, {"reason": reason})
+            user_log("Run cancelled", stage="cancelled", level="warn")
+        except Exception:
+            try:
+                job_store.session.rollback()
+            except Exception:
+                pass
+        return
 
     except Exception as e:
-        user_log("Run failed", stage="failed", level="error")
-        job_store.set_status(job_id, JobStatus.failed, error=str(e), emit_event=True)
-        emit(EventType.error, {"error": str(e)})
+        error_text = str(e)
+        try:
+            job_store.session.rollback()
+        except Exception:
+            pass
+
+        try:
+            job_store.set_status(job_id, JobStatus.failed, error=error_text, emit_event=True)
+            user_log("Run failed", stage="failed", level="error")
+            emit(EventType.error, {"error": error_text})
+        except Exception:
+            try:
+                job_store.session.rollback()
+            except Exception:
+                pass
         raise

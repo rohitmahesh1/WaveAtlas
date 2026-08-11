@@ -8,6 +8,7 @@ import numpy as np
 import time
 import cv2
 
+from ..cancel import CancellationRequested
 # Only need the class type hint (and decision/preproc helper at runtime)
 from .kymobutler_pt import KymoButlerPT
 
@@ -432,6 +433,7 @@ class CrossingTracker:
         *,
         progress_cb: Optional[Callable[[Dict[str, object]], None]] = None,
         progress_every_secs: float = 1.0,
+        cancel_cb: Optional[Callable[[], bool]] = None,
     ) -> List[Track]:
         """
         Iteratively extract tracks:
@@ -448,6 +450,7 @@ class CrossingTracker:
         last_emit = start_ts
         last_rate_ts = start_ts
         last_processed_px = 0
+        last_cancel_check = 0.0
         ema_rate_px: Optional[float] = None
         ema_alpha = 0.2
         phase = "init"
@@ -455,8 +458,20 @@ class CrossingTracker:
         seeds_total = 0
         new_tracks_iter = 0
 
+        def check_cancel(force: bool = False) -> None:
+            nonlocal last_cancel_check
+            if cancel_cb is None:
+                return
+            now = time.monotonic()
+            if not force and (now - last_cancel_check) < 0.25:
+                return
+            last_cancel_check = now
+            if cancel_cb():
+                raise CancellationRequested("cancel_requested")
+
         def emit_progress(force: bool = False) -> None:
             nonlocal last_emit, last_rate_ts, last_processed_px, ema_rate_px
+            check_cancel(force=force)
             if progress_cb is None:
                 return
             now = time.monotonic()
@@ -493,6 +508,8 @@ class CrossingTracker:
                         "new_tracks_iter": new_tracks_iter,
                     }
                 )
+            except CancellationRequested:
+                raise
             except Exception:
                 # Progress hooks should never break tracking.
                 pass

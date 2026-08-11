@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
+from enum import Enum
+import math
+from numbers import Integral, Real
 from typing import Any, Dict, List, Optional, Sequence
 from uuid import UUID
 
@@ -21,6 +24,7 @@ from .models import (
     Track,
     Wave,
 )
+from .time_utils import utc_isoformat, utc_now
 
 
 _WAVE_MODEL_KEYS = {
@@ -51,13 +55,55 @@ _PEAK_MODEL_KEYS = {
 }
 
 
+def _json_safe(value: Any) -> Any:
+    """
+    Convert Python/NumPy-ish values into strict JSON values.
+
+    PostgreSQL's json type rejects NaN/Infinity even though Python's json.dumps
+    emits them by default, so sanitize at the persistence boundary.
+    """
+    if value is None or isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, Enum):
+        return _json_safe(value.value)
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, datetime):
+        return utc_isoformat(value)
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(_json_safe(key)): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        try:
+            return _json_safe(tolist())
+        except Exception:
+            pass
+
+    if isinstance(value, Integral):
+        return int(value)
+    if isinstance(value, Real):
+        number = float(value)
+        return number if math.isfinite(number) else None
+
+    try:
+        number = float(value)
+    except Exception:
+        return str(value)
+    return number if math.isfinite(number) else None
+
+
 def _row_for_metric_model(row: Dict[str, Any], *, model_keys: set[str]) -> Dict[str, Any]:
     out = {key: value for key, value in row.items() if key in model_keys}
     metrics = dict(out.get("metrics") or {})
     for key, value in row.items():
         if key not in model_keys:
             metrics.setdefault(key, value)
-    out["metrics"] = metrics
+    out["metrics"] = _json_safe(metrics)
     return out
 
 
@@ -85,7 +131,7 @@ class JobStore:
         run_name: str = "untitled",
         config: Optional[Dict[str, Any]] = None,
     ) -> Job:
-        now = datetime.utcnow()
+        now = utc_now()
         job = Job(
             owner_session_id=owner_session_id,
             run_name=run_name,
@@ -93,7 +139,7 @@ class JobStore:
             cancel_requested=False,
             created_at=now,
             updated_at=now,
-            config=config or {},
+            config=_json_safe(config or {}),
             progress={},
         )
         self.session.add(job)
@@ -133,7 +179,7 @@ class JobStore:
         emit_event: bool = True,
     ) -> Job:
         job = self.get_job(job_id)
-        now = datetime.utcnow()
+        now = utc_now()
 
         # Lifecycle timestamps
         if status == JobStatus.in_progress and job.started_at is None:
@@ -175,7 +221,7 @@ class JobStore:
         already moved the job out of the startable state and callers should not
         enqueue duplicate work.
         """
-        now = datetime.utcnow()
+        now = utc_now()
         values: Dict[str, Any] = {
             "status": JobStatus.in_progress,
             "started_at": now,
@@ -183,7 +229,7 @@ class JobStore:
             "updated_at": now,
         }
         if config is not None:
-            values["config"] = dict(config)
+            values["config"] = _json_safe(config)
 
         result = self.session.execute(
             update(Job)
@@ -211,7 +257,7 @@ class JobStore:
         Active or completed jobs are returned unchanged with claimed=False, so
         repeated resume calls are safe no-ops.
         """
-        now = datetime.utcnow()
+        now = utc_now()
         values: Dict[str, Any] = {
             "status": JobStatus.in_progress,
             "cancel_requested": False,
@@ -221,7 +267,7 @@ class JobStore:
             "updated_at": now,
         }
         if config is not None:
-            values["config"] = dict(config)
+            values["config"] = _json_safe(config)
 
         result = self.session.execute(
             update(Job)
@@ -242,7 +288,7 @@ class JobStore:
             return job
 
         job.cancel_requested = True
-        job.updated_at = datetime.utcnow()
+        job.updated_at = utc_now()
 
         # Optionally move status -> cancel_requested (your pipeline can treat either flag as canonical)
         if job.status not in (JobStatus.cancel_requested,):
@@ -257,15 +303,16 @@ class JobStore:
         return job
 
     def is_cancel_requested(self, job_id: UUID) -> bool:
-        job = self.get_job(job_id)
-        return bool(job.cancel_requested) or job.status == JobStatus.cancel_requested
+        row = self.session.exec(select(Job.cancel_requested, Job.status).where(Job.id == job_id)).one()
+        cancel_requested, status = row
+        return bool(cancel_requested) or status == JobStatus.cancel_requested
 
     def clear_cancel(self, job_id: UUID, *, emit_event: bool = True) -> Job:
         job = self.get_job(job_id)
         job.cancel_requested = False
         if job.status in (JobStatus.cancel_requested, JobStatus.cancelled):
             job.status = JobStatus.queued
-        job.updated_at = datetime.utcnow()
+        job.updated_at = utc_now()
         self.session.add(job)
         self.session.commit()
         if emit_event:
@@ -298,7 +345,7 @@ class JobStore:
         job.tracks_done = int(tracks_done or 0)
         job.waves_done = int(waves_done or 0)
         job.peaks_done = int(peaks_done or 0)
-        job.updated_at = datetime.utcnow()
+        job.updated_at = utc_now()
         self.session.add(job)
         self.session.commit()
         return job
@@ -317,14 +364,14 @@ class JobStore:
         - replace=True replaces the whole progress dict
         """
         job = self.get_job(job_id)
-        now = datetime.utcnow()
+        now = utc_now()
 
         if replace:
-            job.progress = dict(progress)
+            job.progress = _json_safe(progress)
         else:
             merged = dict(job.progress or {})
             merged.update(progress)
-            job.progress = merged
+            job.progress = _json_safe(merged)
 
         job.updated_at = now
         self.session.add(job)
@@ -353,8 +400,8 @@ class JobStore:
                 job_id=job_id,
                 seq=seq,
                 type=event_type,
-                payload=payload,
-                created_at=datetime.utcnow(),
+                payload=_json_safe(payload),
+                created_at=utc_now(),
             )
             self.session.add(ev)
             try:
@@ -423,8 +470,8 @@ class JobStore:
                 error=error,
                 x0=x0,
                 y0=y0,
-                metrics=metrics or {},
-                overlay=overlay or {},
+                metrics=_json_safe(metrics or {}),
+                overlay=_json_safe(overlay or {}),
             )
             self.session.add(track)
         else:
@@ -443,9 +490,9 @@ class JobStore:
             if metrics is not None:
                 merged = dict(track.metrics or {})
                 merged.update(metrics)
-                track.metrics = merged
+                track.metrics = _json_safe(merged)
             if overlay is not None:
-                track.overlay = overlay
+                track.overlay = _json_safe(overlay)
             self.session.add(track)
 
         self.session.commit()
@@ -453,7 +500,17 @@ class JobStore:
         return track
 
     def insert_tracks_batch(self, job_id: UUID, rows: Sequence[Dict[str, Any]]) -> int:
-        objs = [Track(job_id=job_id, **r) for r in rows]
+        objs = [
+            Track(
+                job_id=job_id,
+                **{
+                    **r,
+                    "metrics": _json_safe(r.get("metrics") or {}),
+                    "overlay": _json_safe(r.get("overlay") or {}),
+                },
+            )
+            for r in rows
+        ]
         self.session.add_all(objs)
         self.session.commit()
         return len(objs)
@@ -485,7 +542,7 @@ class JobStore:
         job.peaks_done = int(job.peaks_done or 0) + int(peaks_done_delta)
         if tracks_total is not None:
             job.tracks_total = tracks_total
-        job.updated_at = datetime.utcnow()
+        job.updated_at = utc_now()
         self.session.add(job)
         self.session.commit()
         return job
@@ -493,7 +550,7 @@ class JobStore:
     def update_run_name(self, job_id: UUID, run_name: str) -> Job:
         job = self.get_job(job_id)
         job.run_name = run_name
-        job.updated_at = datetime.utcnow()
+        job.updated_at = utc_now()
         self.session.add(job)
         self.session.commit()
         return job
@@ -533,8 +590,8 @@ class JobStore:
             blob_path=blob_path,
             content_type=content_type,
             byte_size=byte_size,
-            meta=meta_in or {},  # IMPORTANT: use `meta`, not `metadata`
-            created_at=datetime.utcnow(),
+            meta=_json_safe(meta_in or {}),  # IMPORTANT: use `meta`, not `metadata`
+            created_at=utc_now(),
         )
         self.session.add(art)
         self.session.commit()

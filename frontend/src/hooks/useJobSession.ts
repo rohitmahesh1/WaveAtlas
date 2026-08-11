@@ -11,11 +11,18 @@ import {
   wsUrl,
   cancelJob,
   API_BASE,
+  apiUrl,
   isApiError,
 } from "../api";
-import type { OverlayTrackEvent } from "../OverlayCanvas";
+import type { ArtifactView } from "../api";
+import type { HeatmapValues, OverlayTrackEvent } from "../OverlayCanvas";
 import type { LogEntry } from "../types";
 import { formatEta } from "../utils/format";
+import {
+  DEFAULT_ANALYSIS_MODE,
+  normalizeAnalysisMode,
+  type AnalysisMode,
+} from "../utils/analysisOptions";
 
 type WsMsg =
   | { type: "snapshot"; payload?: unknown; seq?: number; job_id?: string }
@@ -38,6 +45,11 @@ type HeatmapCoordInfo = {
   pixelMapping: string | null;
   xLabel: string;
   yLabel: string;
+  zLabel: string;
+  zMin: number | null;
+  zMax: number | null;
+  zVmin: number | null;
+  zVmax: number | null;
 };
 
 function asRecord(value: unknown): UnknownRecord | null {
@@ -92,6 +104,56 @@ function parseHeatmapCoordInfo(meta: unknown): HeatmapCoordInfo | null {
     pixelMapping: typeof data.pixel_mapping === "string" ? data.pixel_mapping : null,
     xLabel: typeof data.coord_x_label === "string" ? data.coord_x_label : "x",
     yLabel: typeof data.coord_y_label === "string" ? data.coord_y_label : "y",
+    zLabel: typeof data.z_label === "string" ? data.z_label : "z",
+    zMin: finiteNumber(data.z_min),
+    zMax: finiteNumber(data.z_max),
+    zVmin: finiteNumber(data.z_vmin) ?? finiteNumber(data.vmin),
+    zVmax: finiteNumber(data.z_vmax) ?? finiteNumber(data.vmax),
+  };
+}
+
+async function loadHeatmapValuesArtifact(
+  artifact: ArtifactView,
+  fallbackInfo: HeatmapCoordInfo | null
+): Promise<HeatmapValues | null> {
+  if (!artifact.download_url) return null;
+  const meta = asRecord(artifact.meta);
+  const encoding = typeof meta?.value_encoding === "string" ? meta.value_encoding : "float32_le";
+  if (encoding !== "float32_le") return null;
+
+  const width = Math.floor(
+    finiteNumber(meta?.output_width) ?? finiteNumber(meta?.source_cols) ?? fallbackInfo?.outputWidth ?? 0
+  );
+  const height = Math.floor(
+    finiteNumber(meta?.output_height) ?? finiteNumber(meta?.source_rows) ?? fallbackInfo?.outputHeight ?? 0
+  );
+  if (width <= 0 || height <= 0) return null;
+
+  const res = await fetch(apiUrl(artifact.download_url), {
+    method: "GET",
+    credentials: "include",
+  });
+  if (!res.ok) return null;
+
+  const expectedBytes = width * height * Float32Array.BYTES_PER_ELEMENT;
+  const buffer = await res.arrayBuffer();
+  if (buffer.byteLength < expectedBytes) return null;
+  const valuesBuffer = buffer.byteLength === expectedBytes ? buffer : buffer.slice(0, expectedBytes);
+
+  return {
+    values: new Float32Array(valuesBuffer),
+    width,
+    height,
+    origin:
+      typeof meta?.coord_origin === "string"
+        ? meta.coord_origin
+        : fallbackInfo?.coordOrigin ?? null,
+    label:
+      typeof meta?.z_label === "string"
+        ? meta.z_label
+        : fallbackInfo?.zLabel ?? "z",
+    min: finiteNumber(meta?.z_min) ?? fallbackInfo?.zMin ?? null,
+    max: finiteNumber(meta?.z_max) ?? fallbackInfo?.zMax ?? null,
   };
 }
 
@@ -124,6 +186,7 @@ function normalizeOverlayTrack(payload: unknown): OverlayTrackEvent | null {
         return x != null && y != null ? [{ x, y }] : [];
       })
     : [];
+  const payloadMetrics = asRecord(data.metrics);
 
   return {
     id: idx,
@@ -132,20 +195,33 @@ function normalizeOverlayTrack(payload: unknown): OverlayTrackEvent | null {
     poly,
     peaks,
     metrics: {
-      mean_amplitude: meanAmp,
-      dominant_frequency: finiteNumber(data.freq_hz),
-      period: finiteNumber(data.period),
-      num_peaks: peaks.length,
+      mean_amplitude: finiteNumber(payloadMetrics?.mean_amplitude) ?? meanAmp,
+      dominant_frequency: finiteNumber(payloadMetrics?.dominant_frequency) ?? finiteNumber(data.freq_hz),
+      period: finiteNumber(payloadMetrics?.period) ?? finiteNumber(data.period),
+      num_peaks: finiteNumber(payloadMetrics?.num_peaks) ?? peaks.length,
+      analysis_mode: typeof payloadMetrics?.analysis_mode === "string" ? payloadMetrics.analysis_mode : undefined,
+      family_id: typeof payloadMetrics?.family_id === "string" ? payloadMetrics.family_id : null,
+      direction: typeof payloadMetrics?.direction === "string" ? payloadMetrics.direction : null,
+      slope_px_per_frame: finiteNumber(payloadMetrics?.slope_px_per_frame),
+      velocity_px_per_s: finiteNumber(payloadMetrics?.velocity_px_per_s),
+      angle_deg: finiteNumber(payloadMetrics?.angle_deg),
+      line_rmse_px: finiteNumber(payloadMetrics?.line_rmse_px),
+      line_r2: finiteNumber(payloadMetrics?.line_r2),
+      duration_s: finiteNumber(payloadMetrics?.duration_s),
+      neighbor_interval_count: finiteNumber(payloadMetrics?.neighbor_interval_count),
     },
   };
 }
 
 export function useJobSession(options?: { resumeOnMount?: boolean }) {
-  const [initialSession] = useState(() => (options?.resumeOnMount ? loadSession() : null));
+  const resumeOnMount = options?.resumeOnMount ?? false;
+  const [initialSession] = useState(() => (resumeOnMount ? loadSession() : null));
   const [jobId, setJobId] = useState<string | null>(initialSession?.jobId ?? null);
   const [status, setStatus] = useState<string>(initialSession ? "resuming…" : "idle");
   const [baseImageUrl, setBaseImageUrl] = useState<string | null>(null);
   const [baseImageInfo, setBaseImageInfo] = useState<HeatmapCoordInfo | null>(null);
+  const [heatmapValues, setHeatmapValues] = useState<HeatmapValues | null>(null);
+  const [analysisMode, setAnalysisMode] = useState<AnalysisMode>(DEFAULT_ANALYSIS_MODE);
   const [originalImageUrl, setOriginalImageUrl] = useState<string | null>(null);
   const [tracks, setTracks] = useState<OverlayTrackEvent[]>([]);
   const [activity, setActivity] = useState<LogEntry[]>([]);
@@ -165,6 +241,9 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
   const pollForBaseHeatmapRef = useRef<(id: string) => void>(() => undefined);
   const connectWsWithRetryRef = useRef<(id: string, afterSeq: number) => void>(() => undefined);
   const resumeSavedJobRef = useRef<(id: string) => void>(() => undefined);
+  const pendingTracksRef = useRef<Map<number, OverlayTrackEvent>>(new Map());
+  const trackFlushRafRef = useRef<number | null>(null);
+  const heatmapValuesArtifactIdRef = useRef<string | null>(null);
 
   const addActivity = (message: string, level: "info" | "warn" | "error" = "info", stage?: string) => {
     const ts = new Date().toLocaleTimeString();
@@ -172,13 +251,44 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     setActivity((x) => [{ id, ts, message, level, stage }, ...x].slice(0, 200));
   };
 
-  function upsertTrack(t: OverlayTrackEvent) {
+  function flushPendingTracks() {
+    trackFlushRafRef.current = null;
+    const pending = pendingTracksRef.current;
+    if (pending.size === 0) return;
+
+    const batch = Array.from(pending.values());
+    pending.clear();
+
     setTracks((prev) => {
       const m = new Map<number, OverlayTrackEvent>();
       for (const p of prev) m.set(p.track_index, p);
-      m.set(t.track_index, t);
+      for (const t of batch) m.set(t.track_index, t);
       return Array.from(m.values()).sort((a, b) => a.track_index - b.track_index);
     });
+  }
+
+  function queueTrack(t: OverlayTrackEvent) {
+    pendingTracksRef.current.set(t.track_index, t);
+    if (trackFlushRafRef.current != null) return;
+    trackFlushRafRef.current = window.requestAnimationFrame(flushPendingTracks);
+  }
+
+  function cancelPendingTrackFlush() {
+    pendingTracksRef.current.clear();
+    if (trackFlushRafRef.current != null) {
+      window.cancelAnimationFrame(trackFlushRafRef.current);
+      trackFlushRafRef.current = null;
+    }
+  }
+
+  function clearTracks() {
+    cancelPendingTrackFlush();
+    setTracks([]);
+  }
+
+  function clearHeatmapValues() {
+    heatmapValuesArtifactIdRef.current = null;
+    setHeatmapValues(null);
   }
 
   function upsertDebugOverlay(entry: { label: string; url: string }) {
@@ -201,7 +311,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     return url;
   }
 
-  function clearMissingJobSession(id: string) {
+  function clearSavedJobSession(id: string, message: string) {
     if (jobIdRef.current !== id) return;
 
     closeWs("missing-job");
@@ -210,17 +320,23 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     jobIdRef.current = null;
     setJobId(null);
     setStatus("idle");
-    setTracks([]);
+    clearTracks();
     setBaseImageUrl(null);
     setBaseImageInfo(null);
+    clearHeatmapValues();
     setOriginalImageUrl(null);
+    setAnalysisMode(DEFAULT_ANALYSIS_MODE);
     lastSeqRef.current = 0;
     setCurrentStage("idle");
     setStageDetail(null);
     setEtaText(null);
     setDebugOverlays([]);
     setActivity([]);
-    addActivity("Saved run is no longer available; cleared session", "warn", "resume");
+    addActivity(message, "warn", "resume");
+  }
+
+  function clearMissingJobSession(id: string) {
+    clearSavedJobSession(id, "Saved run is no longer available; cleared session");
   }
 
   async function refreshDebugOverlays(id: string) {
@@ -263,6 +379,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
         if (showAsBase) {
           setBaseImageUrl(url);
           setBaseImageInfo(null);
+          clearHeatmapValues();
         }
       }
     } catch (error) {
@@ -277,12 +394,15 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     for (let i = 0; i < 60; i++) {
       if (pollTokenRef.current !== myToken) return;
       try {
-        const [overlayArts, baseArts, imageUploads] = await Promise.all([
+        const [job, overlayArts, baseArts, valueArts, imageUploads] = await Promise.all([
+          getJob(id),
           listArtifacts(id, { kind: "overlay", limit: 2000 }),
           listArtifacts(id, { kind: "base_heatmap", limit: 1 }),
+          listArtifacts(id, { kind: "other", label: "base_heatmap_values", limit: 1 }),
           listArtifacts(id, { kind: "upload_image", limit: 1 }),
         ]);
         if (pollTokenRef.current !== myToken) return;
+        setAnalysisMode(normalizeAnalysisMode(job.analysis_mode));
         const overlays = overlayArts
           .filter((a) => {
             if (!a.label || !a.download_url) return false;
@@ -304,9 +424,18 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
           setDebugOverlays(list);
         }
         const base = baseArts.find((a) => a.kind === "base_heatmap" || a.label === "base_heatmap");
+        let info: HeatmapCoordInfo | null = null;
         if (base?.download_url) {
           setBaseImageUrl(base.download_url);
-          setBaseImageInfo(parseHeatmapCoordInfo(base.meta));
+          info = parseHeatmapCoordInfo(base.meta);
+          setBaseImageInfo(info);
+        }
+        const valuesArtifact = valueArts.find((a) => a.label === "base_heatmap_values");
+        if (valuesArtifact && valuesArtifact.id !== heatmapValuesArtifactIdRef.current) {
+          const loaded = await loadHeatmapValuesArtifact(valuesArtifact, info);
+          if (pollTokenRef.current !== myToken) return;
+          heatmapValuesArtifactIdRef.current = valuesArtifact.id;
+          setHeatmapValues(loaded);
         }
         const original = imageUploads.find((a) => a.kind === "upload_image" || a.label === "upload");
         if (original?.download_url) {
@@ -315,7 +444,19 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
           if (!base?.download_url) {
             setBaseImageUrl(url);
             setBaseImageInfo(null);
+            clearHeatmapValues();
           }
+        }
+        const statusText = String(job.status || "");
+        if (statusStopsArtifactPolling(statusText)) {
+          setStatus(statusText);
+          stopArtifactPolling();
+          if (statusText === "cancelled" || statusText === "cancel_requested") {
+            setCurrentStage(statusText);
+            setStageDetail(null);
+            setEtaText(null);
+          }
+          return;
         }
       } catch (error) {
         if (isApiError(error, 404)) {
@@ -329,6 +470,14 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     if (pollTokenRef.current === myToken) {
       addActivity("Heatmap not found after polling", "warn");
     }
+  }
+
+  function stopArtifactPolling() {
+    pollTokenRef.current += 1;
+  }
+
+  function statusStopsArtifactPolling(statusText: string) {
+    return ["cancel_requested", "cancelled", "failed", "completed"].includes(statusText);
   }
 
   function closeWs(reason = "close") {
@@ -385,7 +534,11 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
         if (msg.type === "snapshot") {
           const payload = asRecord(msg.payload);
           const st = payload?.status;
-          if (st) setStatus(String(st));
+          if (st) {
+            const statusText = String(st);
+            setStatus(statusText);
+            if (statusStopsArtifactPolling(statusText)) stopArtifactPolling();
+          }
           const prog = asRecord(payload?.progress);
           if (prog?.stage) {
             const stage = String(prog.stage);
@@ -400,7 +553,14 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
           const payload = asRecord(msg.payload);
           const st = payload?.status;
           if (st) {
-            setStatus(String(st));
+            const statusText = String(st);
+            setStatus(statusText);
+            if (statusStopsArtifactPolling(statusText)) stopArtifactPolling();
+            if (statusText === "cancelled") {
+              setCurrentStage("cancelled");
+              setStageDetail(null);
+              setEtaText(null);
+            }
           }
           return;
         }
@@ -420,7 +580,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
 
         if (msg.type === "overlay_track") {
           const t = normalizeOverlayTrack(msg.payload);
-          if (t) upsertTrack(t);
+          if (t) queueTrack(t);
           return;
         }
 
@@ -523,9 +683,10 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
 
   async function runJob(file: File, configOverride?: unknown, runName?: string) {
     setStatus("creating job…");
-    setTracks([]);
+    clearTracks();
     setBaseImageUrl(null);
     setBaseImageInfo(null);
+    clearHeatmapValues();
     setOriginalImageUrl(null);
     setCurrentStage("init");
     setStageDetail(null);
@@ -535,6 +696,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
 
     const safeName = (runName || "").trim() || "untitled";
     const job = await createJob(safeName, configOverride ?? {});
+    setAnalysisMode(normalizeAnalysisMode(job.analysis_mode));
     jobIdRef.current = job.id;
     setJobId(job.id);
 
@@ -574,8 +736,16 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
 
   async function cancelCurrentJob() {
     if (!jobId) return;
+    stopArtifactPolling();
+    setStatus("cancel_requested");
+    setCurrentStage("cancel_requested");
+    setStageDetail("Stopping after current step…");
+    setEtaText(null);
     try {
-      await cancelJob(jobId);
+      const job = await cancelJob(jobId);
+      const statusText = String(job.status || "cancel_requested");
+      setStatus(statusText);
+      if (statusStopsArtifactPolling(statusText)) stopArtifactPolling();
       addActivity("Cancel requested", "warn", "cancel");
     } catch {
       addActivity("Cancel failed", "error", "cancel");
@@ -586,8 +756,10 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     jobIdRef.current = id;
     setJobId(id);
     setStatus("resuming…");
-    setTracks([]);
+    clearTracks();
     setBaseImageUrl(null);
+    setBaseImageInfo(null);
+    clearHeatmapValues();
     setOriginalImageUrl(null);
     setCurrentStage("resuming");
     setStageDetail(null);
@@ -601,13 +773,15 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
 
   async function resumeSavedJob(id: string) {
     try {
-      await getJob(id);
+      const job = await getJob(id);
+      setAnalysisMode(normalizeAnalysisMode(job.analysis_mode));
     } catch (error) {
       if (isApiError(error, 404)) {
         clearMissingJobSession(id);
         return;
       }
-      // For transient startup/network failures, keep the old retry path alive.
+      clearSavedJobSession(id, "Could not reconnect to saved run; cleared session");
+      return;
     }
 
     lastSeqRef.current = 0;
@@ -630,9 +804,12 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     jobIdRef.current = null;
     setJobId(null);
     setStatus("idle");
-    setTracks([]);
+    clearTracks();
     setBaseImageUrl(null);
+    setBaseImageInfo(null);
+    clearHeatmapValues();
     setOriginalImageUrl(null);
+    setAnalysisMode(DEFAULT_ANALYSIS_MODE);
     lastSeqRef.current = 0;
     setCurrentStage("idle");
     setStageDetail(null);
@@ -645,6 +822,12 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
   useEffect(() => {
     jobIdRef.current = jobId;
   }, [jobId]);
+
+  useEffect(() => {
+    if (!resumeOnMount) {
+      localStorage.removeItem(SESSION_KEY);
+    }
+  }, [resumeOnMount]);
 
   useEffect(() => {
     pollForBaseHeatmapRef.current = pollForBaseHeatmap;
@@ -666,6 +849,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
   useEffect(() => {
     return () => {
       pollTokenRef.current += 1;
+      cancelPendingTrackFlush();
       closeWs("unmount");
     };
   }, []);
@@ -675,6 +859,8 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     status,
     baseImageUrl,
     baseImageInfo,
+    heatmapValues,
+    analysisMode,
     originalImageUrl,
     tracks,
     activity,
