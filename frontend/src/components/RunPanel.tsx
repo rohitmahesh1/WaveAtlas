@@ -1,5 +1,7 @@
 import { HeatmapOptionsPanel } from "./HeatmapOptionsPanel";
+import { AnalysisOptionsPanel } from "./AnalysisOptionsPanel";
 import type { HeatmapOptions } from "../utils/heatmapOptions";
+import type { AnalysisMode } from "../utils/analysisOptions";
 
 export function RunPanel(props: {
   file: File | null;
@@ -24,6 +26,8 @@ export function RunPanel(props: {
   onRunNameChange: (value: string) => void;
   heatmapOptions?: HeatmapOptions | null;
   onHeatmapOptionsChange?: (value: HeatmapOptions) => void;
+  analysisMode?: AnalysisMode;
+  onAnalysisModeChange?: (value: AnalysisMode) => void;
   filteredCount: number;
   totalCount: number;
   onCancel?: () => void;
@@ -31,6 +35,9 @@ export function RunPanel(props: {
   onResume?: () => void;
   onNewRun?: () => void;
   onDownloadWaves?: () => void;
+  onDownloadRippleTracks?: () => void;
+  onDownloadRippleIntervals?: () => void;
+  onDownloadRippleFamilies?: () => void;
   onDownloadHeatmap?: () => void;
   onDownloadOriginalImage?: () => void;
   heatmapDownloadDisabled?: boolean;
@@ -47,6 +54,8 @@ export function RunPanel(props: {
     onRunNameChange,
     heatmapOptions = null,
     onHeatmapOptionsChange,
+    analysisMode = "standard",
+    onAnalysisModeChange,
     filteredCount,
     totalCount,
     onCancel,
@@ -54,6 +63,9 @@ export function RunPanel(props: {
     onResume,
     onNewRun,
     onDownloadWaves,
+    onDownloadRippleTracks,
+    onDownloadRippleIntervals,
+    onDownloadRippleFamilies,
     onDownloadHeatmap,
     onDownloadOriginalImage,
     heatmapDownloadDisabled,
@@ -179,6 +191,10 @@ export function RunPanel(props: {
           </div>
         ) : null}
 
+        {onAnalysisModeChange ? (
+          <AnalysisOptionsPanel value={analysisMode} onChange={onAnalysisModeChange} />
+        ) : null}
+
         {showHeatmapOptions && heatmapOptions && onHeatmapOptionsChange ? (
           <HeatmapOptionsPanel value={heatmapOptions} onChange={onHeatmapOptionsChange} />
         ) : null}
@@ -203,13 +219,28 @@ export function RunPanel(props: {
             <div className="run-transport-note">
               {canResume ? "Stopped. Resume from saved artifacts." : isPausePending ? "Stop requested..." : "Run outputs"}
             </div>
-            {onDownloadWaves || onDownloadHeatmap || onDownloadOriginalImage ? (
+            {onDownloadWaves || onDownloadRippleTracks || onDownloadRippleIntervals || onDownloadRippleFamilies || onDownloadHeatmap || onDownloadOriginalImage ? (
               <details className="run-download-menu">
                 <summary>Downloads</summary>
                 <div className="run-download-popover">
                   {onDownloadWaves ? (
                     <button className="ghost-btn download-btn compact-btn" onClick={onDownloadWaves}>
                       Waves CSV
+                    </button>
+                  ) : null}
+                  {onDownloadRippleTracks ? (
+                    <button className="ghost-btn download-btn compact-btn" onClick={onDownloadRippleTracks}>
+                      Tracks CSV
+                    </button>
+                  ) : null}
+                  {onDownloadRippleIntervals ? (
+                    <button className="ghost-btn download-btn compact-btn" onClick={onDownloadRippleIntervals}>
+                      Waves CSV
+                    </button>
+                  ) : null}
+                  {onDownloadRippleFamilies ? (
+                    <button className="ghost-btn download-btn compact-btn" onClick={onDownloadRippleFamilies}>
+                      Families CSV
                     </button>
                   ) : null}
                   {onDownloadHeatmap ? (

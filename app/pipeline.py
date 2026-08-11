@@ -16,6 +16,9 @@ from .models import ArtifactKind, EventType, JobStatus
 from .io.image_to_heatmap import image_to_heatmap_bytes
 from .io.table_to_heatmap import table_to_heatmap_payload
 from .extract_core import select_kymo_runner, process_track
+from .analysis_mode import RIPPLE_ANALYSIS_MODE, resolve_analysis_mode
+from .ripple_analysis import analyze_ripple_tracks
+from .ripple_extraction import run_ripple_extraction
 from .time_utils import utc_now, utc_now_iso
 
 
@@ -234,8 +237,36 @@ def run_job(
                 meta={"image_id": image_id, "overlay": "overlay_tracks"},
             )
 
+    def publish_ripple_manifest(image_id: str, base_dir: Path) -> None:
+        manifest_path = base_dir / "ripple_track_manifest.json"
+        if not manifest_path.exists():
+            return
+        check_cancel("cancel_requested_before_ripple_manifest_publish")
+        publish_file(
+            kind=ArtifactKind.debug_text,
+            filename=f"{image_id}_ripple_track_manifest.json",
+            local_path=manifest_path,
+            content_type="application/json",
+            label=f"{image_id}:ripple_track_manifest",
+            meta={
+                "image_id": image_id,
+                "analysis_mode": RIPPLE_ANALYSIS_MODE,
+                "extractor": "ripple_multiscale_hough",
+            },
+        )
+
+    def load_heatmap_values_artifact() -> Tuple[Optional[bytes], Optional[Dict[str, Any]]]:
+        check_cancel("cancel_requested_before_heatmap_values_resume")
+        arts = job_store.list_artifacts(job_id, kind=ArtifactKind.other, label="base_heatmap_values", limit=1)
+        if not arts:
+            return None, None
+        data = artifact_store.get_bytes(arts[0].blob_path)
+        check_cancel("cancel_requested_after_heatmap_values_resume")
+        return data, dict(getattr(arts[0], "meta", {}) or {})
+
     resume_cfg = (config.get("service") or {}).get("resume") or {}
     resume_enabled = bool(resume_cfg.get("enabled", False)) or bool(resume)
+    analysis_mode = resolve_analysis_mode(config)
 
     try:
         # -----------------------------
@@ -359,6 +390,12 @@ def run_job(
 
         check_cancel("cancel_requested_after_heatmap")
 
+        if analysis_mode == RIPPLE_ANALYSIS_MODE and heatmap_value_bytes is None:
+            cached_values, cached_meta = load_heatmap_values_artifact()
+            if cached_values is not None:
+                heatmap_value_bytes = cached_values
+                heatmap_value_meta = cached_meta or {}
+
         # -----------------------------
         # Heatmap -> tracks (kymo runner) or resume from artifacts
         # -----------------------------
@@ -431,58 +468,125 @@ def run_job(
                 maybe_paths = _load_tracks_from_artifacts(int(manifest["total_tracks"]))
                 if maybe_paths:
                     track_paths = maybe_paths
-                    emit(EventType.progress, {"stage": "kymo_done", "tracks_found": len(track_paths), "resume": True})
-                    user_log(f"Using cached tracks ({len(track_paths)})", stage="kymo_done")
+                    cached_extractor = str(manifest.get("extractor") or "")
+                    cached_stage = "ripple_extract_done" if cached_extractor == "ripple_multiscale_hough" else "kymo_done"
+                    emit(
+                        EventType.progress,
+                        {
+                            "stage": cached_stage,
+                            "tracks_found": len(track_paths),
+                            "resume": True,
+                            "extractor": cached_extractor or None,
+                        },
+                    )
+                    user_log(f"Using cached tracks ({len(track_paths)})", stage=cached_stage)
 
         if not track_paths:
-            check_cancel("cancel_requested_before_kymo")
-            user_log("Extracting tracks (KymoButler)", stage="kymo_start")
-            set_progress("kymo_start", extra={"detail": "Extracting tracks"})
-            check_cancel("cancel_requested_before_kymo")
-            runner = select_kymo_runner(config=config)
-
-            kymo_stage_labels = {
-                "load_image": "Loading heatmap",
-                "segmenting": "Segmenting heatmap",
-                "masking": "Cleaning mask",
-                "skeletonizing": "Skeletonizing tracks",
-                "tracking": "Tracing tracks",
-                "refining": "Refining tracks",
-                "deduping": "Removing duplicates",
-                "scaling": "Scaling to original size",
-                "saving": "Saving tracks",
-            }
-            last_kymo_stage: Optional[str] = None
-
-            def kymo_progress(stage: str, data: Dict[str, Any]) -> None:
-                nonlocal last_kymo_stage
-                label = kymo_stage_labels.get(stage, stage)
-                extra = dict(data) if data else None
-                set_progress(f"kymo_{stage}", extra=extra)
-                if stage != last_kymo_stage and stage in kymo_stage_labels:
-                    user_log(label, stage=f"kymo_{stage}")
-                    last_kymo_stage = stage
-
-            kymo_out = runner.run(
-                heatmap_path=heatmap_path,
-                scratch_dir=scratch_dir,
-                progress_cb=kymo_progress,
-                cancel_cb=cancelled,
+            check_cancel("cancel_requested_before_track_extraction")
+            image_id: str
+            base_dir: Path
+            ripple_extraction_cfg = (((config.get("analysis") or {}).get("ripple") or {}).get("extraction") or {})
+            use_ripple_extractor = (
+                analysis_mode == RIPPLE_ANALYSIS_MODE
+                and bool(ripple_extraction_cfg.get("enabled", True))
             )
-            check_cancel("cancel_requested_after_kymo")
+            extractor_name = "ripple_multiscale_hough" if use_ripple_extractor else "kymobutler"
+            if use_ripple_extractor:
+                user_log("Extracting tracks", stage="ripple_extract_start")
+                set_progress("ripple_extract_start", extra={"detail": "Extracting tracks"})
+                check_cancel("cancel_requested_before_ripple_extraction")
+                ripple_stage_labels = {
+                    "load_values": "Loading heatmap",
+                    "smoothing": "Segmenting heatmap",
+                    "seeding": "Tracing tracks",
+                    "tracking": "Tracing tracks",
+                    "deduping": "Removing duplicates",
+                    "saving": "Saving tracks",
+                }
+                last_ripple_extract_stage: Optional[str] = None
 
-            image_id: str = kymo_out.image_id
-            base_dir: Path = kymo_out.base_dir
-            track_paths = list(kymo_out.track_paths)
+                def ripple_extract_progress(stage: str, data: Dict[str, Any]) -> None:
+                    nonlocal last_ripple_extract_stage
+                    label = ripple_stage_labels.get(stage, stage)
+                    extra = dict(data) if data else {}
+                    if stage == "load_values" and heatmap_value_bytes is not None:
+                        extra["value_source"] = "base_heatmap_values"
+                    set_progress(f"ripple_extract_{stage}", extra=extra or None)
+                    if stage != last_ripple_extract_stage and stage in ripple_stage_labels:
+                        user_log(label, stage=f"ripple_extract_{stage}")
+                        last_ripple_extract_stage = stage
+
+                ripple_out = run_ripple_extraction(
+                    heatmap_path=heatmap_path,
+                    scratch_dir=scratch_dir,
+                    config=config,
+                    heatmap_value_bytes=heatmap_value_bytes,
+                    heatmap_value_meta=heatmap_value_meta,
+                    progress_cb=ripple_extract_progress,
+                    cancel_cb=cancelled,
+                )
+                check_cancel("cancel_requested_after_ripple_extraction")
+                image_id = ripple_out.image_id
+                base_dir = ripple_out.base_dir
+                track_paths = list(ripple_out.track_paths)
+                publish_ripple_manifest(image_id, base_dir)
+            else:
+                user_log("Extracting tracks (KymoButler)", stage="kymo_start")
+                set_progress("kymo_start", extra={"detail": "Extracting tracks"})
+                check_cancel("cancel_requested_before_kymo")
+                runner = select_kymo_runner(config=config)
+
+                kymo_stage_labels = {
+                    "load_image": "Loading heatmap",
+                    "segmenting": "Segmenting heatmap",
+                    "masking": "Cleaning mask",
+                    "skeletonizing": "Skeletonizing tracks",
+                    "tracking": "Tracing tracks",
+                    "refining": "Refining tracks",
+                    "deduping": "Removing duplicates",
+                    "scaling": "Scaling to original size",
+                    "saving": "Saving tracks",
+                }
+                last_kymo_stage: Optional[str] = None
+
+                def kymo_progress(stage: str, data: Dict[str, Any]) -> None:
+                    nonlocal last_kymo_stage
+                    label = kymo_stage_labels.get(stage, stage)
+                    extra = dict(data) if data else None
+                    set_progress(f"kymo_{stage}", extra=extra)
+                    if stage != last_kymo_stage and stage in kymo_stage_labels:
+                        user_log(label, stage=f"kymo_{stage}")
+                        last_kymo_stage = stage
+
+                kymo_out = runner.run(
+                    heatmap_path=heatmap_path,
+                    scratch_dir=scratch_dir,
+                    progress_cb=kymo_progress,
+                    cancel_cb=cancelled,
+                )
+                check_cancel("cancel_requested_after_kymo")
+
+                image_id = kymo_out.image_id
+                base_dir = kymo_out.base_dir
+                track_paths = list(kymo_out.track_paths)
 
             check_cancel("cancel_requested_before_debug_overlays")
             publish_debug_overlays(image_id, base_dir)
             check_cancel("cancel_requested_after_debug_overlays")
-            emit(EventType.progress, {"stage": "kymo_done", "tracks_found": len(track_paths), "image_id": image_id})
-            user_log(f"Found {len(track_paths)} tracks", stage="kymo_done")
+            done_stage = "ripple_extract_done" if use_ripple_extractor else "kymo_done"
+            emit(
+                EventType.progress,
+                {
+                    "stage": done_stage,
+                    "tracks_found": len(track_paths),
+                    "image_id": image_id,
+                    "extractor": extractor_name,
+                },
+            )
+            user_log(f"Found {len(track_paths)} tracks", stage=done_stage)
 
             if not track_paths:
-                raise PipelineError("Kymo runner produced no tracks")
+                raise PipelineError(f"{extractor_name} produced no tracks")
 
             if resume_enabled:
                 # Persist all tracks for resume
@@ -516,7 +620,11 @@ def run_job(
                         meta={"track_index": int(track_index)},
                     )
 
-                manifest_payload = {"total_tracks": len(track_paths)}
+                manifest_payload = {
+                    "total_tracks": len(track_paths),
+                    "analysis_mode": analysis_mode,
+                    "extractor": extractor_name,
+                }
                 check_cancel("cancel_requested_before_track_manifest_write")
                 publish_bytes(
                     kind=ArtifactKind.track_manifest,
@@ -526,9 +634,139 @@ def run_job(
                     label="tracks_manifest",
                     meta=manifest_payload,
                 )
-        
+
+        if analysis_mode == RIPPLE_ANALYSIS_MODE:
+            # Ripple analysis intentionally separates track geometry, family
+            # assignment, and inter-track interval measurement.
+            check_cancel("cancel_requested_before_ripple_analysis")
+            user_log("Analyzing tracks", stage="ripple_track_geometry")
+            job_store.bump_counts(job_id, tracks_total=len(track_paths))
+            last_ripple_stage: Optional[str] = None
+            last_ripple_progress_at = utc_now()
+            ripple_stage_labels = {
+                "ripple_track_geometry": "Analyzing tracks",
+                "ripple_family_grouping": "Grouping tracks",
+                "ripple_interval_analysis": "Measuring waves",
+            }
+
+            def ripple_progress(stage: str, processed: int, total: int) -> None:
+                nonlocal last_ripple_stage, last_ripple_progress_at
+                check_cancel("cancel_requested_during_ripple_analysis")
+                now = utc_now()
+                stage_changed = stage != last_ripple_stage
+                should_publish = (
+                    stage_changed
+                    or total <= 0
+                    or processed >= total
+                    or (now - last_ripple_progress_at).total_seconds() >= settings.progress_every_secs
+                )
+                if should_publish:
+                    set_progress(stage, processed=processed, total=total)
+                    last_ripple_progress_at = now
+                if stage_changed:
+                    user_log(ripple_stage_labels.get(stage, stage), stage=stage)
+                    last_ripple_stage = stage
+
+            ripple_result = analyze_ripple_tracks(
+                job_id=job_id,
+                track_paths=track_paths,
+                config=config,
+                cancel_cb=cancelled,
+                progress_cb=ripple_progress,
+            )
+            check_cancel("cancel_requested_after_ripple_analysis")
+
+            track_detail_cfg = (config.get("track_detail") or {})
+            store_track_npy = bool(track_detail_cfg.get("store_npy", True)) or resume_enabled
+            for track_path, track_row, overlay_track in zip(
+                track_paths,
+                ripple_result.track_rows,
+                ripple_result.overlay_events,
+            ):
+                check_cancel("cancel_requested_during_ripple_persistence")
+                track_index = int(track_row["track_index"])
+                if store_track_npy:
+                    label = f"track:{track_index}"
+                    existing = job_store.list_artifacts(job_id, kind=ArtifactKind.track_npy, label=label, limit=1)
+                    if not existing:
+                        blob_path, byte_size = artifact_store.put_file(
+                            job_id=job_id,
+                            kind=ArtifactKind.track_npy.value,
+                            filename=f"track_{track_index}.npy",
+                            local_path=str(track_path),
+                            content_type="application/octet-stream",
+                            label=label,
+                        )
+                        job_store.create_artifact(
+                            job_id=job_id,
+                            kind=ArtifactKind.track_npy,
+                            blob_path=blob_path,
+                            label=label,
+                            content_type="application/octet-stream",
+                            byte_size=byte_size,
+                            meta={"track_index": track_index},
+                        )
+
+                job_store.upsert_track_by_index(
+                    job_id,
+                    track_index,
+                    processed_at=utc_now(),
+                    amplitude=track_row.get("amplitude"),
+                    frequency=track_row.get("frequency"),
+                    error=track_row.get("error"),
+                    x0=track_row.get("x0"),
+                    y0=track_row.get("y0"),
+                    metrics=track_row.get("metrics") or {},
+                    overlay=track_row.get("overlay") or {},
+                )
+                emit(EventType.overlay_track, overlay_track)
+
+            job_store.recompute_counts(job_id)
+
+            ripple_exports = [
+                ("ripple_tracks", "tracks.csv", ripple_result.tracks_csv, len(ripple_result.track_rows)),
+                ("ripple_intervals", "waves.csv", ripple_result.intervals_csv, len(ripple_result.intervals)),
+                ("ripple_families", "families.csv", ripple_result.families_csv, len(ripple_result.families)),
+            ]
+            for label, filename, data, row_count in ripple_exports:
+                check_cancel("cancel_requested_during_ripple_export")
+                existing = job_store.list_artifacts(job_id, kind=ArtifactKind.other, label=label, limit=1)
+                if existing:
+                    continue
+                publish_bytes(
+                    kind=ArtifactKind.other,
+                    filename=filename,
+                    data=data,
+                    content_type="text/csv",
+                    label=label,
+                    meta={
+                        "analysis_mode": RIPPLE_ANALYSIS_MODE,
+                        "row_count": row_count,
+                        "filename": filename,
+                    },
+                )
+
+            check_cancel("cancel_requested_before_completion")
+            completion_extra = {
+                "analysis_mode": RIPPLE_ANALYSIS_MODE,
+                "families_found": len(ripple_result.families),
+                "intervals_found": len(ripple_result.intervals),
+                "eta_secs": 0.0,
+            }
+            set_progress("completed", processed=len(track_paths), total=len(track_paths), extra=completion_extra)
+            user_log("Completed", stage="completed")
+            job_store.set_status(job_id, JobStatus.completed, emit_event=True)
+            emit(EventType.done, {
+                "ok": True,
+                "analysis_mode": RIPPLE_ANALYSIS_MODE,
+                "duration_s": (utc_now() - started_at).total_seconds(),
+                "families_found": len(ripple_result.families),
+                "intervals_found": len(ripple_result.intervals),
+            })
+            return
+
         # -----------------------------
-        # Process tracks -> DB rows + overlay events
+        # Standard tracks -> DB rows + overlay events
         # -----------------------------
         check_cancel("cancel_requested_before_processing_tracks")
         user_log("Analyzing tracks", stage="processing_tracks")

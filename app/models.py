@@ -277,6 +277,7 @@ class JobRead(UtcDatetimeSchema):
     waves_done: int
     peaks_done: int
     input_filename: Optional[str] = None
+    analysis_mode: str = "standard"
 
 
 class ArtifactRead(UtcDatetimeSchema):

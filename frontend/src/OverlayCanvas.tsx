@@ -2,6 +2,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { MouseEvent, PointerEvent } from "react";
 
+export const UNASSIGNED_FAMILY_KEY = "__unassigned__";
+
 export type OverlayTrackEvent = {
   id?: string | number;
   sample?: string;
@@ -13,6 +15,24 @@ export type OverlayTrackEvent = {
     dominant_frequency?: number | null;
     period?: number | null;
     num_peaks?: number | null;
+    analysis_mode?: string;
+    family_id?: string | null;
+    direction?: string | null;
+    slope_px_per_frame?: number | null;
+    velocity_px_per_s?: number | null;
+    speed_px_per_s?: number | null;
+    angle_deg?: number | null;
+    angle_from_time_axis_deg?: number | null;
+    line_rmse_px?: number | null;
+    line_fit_rmse_px?: number | null;
+    line_r2?: number | null;
+    duration_s?: number | null;
+    neighbor_interval_count?: number | null;
+    ripple_period_frames?: number | null;
+    ripple_period_s?: number | null;
+    frequency_hz?: number | null;
+    ripple_frequency_hz?: number | null;
+    frequency_method?: string | null;
   };
 };
 
@@ -37,6 +57,10 @@ function formatZValue(value: number) {
   if (abs >= 10000 || abs < 0.001) return value.toExponential(3);
   const fixed = abs >= 100 ? value.toFixed(1) : abs >= 10 ? value.toFixed(2) : value.toFixed(3);
   return fixed.replace(/\.?0+$/, "");
+}
+
+function trackFamilyKey(track: OverlayTrackEvent) {
+  return track.metrics?.family_id || UNASSIGNED_FAMILY_KEY;
 }
 
 type HitEntry = {
@@ -97,6 +121,8 @@ export function OverlayCanvas(props: {
   hideBaseImage?: boolean;
   hideTracks?: boolean;
   selectedTrackId?: string | number | null;
+  selectedFamilyId?: string | null;
+  selectionScope?: "family" | "track" | null;
   onClickTrack?: (track: OverlayTrackEvent | null) => void;
   onHoverTrack?: (track: OverlayTrackEvent | null) => void;
   filterFn?: (t: OverlayTrackEvent) => boolean;
@@ -114,6 +140,8 @@ export function OverlayCanvas(props: {
     hideBaseImage = false,
     hideTracks = false,
     selectedTrackId = null,
+    selectedFamilyId = null,
+    selectionScope = null,
     onClickTrack,
     onHoverTrack,
     filterFn,
@@ -326,31 +354,53 @@ export function OverlayCanvas(props: {
       const others: OverlayTrackEvent[] = [];
       for (const t of tracks) {
         const trackId = t.id ?? t.track_index;
-        const isSelected = selectedTrackId != null && String(trackId) === String(selectedTrackId);
+        const familyId = trackFamilyKey(t);
+        const isSelectedTrack =
+          selectionScope !== "family" && selectedTrackId != null && String(trackId) === String(selectedTrackId);
+        const isSelectedFamily =
+          selectionScope === "family"
+          && selectedFamilyId != null
+          && familyId === selectedFamilyId;
+        const isSelected = isSelectedTrack || isSelectedFamily;
         (isSelected ? selected : others).push(t);
       }
 
       const drawList = [...others, ...selected];
+      const hasFamilySelection = selectionScope === "family" && selectedFamilyId != null;
       for (const t of drawList) {
         if (filterFn && !filterFn(t)) continue;
         const pts = t.poly || [];
         if (pts.length < 2) continue;
         const trackId = t.id ?? t.track_index;
-        const isSelected = selectedTrackId != null && String(trackId) === String(selectedTrackId);
+        const familyId = trackFamilyKey(t);
+        const isSelectedTrack =
+          selectionScope !== "family" && selectedTrackId != null && String(trackId) === String(selectedTrackId);
+        const isSelectedFamily =
+          selectionScope === "family"
+          && selectedFamilyId != null
+          && familyId === selectedFamilyId;
+        const isSelected = isSelectedTrack || isSelectedFamily;
 
         const customColor = colorOverrideFn?.(t);
         if (isSelected) {
-          ctx.lineWidth = 3;
+          ctx.lineWidth = isSelectedFamily ? 3 : 3.5;
           ctx.strokeStyle = customColor || "rgba(255,90,20,0.95)";
+          ctx.shadowColor = customColor ? withAlpha(customColor, 0.5) : "rgba(255,90,20,0.45)";
+          ctx.shadowBlur = 5;
         } else {
           ctx.lineWidth = 1.75;
-          ctx.strokeStyle = customColor || withAlpha(overlayColor, 0.85);
+          ctx.strokeStyle =
+            hasFamilySelection && customColor
+              ? withAlpha(customColor, 0.36)
+              : customColor || withAlpha(overlayColor, 0.85);
+          ctx.shadowBlur = 0;
         }
 
         ctx.beginPath();
         ctx.moveTo(pts[0].x, pts[0].y);
         for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
         ctx.stroke();
+        ctx.shadowBlur = 0;
       }
 
       ctx.restore();
@@ -370,7 +420,17 @@ export function OverlayCanvas(props: {
     return () => {
       cancelled = true;
     };
-  }, [imageUrl, tracks, filterFn, colorOverrideFn, selectedTrackId, overlayColor, hideTracks]);
+  }, [
+    imageUrl,
+    tracks,
+    filterFn,
+    colorOverrideFn,
+    selectedTrackId,
+    selectedFamilyId,
+    selectionScope,
+    overlayColor,
+    hideTracks,
+  ]);
 
   useEffect(() => {
     const canvas = highlightCanvasRef.current;
@@ -385,20 +445,36 @@ export function OverlayCanvas(props: {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     if (hideTracks || !hoveredTrack) return;
 
-    const pts = hoveredTrack.poly || [];
-    if (pts.length < 2) return;
+    const hoveredFamilyId = trackFamilyKey(hoveredTrack);
+    const hoverTracks = tracks.filter(
+      (track) => trackFamilyKey(track) === hoveredFamilyId && (!filterFn || filterFn(track))
+    );
 
     ctx.save();
-    ctx.lineWidth = 3;
-    ctx.strokeStyle = "rgba(255,215,0,0.9)";
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
-    ctx.beginPath();
-    ctx.moveTo(pts[0].x, pts[0].y);
-    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
-    ctx.stroke();
+    for (const track of hoverTracks) {
+      const pts = track.poly || [];
+      if (pts.length < 2) continue;
+      const trackId = track.id ?? track.track_index;
+      const hoveredId = hoveredTrack.id ?? hoveredTrack.track_index;
+      const isHoveredTrack = String(trackId) === String(hoveredId);
+      const hoverColor = colorOverrideFn?.(track);
+      ctx.lineWidth = isHoveredTrack ? 4 : 2.4;
+      ctx.strokeStyle = hoverColor
+        ? withAlpha(hoverColor, isHoveredTrack ? 0.95 : 0.58)
+        : isHoveredTrack
+          ? "rgba(255,215,0,0.9)"
+          : "rgba(255,215,0,0.42)";
+      ctx.shadowColor = ctx.strokeStyle;
+      ctx.shadowBlur = isHoveredTrack ? 7 : 3;
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.stroke();
+    }
     ctx.restore();
-  }, [hoveredTrack, imageSize, hideTracks]);
+  }, [hoveredTrack, imageSize, hideTracks, tracks, filterFn, colorOverrideFn]);
 
   // Rebuild hit cache when tracks or transforms change
   useEffect(() => {

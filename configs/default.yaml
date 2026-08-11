@@ -30,6 +30,56 @@ image_input:
   invert: false
   alpha_background: "#000000"
 
+analysis:
+  mode: standard
+  ripple:
+    min_track_rows: 30
+    min_abs_slope: 0.05
+    max_line_rmse_px: 12.0
+    extraction:
+      enabled: true
+      max_tracks: 500
+      min_abs_slope: 0.22
+      max_abs_slope: 1.2
+      temporal_sigma_rows: 2.0
+      peak_min_distance_px: 12
+      min_phase_contrast: 0.025
+      dedupe:
+        allow_cross_phase: true
+        min_overlap_rows: 35
+        min_overlap_fraction: 0.45
+        min_partial_overlap_rows: 18
+        min_short_overlap_fraction: 0.55
+        max_slope_delta: 0.35
+        max_median_distance_px: 6.0
+        max_p90_distance_px: 10.0
+        min_spatial_overlap_rows: 12
+        close_distance_px: 7.0
+        min_close_fraction: 0.68
+        partial_max_median_distance_px: 7.0
+        cross_phase_max_median_distance_px: 4.0
+        cross_phase_max_p90_distance_px: 7.0
+        cross_phase_min_spatial_overlap_rows: 16
+        cross_phase_close_distance_px: 5.0
+        cross_phase_min_close_fraction: 0.75
+        cross_phase_partial_max_median_distance_px: 5.0
+    endpoint_link:
+      prefer_long_linear: true
+      length_weight: 0.25
+      linearity_weight: 0.25
+      min_abs_slope: 0.05
+    family:
+      min_tracks: 2
+      max_angle_delta_deg: 10.0
+      min_x_overlap_px: 30.0
+      min_x_overlap_fraction: 0.15
+      max_reference_gap_frames: 300.0
+    frequency:
+      sample_count: 25
+      min_period_frames: 3.0
+      max_period_frames: 300.0
+      max_gap_cv: 0.75
+
 detrend:
   degree: 1
   min_samples: 0.5

@@ -2,6 +2,7 @@ export function ViewerControls(props: {
   overlayColor: string;
   onOverlayColorChange: (value: string) => void;
   onOverlayColorReset: () => void;
+  showOverlayColorControl?: boolean;
   hideBaseImage: boolean;
   onHideBaseImageChange: (value: boolean) => void;
   hideTracks: boolean;
@@ -16,6 +17,7 @@ export function ViewerControls(props: {
     overlayColor,
     onOverlayColorChange,
     onOverlayColorReset,
+    showOverlayColorControl = true,
     hideBaseImage,
     onHideBaseImageChange,
     hideTracks,
@@ -29,20 +31,22 @@ export function ViewerControls(props: {
 
   return (
     <div className="viewer-controls">
-      <div className="color-control">
-        <label>
-          <span className="color-icon" aria-hidden="true" />
-          Overlay color
-          <input
-            type="color"
-            value={overlayColor}
-            onChange={(e) => onOverlayColorChange(e.target.value)}
-          />
-        </label>
-        <button className="ghost-btn color-reset" onClick={onOverlayColorReset}>
-          Reset
-        </button>
-      </div>
+      {showOverlayColorControl ? (
+        <div className="color-control">
+          <label>
+            <span className="color-icon" aria-hidden="true" />
+            Overlay color
+            <input
+              type="color"
+              value={overlayColor}
+              onChange={(e) => onOverlayColorChange(e.target.value)}
+            />
+          </label>
+          <button className="ghost-btn color-reset" onClick={onOverlayColorReset}>
+            Reset
+          </button>
+        </div>
+      ) : null}
       <label className="toggle">
         <input type="checkbox" checked={hideBaseImage} onChange={(e) => onHideBaseImageChange(e.target.checked)} />
         Hide base

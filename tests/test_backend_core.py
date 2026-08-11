@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import io
 import json
 import os
@@ -7,6 +8,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "waveatlas-mplconfig"))
@@ -15,9 +17,12 @@ import numpy as np
 import yaml
 from PIL import Image
 from sqlalchemy.pool import StaticPool
-from sqlmodel import SQLModel, Session, create_engine
+from sqlmodel import SQLModel, Session, create_engine, select
 
+from app import pipeline as pipeline_module
+from app.artifact_store import LocalArtifactStore
 from app.cancel import CancellationRequested
+from app.analysis_mode import RIPPLE_ANALYSIS_MODE, STANDARD_ANALYSIS_MODE, resolve_analysis_mode
 from app.extract_core import _detect_peak_sets, _flatten_onnx_cfg_for_runner, process_track
 from app.api.routes_jobs import _detect_peak_sets_for_detail, _detail_fit_meta_for_original_polarity
 from app.io.image_to_heatmap import image_to_heatmap_bytes
@@ -26,7 +31,10 @@ from app.job_store import JobStore, _PEAK_MODEL_KEYS, _WAVE_MODEL_KEYS, _json_sa
 from app.modules.kb_adapter import link_track_endpoints
 from app.modules.kymobutler_pt import KymoButlerPT
 from app.modules.tracker import CrossingTracker, Track
-from app.models import JobRead, JobStatus
+from app.models import ArtifactKind, Artifact, JobRead, JobStatus, Track as TrackModel
+from app.pipeline import PipelineSettings
+from app.ripple_analysis import analyze_ripple_tracks
+from app.ripple_extraction import _Trace, _dedupe_and_extend
 from app.time_utils import utc_isoformat
 
 
@@ -37,6 +45,40 @@ def _synthetic_track_path(tmp: str, position: np.ndarray) -> Path:
     frame = np.arange(position.size, dtype=float)
     np.save(track_path, np.column_stack([frame, position]))
     return track_path
+
+
+def _synthetic_ripple_track(base: Path, track_index: int, *, slope: float, intercept: float) -> Path:
+    base.mkdir(parents=True, exist_ok=True)
+    frame = np.arange(0, 121, dtype=float)
+    position = slope * frame + intercept
+    path = base / f"track_{track_index}.npy"
+    np.save(path, np.column_stack([frame, position]))
+    return path
+
+
+def _ripple_dedupe_test_config() -> dict:
+    return {
+        "dedupe": {
+            "allow_cross_phase": True,
+            "min_overlap_rows": 35,
+            "min_overlap_fraction": 0.45,
+            "min_partial_overlap_rows": 18,
+            "min_short_overlap_fraction": 0.55,
+            "max_slope_delta": 0.35,
+            "max_median_distance_px": 6.0,
+            "max_p90_distance_px": 10.0,
+            "min_spatial_overlap_rows": 12,
+            "close_distance_px": 7.0,
+            "min_close_fraction": 0.68,
+            "partial_max_median_distance_px": 7.0,
+            "cross_phase_max_median_distance_px": 4.0,
+            "cross_phase_max_p90_distance_px": 7.0,
+            "cross_phase_min_spatial_overlap_rows": 16,
+            "cross_phase_close_distance_px": 5.0,
+            "cross_phase_min_close_fraction": 0.75,
+            "cross_phase_partial_max_median_distance_px": 5.0,
+        }
+    }
 
 
 def _base_config(*, fit_target: str | None = None, event_polarity: str = "both") -> dict:
@@ -61,6 +103,11 @@ def _base_config(*, fit_target: str | None = None, event_polarity: str = "both")
 
 
 class BackendCoreTests(unittest.TestCase):
+    def test_analysis_mode_defaults_to_standard_and_accepts_ripple_aliases(self) -> None:
+        self.assertEqual(resolve_analysis_mode({}), STANDARD_ANALYSIS_MODE)
+        self.assertEqual(resolve_analysis_mode({"analysis": {"mode": "ripple"}}), RIPPLE_ANALYSIS_MODE)
+        self.assertEqual(resolve_analysis_mode({"analysis": {"mode": "ripple_family"}}), RIPPLE_ANALYSIS_MODE)
+
     def test_default_config_enables_requested_extraction_defaults(self) -> None:
         config = yaml.safe_load(Path("configs/default.yaml").read_text())
 
@@ -72,6 +119,22 @@ class BackendCoreTests(unittest.TestCase):
         self.assertEqual(config["heatmap"]["cmap"], "hot")
         self.assertEqual(config["heatmap"]["area"]["cmap"], "plasma")
         self.assertFalse(config["heatmap"]["area"]["binarize"])
+        self.assertEqual(config["analysis"]["mode"], "standard")
+        self.assertTrue(config["analysis"]["ripple"]["extraction"]["enabled"])
+        self.assertEqual(config["analysis"]["ripple"]["extraction"]["max_tracks"], 500)
+        ripple_dedupe = config["analysis"]["ripple"]["extraction"]["dedupe"]
+        self.assertTrue(ripple_dedupe["allow_cross_phase"])
+        self.assertEqual(ripple_dedupe["min_overlap_rows"], 35)
+        self.assertEqual(ripple_dedupe["min_overlap_fraction"], 0.45)
+        self.assertEqual(ripple_dedupe["min_partial_overlap_rows"], 18)
+        self.assertEqual(ripple_dedupe["min_short_overlap_fraction"], 0.55)
+        self.assertEqual(ripple_dedupe["max_median_distance_px"], 6.0)
+        self.assertEqual(ripple_dedupe["min_spatial_overlap_rows"], 12)
+        self.assertEqual(ripple_dedupe["close_distance_px"], 7.0)
+        self.assertEqual(ripple_dedupe["min_close_fraction"], 0.68)
+        self.assertEqual(ripple_dedupe["cross_phase_min_spatial_overlap_rows"], 16)
+        self.assertTrue(config["analysis"]["ripple"]["endpoint_link"]["prefer_long_linear"])
+        self.assertEqual(config["analysis"]["ripple"]["family"]["min_tracks"], 2)
         endpoint_link = config["kymo"]["onnx"]["postproc"]["endpoint_link"]
         self.assertTrue(endpoint_link["enabled"])
         self.assertNotIn("level", endpoint_link)
@@ -89,6 +152,13 @@ class BackendCoreTests(unittest.TestCase):
         self.assertEqual(runner_cfg["endpoint_link_max_slope_delta"], 0.7)
         self.assertEqual(runner_cfg["endpoint_link_fit_rows"], 16)
         self.assertTrue(runner_cfg["endpoint_link_overlap_enabled"])
+        self.assertFalse(runner_cfg["endpoint_link_prefer_long_linear"])
+
+        ripple_runner_cfg = _flatten_onnx_cfg_for_runner(
+            config["kymo"]["onnx"],
+            analysis_cfg={"mode": "ripple_family", "ripple": {}},
+        )
+        self.assertTrue(ripple_runner_cfg["endpoint_link_prefer_long_linear"])
 
     def test_area_named_table_uses_continuous_area_heatmap_by_default(self) -> None:
         csv = b"0,0.5,1\n0.25,0.75,1\n"
@@ -220,6 +290,373 @@ class BackendCoreTests(unittest.TestCase):
         with self.assertRaises(CancellationRequested):
             image_to_heatmap_bytes(buf.getvalue(), cancel_cb=lambda: True)
 
+    def test_ripple_analysis_groups_directional_families_and_measures_line_gaps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "ripple_sample" / "kymobutler_output"
+            paths = [
+                _synthetic_ripple_track(base, 0, slope=1.0, intercept=0.0),
+                _synthetic_ripple_track(base, 1, slope=1.0, intercept=-20.0),
+                _synthetic_ripple_track(base, 2, slope=1.0, intercept=-40.0),
+                _synthetic_ripple_track(base, 3, slope=-1.0, intercept=200.0),
+                _synthetic_ripple_track(base, 4, slope=-1.0, intercept=220.0),
+            ]
+            stages: list[str] = []
+            result = analyze_ripple_tracks(
+                job_id=uuid4(),
+                track_paths=paths,
+                config={
+                    "io": {"sampling_rate": 5.0},
+                    "kymo": {"backend": "onnx", "track_xy_order": "yx"},
+                    "analysis": {
+                        "mode": "ripple_family",
+                        "ripple": {
+                            "min_track_rows": 30,
+                            "min_abs_slope": 0.05,
+                            "max_line_rmse_px": 2.0,
+                            "family": {
+                                "min_tracks": 2,
+                                "max_angle_delta_deg": 5.0,
+                                "min_x_overlap_px": 20.0,
+                                "min_x_overlap_fraction": 0.1,
+                                "max_reference_gap_frames": 100.0,
+                            },
+                            "frequency": {
+                                "sample_count": 11,
+                                "min_period_frames": 5.0,
+                                "max_period_frames": 50.0,
+                                "max_gap_cv": 0.1,
+                            },
+                        },
+                    },
+                },
+                progress_cb=lambda stage, _processed, _total: stages.append(stage),
+            )
+
+        self.assertEqual(len(result.track_rows), 5)
+        self.assertEqual(len(result.families), 2)
+        self.assertEqual({row["direction"] for row in result.families}, {"positive", "negative"})
+        self.assertEqual(len(result.intervals), 3)
+        for interval in result.intervals:
+            self.assertAlmostEqual(interval["period_frames"], 20.0, places=6)
+            self.assertAlmostEqual(interval["period_s"], 4.0, places=6)
+            self.assertAlmostEqual(interval["frequency_hz"], 0.25, places=6)
+        self.assertIn("ripple_track_geometry", stages)
+        self.assertIn("ripple_family_grouping", stages)
+        self.assertIn("ripple_interval_analysis", stages)
+        self.assertIn(b"family_id", result.tracks_csv)
+        self.assertIn(b"frequency_hz", result.intervals_csv)
+
+        track_csv_rows = list(csv.DictReader(io.StringIO(result.tracks_csv.decode("utf-8"))))
+        interval_csv_rows = list(csv.DictReader(io.StringIO(result.intervals_csv.decode("utf-8"))))
+        family_csv_rows = list(csv.DictReader(io.StringIO(result.families_csv.decode("utf-8"))))
+
+        self.assertIn("Velocity (pixels/sec)", track_csv_rows[0])
+        self.assertIn("Speed (pixels/sec)", track_csv_rows[0])
+        self.assertIn("Angle from Time Axis (degrees)", track_csv_rows[0])
+        self.assertAlmostEqual(float(track_csv_rows[0]["Velocity (pixels/sec)"]), 5.0, places=6)
+        self.assertAlmostEqual(float(track_csv_rows[0]["Speed (pixels/sec)"]), 5.0, places=6)
+        self.assertAlmostEqual(float(track_csv_rows[0]["Angle from Time Axis (degrees)"]), 45.0, places=6)
+
+        self.assertIn("Velocity (pixels/sec)", interval_csv_rows[0])
+        self.assertIn("Speed (pixels/sec)", interval_csv_rows[0])
+        self.assertIn("Angle from Time Axis (degrees)", interval_csv_rows[0])
+        self.assertTrue(all(abs(float(row["Speed (pixels/sec)"]) - 5.0) < 1e-6 for row in interval_csv_rows))
+        self.assertIn("Median Velocity (pixels/sec)", family_csv_rows[0])
+        self.assertIn("Median Angle from Time Axis (degrees)", family_csv_rows[0])
+
+    def test_ripple_analysis_honors_cancellation(self) -> None:
+        with self.assertRaises(CancellationRequested):
+            analyze_ripple_tracks(
+                job_id=uuid4(),
+                track_paths=[],
+                config={"analysis": {"mode": "ripple_family"}},
+                cancel_cb=lambda: True,
+            )
+
+    def test_ripple_extraction_dedupe_collapses_near_cross_phase_duplicates(self) -> None:
+        rows = np.arange(0, 140, dtype=np.float32)
+        base = np.column_stack([rows, 0.45 * rows + 20.0]).astype(np.float32)
+        duplicate = np.column_stack([rows, 0.45 * rows + 22.0]).astype(np.float32)
+        neighboring_ripple = np.column_stack([rows, 0.45 * rows + 42.0]).astype(np.float32)
+
+        traces = [
+            _Trace("bright", base, 0.95, "guided", phase_contrast=0.09),
+            _Trace("dark", duplicate, 0.90, "linear", phase_contrast=0.08),
+            _Trace("bright", neighboring_ripple, 0.92, "guided", phase_contrast=0.09),
+        ]
+
+        deduped = _dedupe_and_extend(
+            traces,
+            _ripple_dedupe_test_config(),
+            cancel_cb=None,
+        )
+
+        self.assertEqual(len(deduped), 2)
+        x_at_midpoint = sorted(
+            float(np.interp(70.0, trace.points[:, 0], trace.points[:, 1]))
+            for trace in deduped
+        )
+        self.assertGreater(x_at_midpoint[1] - x_at_midpoint[0], 15.0)
+
+    def test_ripple_extraction_dedupe_collapses_same_length_close_overlaps(self) -> None:
+        rows = np.arange(0, 150, dtype=np.float32)
+        base = np.column_stack([rows, 0.5 * rows + 18.0]).astype(np.float32)
+        duplicate = np.column_stack([rows, 0.5 * rows + 23.0]).astype(np.float32)
+        neighboring_ripple = np.column_stack([rows, 0.5 * rows + 36.0]).astype(np.float32)
+
+        deduped = _dedupe_and_extend(
+            [
+                _Trace("bright", base, 0.94, "guided", phase_contrast=0.10),
+                _Trace("bright", duplicate, 0.91, "linear", phase_contrast=0.08),
+                _Trace("bright", neighboring_ripple, 0.92, "guided", phase_contrast=0.10),
+            ],
+            _ripple_dedupe_test_config(),
+            cancel_cb=None,
+        )
+
+        self.assertEqual(len(deduped), 2)
+        x_at_midpoint = sorted(
+            float(np.interp(75.0, trace.points[:, 0], trace.points[:, 1]))
+            for trace in deduped
+        )
+        self.assertGreater(x_at_midpoint[1] - x_at_midpoint[0], 10.0)
+
+    def test_ripple_extraction_dedupe_prefers_support_over_length_tie(self) -> None:
+        rows = np.arange(0, 150, dtype=np.float32)
+        lower_support = np.column_stack([rows, 0.5 * rows + 18.0]).astype(np.float32)
+        higher_support = np.column_stack([rows, 0.5 * rows + 23.0]).astype(np.float32)
+
+        deduped = _dedupe_and_extend(
+            [
+                _Trace("bright", lower_support, 0.80, "guided"),
+                _Trace("bright", higher_support, 0.95, "linear"),
+            ],
+            _ripple_dedupe_test_config(),
+            cancel_cb=None,
+        )
+
+        self.assertEqual(len(deduped), 1)
+        self.assertAlmostEqual(
+            float(np.interp(75.0, deduped[0].points[:, 0], deduped[0].points[:, 1])),
+            60.5,
+            places=6,
+        )
+
+    def test_ripple_extraction_dedupe_treats_local_spatial_overlap_as_dealbreaker(self) -> None:
+        rows = np.arange(0, 150, dtype=np.float32)
+        base_x = 0.5 * rows + 18.0
+        local_overlap_x = base_x + 18.0
+        local_overlap_x[64:82] = base_x[64:82] + 3.0
+        neighboring_x = base_x + 36.0
+
+        deduped = _dedupe_and_extend(
+            [
+                _Trace("bright", np.column_stack([rows, base_x]).astype(np.float32), 0.94, "guided"),
+                _Trace("bright", np.column_stack([rows, local_overlap_x]).astype(np.float32), 0.91, "linear"),
+                _Trace("bright", np.column_stack([rows, neighboring_x]).astype(np.float32), 0.92, "guided"),
+            ],
+            _ripple_dedupe_test_config(),
+            cancel_cb=None,
+        )
+
+        self.assertEqual(len(deduped), 2)
+
+    def test_ripple_extraction_dedupe_rejects_spatial_overlap_across_different_slopes(self) -> None:
+        rows = np.arange(0, 150, dtype=np.float32)
+        base_x = 0.5 * rows + 18.0
+        different_family_x = 0.1 * rows + 46.0
+        neighboring_x = base_x + 36.0
+
+        deduped = _dedupe_and_extend(
+            [
+                _Trace("bright", np.column_stack([rows, base_x]).astype(np.float32), 0.94, "guided"),
+                _Trace("bright", np.column_stack([rows, different_family_x]).astype(np.float32), 0.91, "linear"),
+                _Trace("bright", np.column_stack([rows, neighboring_x]).astype(np.float32), 0.92, "guided"),
+            ],
+            _ripple_dedupe_test_config(),
+            cancel_cb=None,
+        )
+
+        self.assertEqual(len(deduped), 2)
+
+    def test_ripple_extraction_dedupe_collapses_braided_local_overlaps(self) -> None:
+        rows = np.arange(0, 150, dtype=np.float32)
+        base_x = 0.5 * rows + 18.0
+        duplicate_x = base_x + 4.5
+        duplicate_x[114:] += 8.0
+        neighboring_x = base_x + 22.0
+        traces = [
+            _Trace("bright", np.column_stack([rows, base_x]).astype(np.float32), 0.94, "guided", phase_contrast=0.10),
+            _Trace(
+                "bright",
+                np.column_stack([rows, duplicate_x]).astype(np.float32),
+                0.91,
+                "linear",
+                phase_contrast=0.08,
+            ),
+            _Trace(
+                "bright",
+                np.column_stack([rows, neighboring_x]).astype(np.float32),
+                0.92,
+                "guided",
+                phase_contrast=0.10,
+            ),
+        ]
+
+        deduped = _dedupe_and_extend(
+            traces,
+            _ripple_dedupe_test_config(),
+            cancel_cb=None,
+        )
+
+        self.assertEqual(len(deduped), 2)
+
+    def test_ripple_extraction_dedupe_keeps_adjacent_parallel_ripples(self) -> None:
+        rows = np.arange(0, 150, dtype=np.float32)
+        traces = [
+            _Trace("bright", np.column_stack([rows, 0.5 * rows + 18.0]).astype(np.float32), 0.94, "guided"),
+            _Trace("bright", np.column_stack([rows, 0.5 * rows + 31.0]).astype(np.float32), 0.94, "guided"),
+        ]
+
+        deduped = _dedupe_and_extend(
+            traces,
+            _ripple_dedupe_test_config(),
+            cancel_cb=None,
+        )
+
+        self.assertEqual(len(deduped), 2)
+
+    def test_ripple_pipeline_uses_ripple_extractor_with_continuous_heatmap_values(self) -> None:
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        SQLModel.metadata.create_all(engine)
+
+        captured: dict[str, object] = {}
+        old_extractor = pipeline_module.run_ripple_extraction
+
+        def fake_ripple_extraction(**kwargs):
+            heatmap_value_bytes = kwargs.get("heatmap_value_bytes")
+            captured["value_bytes_len"] = len(heatmap_value_bytes or b"")
+            captured["value_meta"] = dict(kwargs.get("heatmap_value_meta") or {})
+            base_dir = Path(kwargs["scratch_dir"]) / Path(kwargs["heatmap_path"]).stem
+            output_dir = base_dir / "kymobutler_output"
+            paths = [
+                _synthetic_ripple_track(output_dir, 0, slope=0.5, intercept=10.0),
+                _synthetic_ripple_track(output_dir, 1, slope=0.5, intercept=0.0),
+            ]
+            (base_dir / "ripple_track_manifest.json").write_text(
+                json.dumps({
+                    "extractor": "ripple_multiscale_hough",
+                    "value_source": "continuous_table_values",
+                    "track_count": len(paths),
+                }),
+                encoding="utf-8",
+            )
+            return SimpleNamespace(
+                image_id=Path(kwargs["heatmap_path"]).stem,
+                base_dir=base_dir,
+                track_paths=paths,
+                track_metadata={},
+            )
+
+        try:
+            pipeline_module.run_ripple_extraction = fake_ripple_extraction
+            with tempfile.TemporaryDirectory() as tmp:
+                with Session(engine) as session:
+                    store = JobStore(session)
+                    artifact_store = LocalArtifactStore(str(Path(tmp) / "artifacts"))
+                    config = {
+                        "io": {"sampling_rate": 5.0},
+                        "kymo": {"backend": "onnx", "track_xy_order": "yx"},
+                        "heatmap": {
+                            "table_mode": "area",
+                            "origin": "lower",
+                            "area": {"cmap": "gray", "vmin": 0.0, "vmax": 1.0},
+                        },
+                        "analysis": {
+                            "mode": "ripple_family",
+                            "ripple": {
+                                "min_track_rows": 10,
+                                "min_abs_slope": 0.05,
+                                "max_line_rmse_px": 1.0,
+                                "family": {
+                                    "min_tracks": 2,
+                                    "max_angle_delta_deg": 5.0,
+                                    "min_x_overlap_px": 5.0,
+                                    "min_x_overlap_fraction": 0.1,
+                                    "max_reference_gap_frames": 50.0,
+                                },
+                                "frequency": {
+                                    "sample_count": 7,
+                                    "min_period_frames": 3.0,
+                                    "max_period_frames": 40.0,
+                                    "max_gap_cv": 0.1,
+                                },
+                            },
+                        },
+                        "overlay": {"max_points": 50},
+                        "track_detail": {"store_npy": True},
+                        "service": {"resume": {"enabled": True}},
+                    }
+                    job = store.create_job(owner_session_id=uuid4(), run_name="ripple pipeline", config=config)
+                    table = "\n".join(
+                        ",".join(f"{((x + y) % 17) / 16:.3f}" for x in range(32))
+                        for y in range(32)
+                    ).encode("utf-8")
+                    blob_path, byte_size = artifact_store.put_bytes(
+                        job_id=job.id,
+                        kind=ArtifactKind.upload_csv.value,
+                        filename="area.csv",
+                        data=table,
+                        content_type="text/csv",
+                        label="upload",
+                    )
+                    store.create_artifact(
+                        job_id=job.id,
+                        kind=ArtifactKind.upload_csv,
+                        blob_path=blob_path,
+                        label="upload",
+                        content_type="text/csv",
+                        byte_size=byte_size,
+                        meta={"filename": "area.csv", "input_type": "table"},
+                    )
+
+                    pipeline_module.run_job(
+                        job.id,
+                        job_store=store,
+                        artifact_store=artifact_store,
+                        config=config,
+                        settings=PipelineSettings(scratch_root=Path(tmp) / "scratch"),
+                    )
+
+                    finished = store.get_job(job.id)
+                    artifacts = list(session.exec(select(Artifact).where(Artifact.job_id == job.id)).all())
+                    labels = {artifact.label for artifact in artifacts}
+                    filename_by_label = {
+                        artifact.label: (artifact.meta or {}).get("filename")
+                        for artifact in artifacts
+                        if artifact.label
+                    }
+                    tracks = list(session.exec(select(TrackModel).where(TrackModel.job_id == job.id)).all())
+
+            self.assertEqual(finished.status, JobStatus.completed)
+            self.assertGreater(int(captured["value_bytes_len"]), 0)
+            self.assertEqual((captured["value_meta"] or {}).get("value_encoding"), "float32_le")
+            self.assertIn("ripple_tracks", labels)
+            self.assertIn("ripple_intervals", labels)
+            self.assertIn("ripple_families", labels)
+            self.assertEqual(filename_by_label["ripple_tracks"], "tracks.csv")
+            self.assertEqual(filename_by_label["ripple_intervals"], "waves.csv")
+            self.assertEqual(filename_by_label["ripple_families"], "families.csv")
+            self.assertIn("base_heatmap:ripple_track_manifest", labels)
+            self.assertEqual(len(tracks), 2)
+            self.assertTrue(all(track.metrics.get("analysis_mode") == "ripple_family" for track in tracks))
+        finally:
+            pipeline_module.run_ripple_extraction = old_extractor
+
     def test_kymobutler_tiled_inference_honors_cancel_callback(self) -> None:
         class DummyKymo:
             seg_hw = (2, 2)
@@ -269,6 +706,35 @@ class BackendCoreTests(unittest.TestCase):
         self.assertGreater(aggressive["endpoint_link_max_dx"], maximal["endpoint_link_max_dx"])
         self.assertLess(aggressive["endpoint_link_min_bridge_prob"], maximal["endpoint_link_min_bridge_prob"])
         self.assertEqual(custom["endpoint_link_max_gap_rows"], 42)
+
+    def test_ripple_endpoint_linking_does_not_join_opposite_slopes(self) -> None:
+        probability = np.ones((24, 24), dtype=np.float32)
+        rising = Track(points=[(y, y) for y in range(0, 11)], id=1)
+        falling = Track(points=[(y, 21 - y) for y in range(11, 22)], id=2)
+
+        standard, _ = link_track_endpoints(
+            [rising, falling],
+            probability,
+            max_gap_rows=2,
+            max_dx=2.0,
+            min_bridge_prob=0.0,
+            max_slope_delta=3.0,
+            overlap_enabled=False,
+        )
+        ripple, _ = link_track_endpoints(
+            [rising, falling],
+            probability,
+            max_gap_rows=2,
+            max_dx=2.0,
+            min_bridge_prob=0.0,
+            max_slope_delta=3.0,
+            overlap_enabled=False,
+            prefer_long_linear=True,
+            min_abs_slope=0.05,
+        )
+
+        self.assertEqual(len(standard), 1)
+        self.assertEqual(len(ripple), 2)
 
     def test_process_track_extracts_min_and_max_with_raw_wave_primary_fit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

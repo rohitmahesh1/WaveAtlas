@@ -131,6 +131,7 @@ export function TrackDetailChart({
   debugImageUrl?: string | null;
   debugOpacity?: number;
 }) {
+  const rippleMode = detail.analysis_mode === "ripple_family";
   const frames = detail.time_index ?? [];
   const positions = detail.position ?? [];
   const hasUsableTrack = frames.length >= 2 && positions.length >= 2 && frames.length === positions.length;
@@ -139,9 +140,9 @@ export function TrackDetailChart({
   const [showAxes, setShowAxes] = useState<boolean>(true);
   const [showBase, setShowBase] = useState<boolean>(false);
   const [showRaw, setShowRaw] = useState<boolean>(true);
-  const [showFit, setShowFit] = useState<boolean>(false);
-  const [showSine, setShowSine] = useState<boolean>(true);
-  const [showPeaks, setShowPeaks] = useState<boolean>(true);
+  const [showFit, setShowFit] = useState<boolean>(rippleMode);
+  const [showSine, setShowSine] = useState<boolean>(!rippleMode);
+  const [showPeaks, setShowPeaks] = useState<boolean>(!rippleMode);
   const [showRegressionWindowOnly, setShowRegressionWindowOnly] = useState<boolean>(true);
   const [selectedPeak, setSelectedPeak] = useState<{ trackIndex: number; peakI: number } | null>(null);
   const [hover, setHover] = useState<{ x: number; y: number; cx: number; cy: number } | null>(null);
@@ -346,7 +347,7 @@ export function TrackDetailChart({
           alignItems: "center",
         }}
       >
-        {regressions.length > 1 ? (
+        {!rippleMode && regressions.length > 1 ? (
           <>
             <label htmlFor={regressionSelectId} style={{ whiteSpace: "nowrap" }}>
               Regression
@@ -378,21 +379,25 @@ export function TrackDetailChart({
           </label>
           <label className={showFit ? "mini-layer-chip active" : "mini-layer-chip"}>
             <input type="checkbox" checked={showFit} onChange={(e) => setShowFit(e.target.checked)} />
-            Fit
+            {rippleMode ? "Line fit" : "Fit"}
           </label>
-          <label className={showSine ? "mini-layer-chip active" : "mini-layer-chip"}>
-            <input
-              type="checkbox"
-              checked={showSine}
-              onChange={(e) => setShowSine(e.target.checked)}
-              disabled={!activeSineFit}
-            />
-            Sine
-          </label>
-          <label className={showPeaks ? "mini-layer-chip active" : "mini-layer-chip"}>
-            <input type="checkbox" checked={showPeaks} onChange={(e) => setShowPeaks(e.target.checked)} />
-            Peaks
-          </label>
+          {!rippleMode ? (
+            <>
+              <label className={showSine ? "mini-layer-chip active" : "mini-layer-chip"}>
+                <input
+                  type="checkbox"
+                  checked={showSine}
+                  onChange={(e) => setShowSine(e.target.checked)}
+                  disabled={!activeSineFit}
+                />
+                Sine
+              </label>
+              <label className={showPeaks ? "mini-layer-chip active" : "mini-layer-chip"}>
+                <input type="checkbox" checked={showPeaks} onChange={(e) => setShowPeaks(e.target.checked)} />
+                Peaks
+              </label>
+            </>
+          ) : null}
           <label className={showBase ? "mini-layer-chip active" : "mini-layer-chip"}>
             <input type="checkbox" checked={showBase} onChange={(e) => setShowBase(e.target.checked)} />
             Base
@@ -638,7 +643,7 @@ export function TrackDetailChart({
             />
           ))}
 
-          {showPeaks
+          {!rippleMode && showPeaks
             ? peakPoints.map((p, i) => {
                 const scaled = toCanvas(p, scale);
                 const selected = selectedRegression != null && p.peak_i === selectedRegression.peak_i;
@@ -681,18 +686,18 @@ export function TrackDetailChart({
           {showFit ? (
             <span className="legend-item">
               <span className="legend-swatch swatch-fit" />
-              Fit
+              {rippleMode ? "Line fit" : "Fit"}
             </span>
           ) : null}
 
-          {showSine && displaySineFit ? (
+          {!rippleMode && showSine && displaySineFit ? (
             <span className="legend-item">
               <span className="legend-swatch swatch-sine" />
               Sine
             </span>
           ) : null}
 
-          {showPeaks ? (
+          {!rippleMode && showPeaks ? (
             <span className="legend-item">
               <span className="legend-swatch swatch-peak" />
               Peaks
@@ -700,28 +705,30 @@ export function TrackDetailChart({
           ) : null}
         </div>
 
-        <button
-          type="button"
-          aria-pressed={showRegressionWindowOnly}
-          disabled={!canToggleRegressionPeriod}
-          onClick={() => setShowRegressionWindowOnly((value) => !value)}
-          title={periodToggleTitle}
-          style={{
-            marginLeft: "auto",
-            padding: "4px 10px",
-            borderRadius: 999,
-            border: "1px solid rgba(148,163,184,0.28)",
-            background: "rgba(15,23,42,0.75)",
-            color: "rgba(226,232,240,0.92)",
-            fontSize: 12,
-            lineHeight: 1.2,
-            cursor: canToggleRegressionPeriod ? "pointer" : "not-allowed",
-            opacity: canToggleRegressionPeriod ? 1 : 0.5,
-            whiteSpace: "nowrap",
-          }}
-        >
-          {showRegressionWindowOnly ? "Full period" : "Fit window"}
-        </button>
+        {!rippleMode ? (
+          <button
+            type="button"
+            aria-pressed={showRegressionWindowOnly}
+            disabled={!canToggleRegressionPeriod}
+            onClick={() => setShowRegressionWindowOnly((value) => !value)}
+            title={periodToggleTitle}
+            style={{
+              marginLeft: "auto",
+              padding: "4px 10px",
+              borderRadius: 999,
+              border: "1px solid rgba(148,163,184,0.28)",
+              background: "rgba(15,23,42,0.75)",
+              color: "rgba(226,232,240,0.92)",
+              fontSize: 12,
+              lineHeight: 1.2,
+              cursor: canToggleRegressionPeriod ? "pointer" : "not-allowed",
+              opacity: canToggleRegressionPeriod ? 1 : 0.5,
+              whiteSpace: "nowrap",
+            }}
+          >
+            {showRegressionWindowOnly ? "Full period" : "Fit window"}
+          </button>
+        ) : null}
       </div>
     </div>
   );

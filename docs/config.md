@@ -45,6 +45,37 @@ Used when an uploaded image is converted into the canonical base heatmap artifac
 Notes:
 - When both `low_hex` and `high_hex` are supplied, the grayscale conversion projects each pixel along that color axis. Otherwise it uses standard luminance.
 
+## analysis
+Selects the scientific analysis performed after track extraction.
+- `analysis.mode` (string): `standard` runs the existing per-track detrending, FFT, and peak analysis. `ripple_family` runs the ripple-wave geometry and family workflow.
+- `analysis.ripple.min_track_rows` (int): Minimum temporal span for a track to participate in family grouping.
+- `analysis.ripple.min_abs_slope` (number): Minimum absolute slope in pixels per frame for a directional ripple track.
+- `analysis.ripple.max_line_rmse_px` (number): Maximum robust line-fit error for family eligibility. All extracted tracks remain visible and exported, even when ineligible.
+- `analysis.ripple.extraction.enabled` (bool): Use the ripple-specific multiscale/Hough track extractor for ripple runs. If disabled, ripple runs use the configured KymoButler extraction path and still run ripple family analysis afterward.
+- `analysis.ripple.extraction.max_tracks` (int): Maximum number of ripple tracks kept after deduplication and validation.
+- `analysis.ripple.extraction.min_abs_slope` / `max_abs_slope` (number): Slope range accepted by the ripple extractor. Increase `min_abs_slope` to ignore near-vertical/stationary texture; lower `max_abs_slope` if steep noise is being traced.
+- `analysis.ripple.extraction.temporal_sigma_rows` / `peak_min_distance_px` / `min_phase_contrast` (number): Core smoothing, seed spacing, and final contrast filters for extracted ripple lines.
+- `analysis.ripple.extraction.dedupe.allow_cross_phase` (bool): Compare bright and dark candidates when removing near-identical ripple tracks. This catches duplicate ridge centerlines produced by different scales or trace methods while keeping true neighboring bands separate through tight distance thresholds.
+- `analysis.ripple.extraction.dedupe.min_overlap_rows` / `min_overlap_fraction` (number): Required shared temporal span before two ripple traces can be treated as duplicates.
+- `analysis.ripple.extraction.dedupe.min_partial_overlap_rows` / `min_short_overlap_fraction` (number): Shorter, containment-style duplicate gate for local fragments that mostly ride on top of a longer trace.
+- `analysis.ripple.extraction.dedupe.max_slope_delta` / `max_median_distance_px` / `max_p90_distance_px` (number): Line-shape tolerances for duplicate ripple traces. Lower distance values preserve nearby parallel ripples; higher values collapse more overlapping tracks.
+- `analysis.ripple.extraction.dedupe.min_spatial_overlap_rows` (number): Hard spatial-overlap gate. When two traces share at least this many close rows, dedupe keeps the better-ranked trace and drops the other, even if they would otherwise land in different families.
+- `analysis.ripple.extraction.dedupe.close_distance_px` / `min_close_fraction` / `partial_max_median_distance_px` (number): Local duplicate tolerances. These catch braided/stacked copies without requiring the whole overlap to pass a strict 90th-percentile distance check.
+- `analysis.ripple.extraction.dedupe.cross_phase_max_median_distance_px` / `cross_phase_max_p90_distance_px` (number): Extra-tight spatial tolerances for bright-vs-dark dedupe so alternating ripple bands are not merged accidentally.
+- `analysis.ripple.extraction.dedupe.cross_phase_min_spatial_overlap_rows` / `cross_phase_close_distance_px` / `cross_phase_min_close_fraction` / `cross_phase_partial_max_median_distance_px` (number): Extra-tight local duplicate tolerances for bright-vs-dark comparisons.
+- `analysis.ripple.endpoint_link.prefer_long_linear` (bool): Enables ripple-specific global endpoint matching with preference for longer, straighter tracks.
+- `analysis.ripple.endpoint_link.length_weight` / `linearity_weight` (number): Weights applied to anchor length and line-fit quality during ripple endpoint matching.
+- `analysis.ripple.family.min_tracks` (int): Minimum number of tracks required for an assigned family ID.
+- `analysis.ripple.family.max_angle_delta_deg` (number): Maximum orientation difference between tracks connected in the family graph.
+- `analysis.ripple.family.min_x_overlap_px` / `min_x_overlap_fraction` (number): Required spatial overlap between candidate family members.
+- `analysis.ripple.family.max_reference_gap_frames` (number): Largest temporal separation allowed between candidate family members.
+- `analysis.ripple.frequency.sample_count` (int): Number of shared spatial positions used to estimate each adjacent-track gap.
+- `analysis.ripple.frequency.min_period_frames` / `max_period_frames` (number): Accepted temporal-gap range for ripple intervals.
+- `analysis.ripple.frequency.max_gap_cv` (number): Maximum robust gap variability accepted for an interval.
+Notes:
+- Ripple frequency is calculated from the median temporal gap between adjacent, same-direction tracks. The ripple workflow does not run the standard FFT/peak calculations.
+- Ripple runs publish separate track, interval, and family CSV artifacts. The interval/waves CSV includes period, frequency, signed velocity, absolute speed, and line angle derived from the neighboring ripple tracks.
+
 ## detrend
 Used when removing baseline trends from track signals (RANSAC + polynomial fit).
 - `detrend.degree` (int): Polynomial degree for baseline fit. Change when: baselines are curved and a higher-degree fit is needed (or overfitting requires lowering).

@@ -17,6 +17,13 @@ export type FilterField =
   | "mean_amplitude"
   | "dominant_frequency"
   | "period"
+  | "family_id"
+  | "direction"
+  | "slope_px_per_frame"
+  | "velocity_px_per_s"
+  | "speed_px_per_s"
+  | "angle_deg"
+  | "line_rmse_px"
   | "sample";
 
 export type FilterRule = {
@@ -40,4 +47,8 @@ export type SummaryStats = {
   points: number;
   avgAmplitude: number | null;
   avgFrequency: number | null;
+  avgSlope: number | null;
+  avgSpeed: number | null;
+  avgAngle: number | null;
+  familyCount: number;
 };

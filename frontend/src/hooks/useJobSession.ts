@@ -18,6 +18,11 @@ import type { ArtifactView } from "../api";
 import type { HeatmapValues, OverlayTrackEvent } from "../OverlayCanvas";
 import type { LogEntry } from "../types";
 import { formatEta } from "../utils/format";
+import {
+  DEFAULT_ANALYSIS_MODE,
+  normalizeAnalysisMode,
+  type AnalysisMode,
+} from "../utils/analysisOptions";
 
 type WsMsg =
   | { type: "snapshot"; payload?: unknown; seq?: number; job_id?: string }
@@ -181,6 +186,7 @@ function normalizeOverlayTrack(payload: unknown): OverlayTrackEvent | null {
         return x != null && y != null ? [{ x, y }] : [];
       })
     : [];
+  const payloadMetrics = asRecord(data.metrics);
 
   return {
     id: idx,
@@ -189,21 +195,33 @@ function normalizeOverlayTrack(payload: unknown): OverlayTrackEvent | null {
     poly,
     peaks,
     metrics: {
-      mean_amplitude: meanAmp,
-      dominant_frequency: finiteNumber(data.freq_hz),
-      period: finiteNumber(data.period),
-      num_peaks: peaks.length,
+      mean_amplitude: finiteNumber(payloadMetrics?.mean_amplitude) ?? meanAmp,
+      dominant_frequency: finiteNumber(payloadMetrics?.dominant_frequency) ?? finiteNumber(data.freq_hz),
+      period: finiteNumber(payloadMetrics?.period) ?? finiteNumber(data.period),
+      num_peaks: finiteNumber(payloadMetrics?.num_peaks) ?? peaks.length,
+      analysis_mode: typeof payloadMetrics?.analysis_mode === "string" ? payloadMetrics.analysis_mode : undefined,
+      family_id: typeof payloadMetrics?.family_id === "string" ? payloadMetrics.family_id : null,
+      direction: typeof payloadMetrics?.direction === "string" ? payloadMetrics.direction : null,
+      slope_px_per_frame: finiteNumber(payloadMetrics?.slope_px_per_frame),
+      velocity_px_per_s: finiteNumber(payloadMetrics?.velocity_px_per_s),
+      angle_deg: finiteNumber(payloadMetrics?.angle_deg),
+      line_rmse_px: finiteNumber(payloadMetrics?.line_rmse_px),
+      line_r2: finiteNumber(payloadMetrics?.line_r2),
+      duration_s: finiteNumber(payloadMetrics?.duration_s),
+      neighbor_interval_count: finiteNumber(payloadMetrics?.neighbor_interval_count),
     },
   };
 }
 
 export function useJobSession(options?: { resumeOnMount?: boolean }) {
-  const [initialSession] = useState(() => (options?.resumeOnMount ? loadSession() : null));
+  const resumeOnMount = options?.resumeOnMount ?? false;
+  const [initialSession] = useState(() => (resumeOnMount ? loadSession() : null));
   const [jobId, setJobId] = useState<string | null>(initialSession?.jobId ?? null);
   const [status, setStatus] = useState<string>(initialSession ? "resuming…" : "idle");
   const [baseImageUrl, setBaseImageUrl] = useState<string | null>(null);
   const [baseImageInfo, setBaseImageInfo] = useState<HeatmapCoordInfo | null>(null);
   const [heatmapValues, setHeatmapValues] = useState<HeatmapValues | null>(null);
+  const [analysisMode, setAnalysisMode] = useState<AnalysisMode>(DEFAULT_ANALYSIS_MODE);
   const [originalImageUrl, setOriginalImageUrl] = useState<string | null>(null);
   const [tracks, setTracks] = useState<OverlayTrackEvent[]>([]);
   const [activity, setActivity] = useState<LogEntry[]>([]);
@@ -307,6 +325,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     setBaseImageInfo(null);
     clearHeatmapValues();
     setOriginalImageUrl(null);
+    setAnalysisMode(DEFAULT_ANALYSIS_MODE);
     lastSeqRef.current = 0;
     setCurrentStage("idle");
     setStageDetail(null);
@@ -383,6 +402,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
           listArtifacts(id, { kind: "upload_image", limit: 1 }),
         ]);
         if (pollTokenRef.current !== myToken) return;
+        setAnalysisMode(normalizeAnalysisMode(job.analysis_mode));
         const overlays = overlayArts
           .filter((a) => {
             if (!a.label || !a.download_url) return false;
@@ -676,6 +696,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
 
     const safeName = (runName || "").trim() || "untitled";
     const job = await createJob(safeName, configOverride ?? {});
+    setAnalysisMode(normalizeAnalysisMode(job.analysis_mode));
     jobIdRef.current = job.id;
     setJobId(job.id);
 
@@ -752,7 +773,8 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
 
   async function resumeSavedJob(id: string) {
     try {
-      await getJob(id);
+      const job = await getJob(id);
+      setAnalysisMode(normalizeAnalysisMode(job.analysis_mode));
     } catch (error) {
       if (isApiError(error, 404)) {
         clearMissingJobSession(id);
@@ -787,6 +809,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     setBaseImageInfo(null);
     clearHeatmapValues();
     setOriginalImageUrl(null);
+    setAnalysisMode(DEFAULT_ANALYSIS_MODE);
     lastSeqRef.current = 0;
     setCurrentStage("idle");
     setStageDetail(null);
@@ -799,6 +822,12 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
   useEffect(() => {
     jobIdRef.current = jobId;
   }, [jobId]);
+
+  useEffect(() => {
+    if (!resumeOnMount) {
+      localStorage.removeItem(SESSION_KEY);
+    }
+  }, [resumeOnMount]);
 
   useEffect(() => {
     pollForBaseHeatmapRef.current = pollForBaseHeatmap;
@@ -831,6 +860,7 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     baseImageUrl,
     baseImageInfo,
     heatmapValues,
+    analysisMode,
     originalImageUrl,
     tracks,
     activity,

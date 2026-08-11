@@ -6,6 +6,7 @@ import time
 from typing import Callable, Dict, List, Optional, Tuple, Union, Iterable
 
 import cv2
+import networkx as nx
 import numpy as np
 from skimage.filters import apply_hysteresis_threshold
 from skimage.morphology import thin as _thin
@@ -529,6 +530,21 @@ def _track_slope(points: List[Tuple[int, int]], *, head: bool, fit_rows: int) ->
     return float(np.dot(y0, xs - float(xs.mean())) / denom)
 
 
+def _track_linearity_score(points: List[Tuple[int, int]]) -> float:
+    if len(points) < 2:
+        return 0.0
+    ys = np.asarray([p[0] for p in points], dtype=np.float64)
+    xs = np.asarray([p[1] for p in points], dtype=np.float64)
+    y0 = ys - float(ys.mean())
+    denom = float(np.dot(y0, y0))
+    if denom <= 1e-9:
+        return 0.0
+    slope = float(np.dot(y0, xs - float(xs.mean())) / denom)
+    intercept = float(xs.mean()) - slope * float(ys.mean())
+    rmse = float(np.sqrt(np.mean((xs - (slope * ys + intercept)) ** 2)))
+    return 1.0 / (1.0 + max(0.0, rmse))
+
+
 def _row_line_points(y0: int, x0: int, y1: int, x1: int, *, include_ends: bool) -> List[Tuple[int, int]]:
     if y1 < y0:
         return []
@@ -640,6 +656,10 @@ def link_track_endpoints(
     min_overlap_rows: int = 5,
     max_overlap_rows: int = 45,
     overlap_dx_tol: float = 3.0,
+    prefer_long_linear: bool = False,
+    length_weight: float = 0.25,
+    linearity_weight: float = 0.25,
+    min_abs_slope: float = 0.05,
     cancel_cb: Optional[Callable[[], bool]] = None,
 ) -> Tuple[List[Track], Dict[str, object]]:
     _check_cancel(cancel_cb)
@@ -680,6 +700,10 @@ def link_track_endpoints(
     row_xs: List[Dict[int, int]] = []
     head_slopes: List[float] = []
     tail_slopes: List[float] = []
+    full_slopes: List[float] = []
+    linearity_scores: List[float] = []
+    length_scores: List[float] = []
+    max_track_length = max(len(t.points) for t in norm_tracks)
     for idx, t in enumerate(norm_tracks):
         _check_cancel(cancel_cb)
         starts.append(t.points[0])
@@ -688,6 +712,9 @@ def link_track_endpoints(
         row_xs.append(_track_row_x(t.points))
         head_slopes.append(_track_slope(t.points, head=True, fit_rows=int(fit_rows)))
         tail_slopes.append(_track_slope(t.points, head=False, fit_rows=int(fit_rows)))
+        full_slopes.append(_track_slope(t.points, head=True, fit_rows=len(t.points)))
+        linearity_scores.append(_track_linearity_score(t.points))
+        length_scores.append(float(len(t.points)) / float(max(1, max_track_length)))
 
     owners = _build_owner_index(norm_tracks)
     candidates: List[Tuple[float, int, int, str, List[Tuple[int, int]], Optional[int], Optional[int]]] = []
@@ -712,6 +739,11 @@ def link_track_endpoints(
                 sy, sx = starts[j]
                 tail_slope = tail_slopes[i]
                 head_slope = head_slopes[j]
+                if prefer_long_linear:
+                    if abs(full_slopes[i]) < float(min_abs_slope) or abs(full_slopes[j]) < float(min_abs_slope):
+                        continue
+                    if full_slopes[i] * full_slopes[j] <= 0:
+                        continue
                 slope_delta = abs(tail_slope - head_slope)
                 if slope_delta > max_slope_delta_f:
                     continue
@@ -745,6 +777,10 @@ def link_track_endpoints(
                     - 0.10 * (float(gap) / max(float(max_gap), 1.0))
                     - 0.50 * conflict_fraction
                 )
+                if prefer_long_linear:
+                    anchor_length = 0.75 * length_scores[i] + 0.25 * length_scores[j]
+                    pair_linearity = 0.5 * (linearity_scores[i] + linearity_scores[j])
+                    score += float(length_weight) * anchor_length + float(linearity_weight) * pair_linearity
                 candidates.append((float(score), i, j, "gap", bridge_points, None, None))
                 candidate_gap_links += 1
 
@@ -776,6 +812,11 @@ def link_track_endpoints(
 
                 tail_slope = tail_slopes[i]
                 head_slope = head_slopes[j]
+                if prefer_long_linear:
+                    if abs(full_slopes[i]) < float(min_abs_slope) or abs(full_slopes[j]) < float(min_abs_slope):
+                        continue
+                    if full_slopes[i] * full_slopes[j] <= 0:
+                        continue
                 slope_delta = abs(tail_slope - head_slope)
                 if slope_delta > max_slope_delta_f:
                     continue
@@ -802,16 +843,38 @@ def link_track_endpoints(
                     - 0.15 * (slope_delta / max(max_slope_delta_f, 1e-6))
                     - 0.50 * conflict_fraction
                 )
+                if prefer_long_linear:
+                    anchor_length = 0.75 * length_scores[i] + 0.25 * length_scores[j]
+                    pair_linearity = 0.5 * (linearity_scores[i] + linearity_scores[j])
+                    score += float(length_weight) * anchor_length + float(linearity_weight) * pair_linearity
                 candidates.append((float(score), i, j, "overlap", consensus_points, int(rows[0]), int(rows[-1])))
                 candidate_overlap_links += 1
 
     candidates.sort(key=lambda item: item[0], reverse=True)
+    selected_candidates = candidates
+    if prefer_long_linear and candidates:
+        candidate_by_pair = {(item[1], item[2]): item for item in candidates}
+        graph = nx.Graph()
+        for score, source, target, *_rest in candidates:
+            graph.add_edge(("end", source), ("start", target), weight=float(score))
+        matches = nx.max_weight_matching(graph, maxcardinality=False, weight="weight")
+        matched_pairs: set[Tuple[int, int]] = set()
+        for left, right in matches:
+            if left[0] == "end":
+                matched_pairs.add((int(left[1]), int(right[1])))
+            else:
+                matched_pairs.add((int(right[1]), int(left[1])))
+        selected_candidates = sorted(
+            (candidate_by_pair[pair] for pair in matched_pairs if pair in candidate_by_pair),
+            key=lambda item: item[0],
+            reverse=True,
+        )
     linked_from: Dict[int, int] = {}
     linked_to: Dict[int, int] = {}
     links: Dict[Tuple[int, int], Tuple[str, List[Tuple[int, int]], Optional[int], Optional[int]]] = {}
     accepted_gap_links = 0
     accepted_overlap_links = 0
-    for _, i, j, kind, connector_points, overlap_start, overlap_end in candidates:
+    for _, i, j, kind, connector_points, overlap_start, overlap_end in selected_candidates:
         _check_cancel(cancel_cb)
         if i in linked_from or j in linked_to:
             continue
@@ -995,6 +1058,10 @@ def run_kymobutler(
     endpoint_link_min_overlap_rows: int = 5,
     endpoint_link_max_overlap_rows: int = 45,
     endpoint_link_overlap_dx_tol: float = 3.0,
+    endpoint_link_prefer_long_linear: bool = False,
+    endpoint_link_length_weight: float = 0.25,
+    endpoint_link_linearity_weight: float = 0.25,
+    endpoint_link_min_abs_slope: float = 0.05,
     dedupe_enable: bool = True,
     dedupe_min_rows: Optional[int] = None,
     dedupe_min_score: float = 0.11,
@@ -1250,6 +1317,10 @@ def run_kymobutler(
             min_overlap_rows=int(endpoint_link_min_overlap_rows),
             max_overlap_rows=int(endpoint_link_max_overlap_rows),
             overlap_dx_tol=float(endpoint_link_overlap_dx_tol),
+            prefer_long_linear=bool(endpoint_link_prefer_long_linear),
+            length_weight=float(endpoint_link_length_weight),
+            linearity_weight=float(endpoint_link_linearity_weight),
+            min_abs_slope=float(endpoint_link_min_abs_slope),
             cancel_cb=_cancelled_throttled,
         )
         _progress("endpoint_linking_done", **endpoint_link_stats)
