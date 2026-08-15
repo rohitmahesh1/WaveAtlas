@@ -15,11 +15,12 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 import matplotlib  # noqa: E402
 matplotlib.use("Agg", force=True)  # noqa: E402
 
+from ..analysis_mode import LARGE_WAVE_ANALYSIS_MODE, RIPPLE_ANALYSIS_MODE, resolve_analysis_mode
 from ..cancel import CancellationRequested
 
 
 _AREA_FILENAME_RE = re.compile(r"(^|[^a-z0-9])area([^a-z0-9]|$)", re.IGNORECASE)
-_EXTREME_TABLE_MODES = {"extreme", "extremes", "extreme_mask", "intensity", "legacy"}
+_EXTREME_TABLE_MODES = {"binary", "extreme", "extremes", "extreme_mask", "intensity", "legacy"}
 _CONTINUOUS_TABLE_MODES = {"area", "continuous", "raw"}
 
 
@@ -117,9 +118,16 @@ def _looks_like_area_table(filename_hint: Optional[str]) -> bool:
     return bool(_AREA_FILENAME_RE.search(os.path.basename(str(filename_hint))))
 
 
-def _resolve_table_mode(heat_cfg: Dict[str, Any], filename_hint: Optional[str]) -> Tuple[str, str]:
+def _resolve_table_mode(
+    heat_cfg: Dict[str, Any],
+    filename_hint: Optional[str],
+    *,
+    continuous_auto: bool = False,
+) -> Tuple[str, str]:
     requested = str(heat_cfg.get("table_mode", "auto")).strip().lower() or "auto"
     if requested == "auto":
+        if continuous_auto:
+            return requested, "continuous"
         return requested, "area" if _looks_like_area_table(filename_hint) else "extreme_mask"
     if requested in _EXTREME_TABLE_MODES:
         return requested, "extreme_mask"
@@ -127,7 +135,7 @@ def _resolve_table_mode(heat_cfg: Dict[str, Any], filename_hint: Optional[str]) 
         return requested, "area" if requested == "area" else "continuous"
     raise ValueError(
         "Unsupported heatmap.table_mode "
-        f"{requested!r}. Use auto, area, continuous, intensity, or legacy."
+        f"{requested!r}. Use auto, area, continuous, binary, intensity, or legacy."
     )
 
 
@@ -166,7 +174,7 @@ def table_to_heatmap_payload(
       upper: float =  1e16
       binarize: bool = True
       origin: str = "lower"
-      cmap: str = "hot"
+      cmap: str = "plasma"
       dpi: int = 180
       area: dict = area-specific overrides for auto-detected area tables
 
@@ -176,7 +184,14 @@ def table_to_heatmap_payload(
     _check_cancel(cancel_cb)
     cfg = config or {}
     heat_cfg = cfg.get("heatmap", cfg)
-    requested_table_mode, resolved_table_mode = _resolve_table_mode(heat_cfg, filename_hint)
+    requested_table_mode, resolved_table_mode = _resolve_table_mode(
+        heat_cfg,
+        filename_hint,
+        continuous_auto=resolve_analysis_mode(cfg) in {
+            RIPPLE_ANALYSIS_MODE,
+            LARGE_WAVE_ANALYSIS_MODE,
+        },
+    )
 
     lower = float(heat_cfg.get("lower", -1e20))
     upper = float(heat_cfg.get("upper", 1e16))
@@ -200,7 +215,7 @@ def table_to_heatmap_payload(
         filtered = data
         binarize = bool(mode_cfg.get("binarize", False))
         origin = str(mode_cfg.get("origin", heat_cfg.get("origin", "lower")))
-        cmap = str(mode_cfg.get("cmap", "plasma" if resolved_table_mode == "area" else heat_cfg.get("cmap", "viridis")))
+        cmap = str(mode_cfg.get("cmap", heat_cfg.get("cmap", "plasma")))
         vmin = _optional_float(mode_cfg.get("vmin", heat_cfg.get("vmin")))
         vmax = _optional_float(mode_cfg.get("vmax", heat_cfg.get("vmax")))
         if binarize:
@@ -208,7 +223,7 @@ def table_to_heatmap_payload(
     else:
         binarize = bool(heat_cfg.get("binarize", True))
         origin = str(heat_cfg.get("origin", "lower"))
-        cmap = str(heat_cfg.get("cmap", "hot"))
+        cmap = str(heat_cfg.get("cmap", "plasma"))
         vmin = 0.0
         # Keep extremes and optionally binarize
         filtered = _keep_extremes_zero_middle(data, lower, upper)
