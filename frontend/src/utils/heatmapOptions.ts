@@ -8,7 +8,7 @@ export type HeatmapOptions = {
 
 export const DEFAULT_HEATMAP_OPTIONS: HeatmapOptions = {
   processingMode: "auto",
-  palette: "default",
+  palette: "plasma",
 };
 
 const PALETTE_CMAP: Record<Exclude<HeatmapPalette, "default">, string> = {
@@ -26,7 +26,7 @@ export function buildHeatmapOptionsConfig(options: HeatmapOptions): Record<strin
     heatmap.binarize = false;
     area.binarize = false;
   } else if (options.processingMode === "binary") {
-    heatmap.table_mode = "auto";
+    heatmap.table_mode = "binary";
     heatmap.binarize = true;
     area.binarize = true;
   }
