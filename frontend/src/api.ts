@@ -76,13 +76,19 @@ export type TrackPeakPoint = {
 
 export type TrackPeakRegression = TrackPeakPoint & {
   sine_fit?: number[] | null;
+  fit_baseline?: number[] | null;
+  fit_method?: string | null;
   fit_amp_A?: number | null;
   fit_phase_phi?: number | null;
   fit_offset_c?: number | null;
   fit_freq_hz?: number | null;
+  fit_left_shape_power?: number | null;
+  fit_right_shape_power?: number | null;
   fit_error_vnmse?: number | null;
   fit_window_lo?: number | null;
   fit_window_hi?: number | null;
+  fit_window_source?: string | null;
+  fit_window_width_frames?: number | null;
   fit_peak_value?: number | null;
   fit_peak_error?: number | null;
   fit_passes_peak?: boolean | null;
@@ -123,6 +129,7 @@ export type TrackDetail = {
     frequency_hz?: number | null;
     ripple_frequency_hz?: number | null;
     frequency_method?: string | null;
+    large_wave_recurrence_frequency_hz?: number | null;
   };
 };
 
