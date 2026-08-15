@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Protocol, Tupl
 from uuid import UUID
 
 import numpy as np
+from scipy.ndimage import gaussian_filter1d
 
 from .signal.detrend import detrend_residual
 from .signal.peaks import detect_peaks, detect_peaks_adaptive, ensure_minimum_peaks
@@ -127,6 +128,12 @@ ENDPOINT_LINK_LEVEL_ALIASES = {
     "beyond": "aggressive",
     "extreme": "experimental",
     "maximum": "experimental",
+}
+
+ENDPOINT_LINK_SHARED_DEFAULTS: Dict[str, Any] = {
+    "max_chord_slope_px_per_row": 2.0,
+    "max_step_dx_px_per_row": 4.0,
+    "max_manifest_rejections": 500,
 }
 
 
@@ -295,8 +302,19 @@ def _flatten_onnx_cfg_for_runner(
     analysis_cfg = analysis_cfg or {}
     ripple_cfg = (analysis_cfg.get("ripple") or {})
     ripple_linking = (ripple_cfg.get("endpoint_link") or {})
+    large_wave_cfg = (analysis_cfg.get("large_wave") or {})
+    large_wave_linking = (large_wave_cfg.get("endpoint_link") or {})
     analysis_mode = str(analysis_cfg.get("mode", "standard")).strip().lower()
     ripple_mode = analysis_mode in {"ripple", "ripple_family", "ripple_waves", "ripple-wave", "ripple-waves"}
+    large_wave_mode = analysis_mode in {
+        "large",
+        "large_wave",
+        "large_waves",
+        "large-wave",
+        "large-waves",
+        "curved_wave",
+        "curved_waves",
+    }
 
     return {
         "min_length": int(tracking.get("min_length", 30)),
@@ -344,10 +362,31 @@ def _flatten_onnx_cfg_for_runner(
         "endpoint_link_min_overlap_rows": int(endpoint_link_resolved["min_overlap_rows"]),
         "endpoint_link_max_overlap_rows": int(endpoint_link_resolved["max_overlap_rows"]),
         "endpoint_link_overlap_dx_tol": float(endpoint_link_resolved["overlap_dx_tol"]),
-        "endpoint_link_prefer_long_linear": bool(ripple_linking.get("prefer_long_linear", ripple_mode)),
+        "endpoint_link_max_chord_slope_px_per_row": float(
+            endpoint_link_resolved["max_chord_slope_px_per_row"]
+        ),
+        "endpoint_link_max_step_dx_px_per_row": float(
+            endpoint_link_resolved["max_step_dx_px_per_row"]
+        ),
+        "endpoint_link_max_manifest_rejections": int(
+            endpoint_link_resolved["max_manifest_rejections"]
+        ),
+        "endpoint_link_prefer_long_linear": bool(
+            ripple_mode and ripple_linking.get("prefer_long_linear", True)
+        ),
         "endpoint_link_length_weight": float(ripple_linking.get("length_weight", 0.25)),
         "endpoint_link_linearity_weight": float(ripple_linking.get("linearity_weight", 0.25)),
         "endpoint_link_min_abs_slope": float(ripple_linking.get("min_abs_slope", 0.05)),
+        "endpoint_link_prefer_smooth_curves": bool(
+            large_wave_mode and large_wave_linking.get("prefer_smooth_curves", True)
+        ),
+        "endpoint_link_curve_length_weight": float(large_wave_linking.get("length_weight", 0.30)),
+        "endpoint_link_curve_tangent_weight": float(large_wave_linking.get("tangent_weight", 0.25)),
+        "endpoint_link_curve_curvature_weight": float(large_wave_linking.get("curvature_weight", 0.35)),
+        "endpoint_link_curve_max_turn_deg": float(large_wave_linking.get("max_turn_deg", 120.0)),
+        "endpoint_link_curve_max_curvature": float(
+            large_wave_linking.get("max_curvature_px_per_row2", 0.35)
+        ),
         "dedupe_enable": bool(dedupe.get("enabled", True)),
         "dedupe_min_rows": int(dedupe.get("min_rows", 30)),
         "dedupe_min_score": float(dedupe.get("min_score", 0.11)),
@@ -375,6 +414,8 @@ def _resolve_endpoint_link_cfg(endpoint_link: Dict[str, Any]) -> Dict[str, Any]:
     for key in ENDPOINT_LINK_LEVELS["maximal"]:
         if key in endpoint_link:
             resolved[key] = endpoint_link[key]
+    for key, default in ENDPOINT_LINK_SHARED_DEFAULTS.items():
+        resolved[key] = endpoint_link.get(key, default)
     return resolved
 
 
@@ -825,10 +866,14 @@ def _detect_peak_sets(
     frames_per_period: Optional[float],
 ) -> List[Dict[str, Any]]:
     specs = _peak_polarity_specs(peaks_cfg.get("event_polarity", peaks_cfg.get("polarity", "both")))
+    base_signal = np.asarray(residual, dtype=float)
+    smoothing_sigma = float(peaks_cfg.get("smoothing_sigma_rows", 0.0) or 0.0)
+    if smoothing_sigma > 0 and base_signal.size > 1:
+        base_signal = gaussian_filter1d(base_signal, sigma=smoothing_sigma, mode="nearest")
     out: List[Dict[str, Any]] = []
     for spec in specs:
         sign = int(spec["sign"])
-        signal = np.asarray(residual, dtype=float) * float(sign)
+        signal = base_signal * float(sign)
         peaks_idx, peak_props = _detect_peaks(signal, peaks_cfg, frames_per_period)
         out.append({
             **spec,
