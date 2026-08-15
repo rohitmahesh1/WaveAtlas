@@ -12,6 +12,7 @@ from scipy.signal import find_peaks
 from skimage.transform import probabilistic_hough_line
 
 from .cancel import CancellationRequested
+from .heatmap_values import load_heatmap_values, normalize_heatmap_values
 
 
 CancelCallback = Optional[Callable[[], bool]]
@@ -74,12 +75,19 @@ def run_ripple_extraction(
         (((config.get("analysis") or {}).get("ripple") or {}).get("extraction") or {})
     )
     _progress(progress_cb, "load_values", {})
-    values, value_source = _load_values(
+    values, value_source = load_heatmap_values(
         heatmap_path=heatmap_path,
         value_bytes=heatmap_value_bytes,
         value_meta=heatmap_value_meta or {},
     )
-    normalized = _normalize_values(values, extraction_cfg)
+    bounds = extraction_cfg.get("normalize_percentiles", [1.0, 99.0])
+    if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
+        bounds = [1.0, 99.0]
+    normalized = normalize_heatmap_values(
+        values,
+        percentiles=bounds,
+        context="Ripple extraction",
+    )
     height, width = normalized.shape
 
     min_slope = float(extraction_cfg.get("min_abs_slope", 0.22))
@@ -310,48 +318,6 @@ def _resolve_scales(value: Any) -> List[Dict[str, float]]:
         if sigma > 0 and prominence > 0:
             scales.append({"spatial_sigma_px": sigma, "prominence": prominence})
     return scales or [dict(item) for item in DEFAULT_SCALES]
-
-
-def _load_values(
-    *,
-    heatmap_path: Path,
-    value_bytes: Optional[bytes],
-    value_meta: Dict[str, Any],
-) -> Tuple[np.ndarray, str]:
-    image = cv2.imread(str(heatmap_path), cv2.IMREAD_GRAYSCALE)
-    if image is None:
-        raise RuntimeError(f"Unable to read heatmap image: {heatmap_path}")
-    if value_bytes is None:
-        return image.astype(np.float32) / 255.0, "rendered_heatmap_luminance"
-
-    rows = int(value_meta.get("source_rows") or value_meta.get("rows") or image.shape[0])
-    cols = int(value_meta.get("source_cols") or value_meta.get("cols") or image.shape[1])
-    values = np.frombuffer(value_bytes, dtype="<f4")
-    if values.size != rows * cols:
-        raise RuntimeError(
-            f"Continuous heatmap value count mismatch: got {values.size}, expected {rows * cols}"
-        )
-    values = values.reshape((rows, cols)).copy()
-    origin = str(value_meta.get("coord_origin", value_meta.get("origin", "upper"))).lower()
-    row_order = str(value_meta.get("value_row_order", "top_to_bottom_source")).lower()
-    if origin == "lower" and row_order == "top_to_bottom_source":
-        values = np.flipud(values)
-    if values.shape != image.shape:
-        values = cv2.resize(values, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_LINEAR)
-    return values.astype(np.float32, copy=False), "continuous_table_values"
-
-
-def _normalize_values(values: np.ndarray, cfg: Dict[str, Any]) -> np.ndarray:
-    finite = values[np.isfinite(values)]
-    if finite.size == 0:
-        raise RuntimeError("Ripple extraction received no finite heatmap values")
-    bounds = cfg.get("normalize_percentiles", [1.0, 99.0])
-    if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
-        bounds = [1.0, 99.0]
-    low, high = np.percentile(finite, [float(bounds[0]), float(bounds[1])])
-    span = max(float(high - low), 1e-6)
-    normalized = np.nan_to_num((values - low) / span, nan=0.0, posinf=1.0, neginf=0.0)
-    return np.clip(normalized, 0.0, 1.0).astype(np.float32)
 
 
 def _make_candidates(
