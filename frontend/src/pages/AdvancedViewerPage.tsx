@@ -642,7 +642,7 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
             totalCount={tracks.length}
             onCancel={cancelCurrentJob}
             cancelDisabled={!jobId || ["completed", "failed", "cancelled"].includes(status)}
-            onDownloadWaves={jobId && analysisMode === "standard" ? () => downloadWaves(jobId) : undefined}
+            onDownloadWaves={jobId && analysisMode !== "ripple_family" ? () => downloadWaves(jobId) : undefined}
             onDownloadRippleTracks={jobId && analysisMode === "ripple_family" ? () => downloadRipple(jobId, "tracks") : undefined}
             onDownloadRippleIntervals={jobId && analysisMode === "ripple_family" ? () => downloadRipple(jobId, "intervals") : undefined}
             onDownloadRippleFamilies={jobId && analysisMode === "ripple_family" ? () => downloadRipple(jobId, "families") : undefined}
@@ -685,6 +685,7 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
               trackDetailError={trackDetailError}
               overlayColor={overlayColor}
               baseImageUrl={baseImageUrl}
+              frameCoordinateHeight={baseImageInfo?.outputHeight ?? baseImageInfo?.sourceRows}
               debugImageUrl={debugImageUrl}
               debugOpacity={debugOpacity}
               onDownloadTrackDetail={downloadSelectedTrack}
