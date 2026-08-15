@@ -22,6 +22,7 @@ export function SelectionPanel(props: {
   trackDetailError: string | null;
   overlayColor?: string;
   baseImageUrl?: string | null;
+  frameCoordinateHeight?: number | null;
   debugImageUrl?: string | null;
   debugOpacity?: number;
   onDownloadTrackDetail?: () => void;
@@ -38,6 +39,7 @@ export function SelectionPanel(props: {
     trackDetailError,
     overlayColor,
     baseImageUrl,
+    frameCoordinateHeight,
     debugImageUrl,
     debugOpacity,
     onDownloadTrackDetail,
@@ -48,6 +50,7 @@ export function SelectionPanel(props: {
     selectedTrack && trackDetail && trackDetail.track_index === selectedTrack.track_index
   );
   const rippleMode = selectedTrack?.metrics?.analysis_mode === "ripple_family";
+  const largeWaveMode = selectedTrack?.metrics?.analysis_mode === "large_wave";
   const familyHighlighted = rippleMode && selectionScope === "family" && selectedFamilySummary;
   const selectedVelocity = selectedTrack?.metrics?.velocity_px_per_s ?? null;
   const selectedSpeed = selectedTrack?.metrics?.speed_px_per_s ?? (
@@ -213,7 +216,7 @@ export function SelectionPanel(props: {
                     <div className="meta-value">{selectedTrack.metrics?.num_peaks ?? 0}</div>
                   </div>
                   <div>
-                    Mean amplitude
+                    Amplitude
                     <div className="meta-value">
                       {selectedTrack.metrics?.mean_amplitude != null
                         ? selectedTrack.metrics.mean_amplitude.toFixed(2)
@@ -221,7 +224,7 @@ export function SelectionPanel(props: {
                     </div>
                   </div>
                   <div>
-                    Dominant freq
+                    Frequency
                     <div className="meta-value">
                       {selectedTrack.metrics?.dominant_frequency != null
                         ? selectedTrack.metrics.dominant_frequency.toFixed(2)
@@ -234,6 +237,16 @@ export function SelectionPanel(props: {
                       {selectedTrack.metrics?.period != null ? selectedTrack.metrics.period.toFixed(2) : "—"}
                     </div>
                   </div>
+                  {largeWaveMode ? (
+                    <div>
+                      Recurrence freq
+                      <div className="meta-value">
+                        {selectedTrack.metrics?.large_wave_recurrence_frequency_hz != null
+                          ? selectedTrack.metrics.large_wave_recurrence_frequency_hz.toFixed(2)
+                          : "—"}
+                      </div>
+                    </div>
+                  ) : null}
                 </>
               )}
             </div>
@@ -246,6 +259,7 @@ export function SelectionPanel(props: {
                   detail={trackDetail}
                   overlayColor={overlayColor}
                   baseImageUrl={baseImageUrl}
+                  frameCoordinateHeight={frameCoordinateHeight}
                   debugImageUrl={debugImageUrl}
                   debugOpacity={debugOpacity}
                 />
