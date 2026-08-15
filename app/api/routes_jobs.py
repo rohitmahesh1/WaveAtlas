@@ -43,9 +43,14 @@ from ..models import (
     Wave,
 )
 from ..pipeline import PipelineSettings, run_job
-from ..analysis_mode import RIPPLE_ANALYSIS_MODE, resolve_analysis_mode
+from ..analysis_mode import LARGE_WAVE_ANALYSIS_MODE, RIPPLE_ANALYSIS_MODE, resolve_analysis_mode
 from ..time_utils import utc_now_iso
 from ..extract_core import PEAK_POLARITY_ALIASES, _suppress_cross_polarity_peak_sets
+from ..large_wave_fit import (
+    fit_asymmetric_basin_residual,
+    fit_large_wave,
+    large_wave_basin_window,
+)
 from ..signal.detrend import fit_baseline_ransac
 from ..signal.peaks import detect_peaks, detect_peaks_adaptive, ensure_minimum_peaks
 from ..signal.period import estimate_dominant_frequency, frequency_to_period, resolve_positive_frequency
@@ -337,6 +342,129 @@ def _detect_peak_sets_for_detail(
             "peak_props": peak_props,
         })
     return _suppress_cross_polarity_peak_sets(out, peaks_cfg)
+
+
+def _large_wave_peak_events_for_detail(
+    waves: Iterable[Wave],
+    residual: np.ndarray,
+    *,
+    width_multiplier: float = 1.0,
+    boundary_smoothing_sigma_rows: float = 4.0,
+) -> List[Dict[str, Any]]:
+    events: List[Dict[str, Any]] = []
+    for wave in waves:
+        metrics = dict(wave.metrics or {})
+        try:
+            peak_i = int(metrics.get("peak_i"))
+        except (TypeError, ValueError):
+            continue
+        if peak_i < 0 or peak_i >= len(residual):
+            continue
+        event_kind = "min" if str(metrics.get("event_kind", wave.event_kind)) == "min" else "max"
+        sign = -1 if event_kind == "min" else 1
+        signal = np.asarray(residual, dtype=float) * float(sign)
+        try:
+            event_amplitude = float(metrics.get("amplitude_px"))
+        except (TypeError, ValueError):
+            event_amplitude = float(signal[peak_i])
+        if not math.isfinite(event_amplitude):
+            event_amplitude = float(signal[peak_i])
+        try:
+            fit_window_frames = float(
+                metrics.get("large_wave_width_frames", metrics.get("bulge_width_frames"))
+            )
+        except (TypeError, ValueError):
+            fit_window_frames = float("nan")
+        stored_lo = metrics.get("fit_window_lo")
+        stored_hi = metrics.get("fit_window_hi")
+        try:
+            basin_window = (int(stored_lo), int(stored_hi))
+            if not (0 <= basin_window[0] < peak_i < basin_window[1] < len(residual)):
+                basin_window = None
+        except (TypeError, ValueError):
+            basin_window = None
+        if basin_window is None:
+            basin_window = _large_wave_basin_window(
+                residual,
+                center_idx=peak_i,
+                minimum_width_frames=(
+                    fit_window_frames if math.isfinite(fit_window_frames) else None
+                ),
+                width_multiplier=width_multiplier,
+                smoothing_sigma_rows=boundary_smoothing_sigma_rows,
+            )
+        events.append({
+            "peak_i": peak_i,
+            "event_kind": event_kind,
+            "event_polarity": "minima" if event_kind == "min" else "maxima",
+            "fit_signal_sign": sign,
+            "event_amplitude": event_amplitude,
+            "fit_window_frames": (
+                float(basin_window[1] - basin_window[0])
+                if basin_window is not None
+                else fit_window_frames if math.isfinite(fit_window_frames) else None
+            ),
+            "fit_window_lo": basin_window[0] if basin_window is not None else None,
+            "fit_window_hi": basin_window[1] if basin_window is not None else None,
+            "fit_window_source": (
+                metrics.get("fit_window_source")
+                if basin_window is not None and stored_lo is not None and stored_hi is not None
+                else "large_wave_baseline_basin" if basin_window is not None else None
+            ),
+            "wave_index": wave.wave_index,
+        })
+    events.sort(key=lambda event: (int(event["peak_i"]), str(event["event_kind"])))
+    return events
+
+
+def _large_wave_basin_window(
+    residual: np.ndarray,
+    *,
+    center_idx: int,
+    minimum_width_frames: Optional[float],
+    width_multiplier: float,
+    smoothing_sigma_rows: float,
+) -> Optional[tuple[int, int]]:
+    return large_wave_basin_window(
+        residual,
+        center_idx=center_idx,
+        minimum_width_frames=minimum_width_frames,
+        width_multiplier=width_multiplier,
+        smoothing_sigma_rows=smoothing_sigma_rows,
+    )
+
+
+def _large_wave_fit_frequency(
+    *,
+    width_frames: Any,
+    sampling_rate: float,
+    period_frac: float,
+    width_multiplier: float,
+) -> Optional[float]:
+    try:
+        width = float(width_frames) * max(0.1, float(width_multiplier))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(width) or width <= 0 or sampling_rate <= 0 or period_frac <= 0:
+        return None
+    return float(period_frac) * float(sampling_rate) / width
+
+
+def _fit_anchored_wave_basin(
+    residual: np.ndarray,
+    t: np.ndarray,
+    center_idx: int,
+    *,
+    window_lo: int,
+    window_hi: int,
+) -> Optional[tuple[np.ndarray, Dict[str, Any]]]:
+    return fit_asymmetric_basin_residual(
+        residual,
+        t,
+        center_idx,
+        window_lo=window_lo,
+        window_hi=window_hi,
+    )
 
 
 def _fit_anchored_sine(
@@ -877,11 +1005,12 @@ def get_track_detail(
     config = _effective_pipeline_config(job)
     order = _track_xy_order_from_config(config)
     frame, position = _load_track_frame_position_from_bytes(track_bytes, order=order)
+    analysis_mode = resolve_analysis_mode(config)
+    track_model = session.exec(
+        select(Track).where(Track.job_id == job_id, Track.track_index == int(track_index))
+    ).first()
 
-    if resolve_analysis_mode(config) == RIPPLE_ANALYSIS_MODE:
-        track_model = session.exec(
-            select(Track).where(Track.job_id == job_id, Track.track_index == int(track_index))
-        ).first()
+    if analysis_mode == RIPPLE_ANALYSIS_MODE:
         metrics = dict((track_model.metrics if track_model else {}) or {})
         slope = float(metrics.get("slope_px_per_frame", 0.0) or 0.0)
         intercept = float(metrics.get("line_intercept_px", position[0] if position.size else 0.0) or 0.0)
@@ -934,22 +1063,50 @@ def get_track_detail(
     period = float(frequency_to_period(freq)) if (isinstance(freq, float) and math.isfinite(freq) and freq > 0) else float("nan")
 
     frames_per_period = (sampling_rate / float(freq)) if (sampling_rate and math.isfinite(freq) and freq > 0) else None
-    peak_sets = _detect_peak_sets_for_detail(residual, peaks_cfg, frames_per_period)
+    large_wave_event_cfg = (
+        (((config.get("analysis") or {}).get("large_wave") or {}).get("events") or {})
+    )
     peak_events: List[Dict[str, Any]] = []
-    for peak_set in peak_sets:
-        signal = np.asarray(peak_set["signal"], dtype=float)
-        sign = int(peak_set["sign"])
-        for peak_i_raw in np.asarray(peak_set["peaks_idx"], dtype=int).tolist():
-            peak_i = int(peak_i_raw)
-            if peak_i < 0 or peak_i >= len(frame):
-                continue
-            peak_events.append({
-                "peak_i": peak_i,
-                "event_kind": str(peak_set["event_kind"]),
-                "event_polarity": str(peak_set["event_polarity"]),
-                "fit_signal_sign": sign,
-                "event_amplitude": float(signal[peak_i]),
-            })
+    if analysis_mode == LARGE_WAVE_ANALYSIS_MODE and track_model is not None:
+        large_wave_rows = session.exec(
+            select(Wave)
+            .where(Wave.job_id == job_id, Wave.track_id == track_model.id)
+            .order_by(Wave.wave_index.asc())
+        ).all()
+        peak_events = _large_wave_peak_events_for_detail(
+            large_wave_rows,
+            residual,
+            width_multiplier=float(
+                large_wave_event_cfg.get("fit_window_width_multiplier", 1.0)
+            ),
+            boundary_smoothing_sigma_rows=float(
+                large_wave_event_cfg.get("fit_boundary_smoothing_sigma_rows", 4.0)
+            ),
+        )
+        track_metrics = dict(track_model.metrics or {})
+        try:
+            stored_frequency = float(track_metrics.get("large_wave_frequency_hz"))
+        except (TypeError, ValueError):
+            stored_frequency = float("nan")
+        if math.isfinite(stored_frequency) and stored_frequency > 0:
+            freq = stored_frequency
+            period = float(frequency_to_period(freq))
+    if not peak_events:
+        peak_sets = _detect_peak_sets_for_detail(residual, peaks_cfg, frames_per_period)
+        for peak_set in peak_sets:
+            signal = np.asarray(peak_set["signal"], dtype=float)
+            sign = int(peak_set["sign"])
+            for peak_i_raw in np.asarray(peak_set["peaks_idx"], dtype=int).tolist():
+                peak_i = int(peak_i_raw)
+                if peak_i < 0 or peak_i >= len(frame):
+                    continue
+                peak_events.append({
+                    "peak_i": peak_i,
+                    "event_kind": str(peak_set["event_kind"]),
+                    "event_polarity": str(peak_set["event_polarity"]),
+                    "fit_signal_sign": sign,
+                    "event_amplitude": float(signal[peak_i]),
+                })
     peak_events.sort(key=lambda event: (int(event["peak_i"]), 0 if event["event_kind"] == "max" else 1))
     peaks_idx = np.asarray([int(event["peak_i"]) for event in peak_events], dtype=int)
 
@@ -985,6 +1142,10 @@ def get_track_detail(
             "event_kind": str(event["event_kind"]),
             "event_polarity": str(event["event_polarity"]),
             "fit_signal_sign": int(event["fit_signal_sign"]),
+            "fit_window_frames": event.get("fit_window_frames"),
+            "fit_window_lo": event.get("fit_window_lo"),
+            "fit_window_hi": event.get("fit_window_hi"),
+            "fit_window_source": event.get("fit_window_source"),
             "in_slice": in_slice,
             "slice_index": int(peak_i - lo) if in_slice else None,
             "is_strongest": bool(strongest_peak_idx is not None and int(peak_i) == strongest_peak_idx),
@@ -1000,17 +1161,59 @@ def get_track_detail(
             peak_i = int(point["peak_i"])
             sign = int(point.get("fit_signal_sign", 1))
             fit_signal = residual.astype(float, copy=False) * float(sign)
-            fit_result = _fit_anchored_sine(
-                fit_signal,
-                frame,
-                fit_freq,
-                peak_i,
-                sampling_rate=sampling_rate,
-                period_frac=period_frac,
-            )
+            fit_result = None
+            shared_large_fit = None
+            if (
+                analysis_mode == LARGE_WAVE_ANALYSIS_MODE
+                and point.get("fit_window_lo") is not None
+                and point.get("fit_window_hi") is not None
+            ):
+                shared_large_fit = fit_large_wave(
+                    frame=frame,
+                    position=position,
+                    global_baseline=baseline,
+                    center_idx=peak_i,
+                    event_kind=str(point.get("event_kind", "max")),
+                    sampling_rate=sampling_rate,
+                    endpoint_anchor_rows=int(large_wave_event_cfg.get("endpoint_anchor_rows", 7)),
+                    curvature_half_window_rows=int(
+                        large_wave_event_cfg.get("curvature_half_window_rows", 8)
+                    ),
+                    max_period_boundary_error_fraction=float(
+                        large_wave_event_cfg.get("max_period_boundary_error_fraction", 0.5)
+                    ),
+                    fixed_window=(int(point["fit_window_lo"]), int(point["fit_window_hi"])),
+                    refine_apex=False,
+                )
+            if shared_large_fit is None:
+                point_fit_freq = fit_freq
+                if analysis_mode == LARGE_WAVE_ANALYSIS_MODE:
+                    width_frequency = _large_wave_fit_frequency(
+                        width_frames=point.get("fit_window_frames"),
+                        sampling_rate=sampling_rate,
+                        period_frac=period_frac,
+                        width_multiplier=1.0,
+                    )
+                    if width_frequency is not None:
+                        point_fit_freq = width_frequency
+                fit_result = _fit_anchored_sine(
+                    fit_signal,
+                    frame,
+                    point_fit_freq,
+                    peak_i,
+                    sampling_rate=sampling_rate,
+                    period_frac=period_frac,
+                )
             regression = dict(point)
             regression["sine_fit"] = None
-            if fit_result is not None:
+            if shared_large_fit is not None:
+                regression.update(shared_large_fit.metrics)
+                regression["fit_window_source"] = point.get("fit_window_source")
+                regression["sine_fit"] = shared_large_fit.fitted_position[lo : hi + 1].tolist()
+                regression["fit_baseline"] = shared_large_fit.baseline[lo : hi + 1].tolist()
+                if strongest_peak_idx is not None and peak_i == strongest_peak_idx:
+                    sine_fit = shared_large_fit.fitted_position
+            elif fit_result is not None:
                 yfit_signed, fit_meta = fit_result
                 yfit_res = yfit_signed * float(sign)
                 full_fit = (baseline + yfit_res).astype(float)
@@ -1019,6 +1222,10 @@ def get_track_detail(
                     sign=sign,
                     original_peak_value=float(residual[peak_i]),
                 ))
+                regression["fit_window_source"] = point.get("fit_window_source")
+                regression["fit_window_width_frames"] = float(
+                    int(fit_meta["fit_window_hi"]) - int(fit_meta["fit_window_lo"])
+                )
                 regression["sine_fit"] = full_fit[lo : hi + 1].tolist()
                 if strongest_peak_idx is not None and peak_i == strongest_peak_idx:
                     sine_fit = full_fit
@@ -1039,6 +1246,7 @@ def get_track_detail(
 
     return {
         "track_index": int(track_index),
+        "analysis_mode": analysis_mode,
         "coords": {"poly_format": "[x, y]", "x_name": "time_index", "y_name": "position_px"},
         "time_index": frame_view.tolist(),
         "position": position[lo : hi + 1].tolist(),
@@ -1057,7 +1265,11 @@ def get_track_detail(
             "num_peaks": int(len(peaks_idx)),
             "num_maxima": int(sum(1 for event in peak_events if event["event_kind"] == "max")),
             "num_minima": int(sum(1 for event in peak_events if event["event_kind"] == "min")),
-            "event_polarity": _normalize_detail_event_polarity(peaks_cfg.get("event_polarity", peaks_cfg.get("polarity", "both"))),
+            "event_polarity": (
+                "both"
+                if analysis_mode == LARGE_WAVE_ANALYSIS_MODE
+                else _normalize_detail_event_polarity(peaks_cfg.get("event_polarity", peaks_cfg.get("polarity", "both")))
+            ),
             "mean_amplitude": mean_amp if math.isfinite(mean_amp) else None,
         },
     }
@@ -1139,6 +1351,7 @@ def export_waves_csv(
     config_event_polarity = peaks_cfg.get("event_polarity", peaks_cfg.get("polarity", ""))
     endpoint_link_enabled = endpoint_cfg.get("enabled", "")
     endpoint_link_level = endpoint_cfg.get("level", "")
+    analysis_mode = resolve_analysis_mode(job_config)
 
     q = select(Wave).where(Wave.job_id == job_id).order_by(Wave.created_at.asc())
     rows = session.exec(q).all()
@@ -1152,9 +1365,11 @@ def export_waves_csv(
         "Period In Frames (Frame 1- Frame 2)",
         "Period in Seconds",
         "Frequency (Hertz)",
+        "Period Source",
         "Pixel Position 1 (x-axis)",
         "Pixel Position 2 (x-axis)",
         "Amplitude (Pixels)",
+        "Signed Amplitude (Pixels)",
         "Position 1 (x-axis)",
         "Position 2 (x-axis)",
         "Frame 1 (y-axis)",
@@ -1200,6 +1415,16 @@ def export_waves_csv(
         "Config Event Polarity",
         "Endpoint Linking Enabled",
         "Endpoint Linking Level",
+        "Fit Start Frame Raw",
+        "Fit End Frame Raw",
+        "Fit Duration (frames)",
+        "Fit Duration (seconds)",
+        "Period Asymmetry",
+        "Period Boundary Error (fraction)",
+        "Period Estimate Valid",
+        "Recurrence Period (frames)",
+        "Recurrence Period (seconds)",
+        "Recurrence Frequency (Hz)",
         "Wave Type",
         "Type Score",
     ]
@@ -1229,6 +1454,18 @@ def export_waves_csv(
             pos1 = metric(r, "pos1_px")
             pos2 = metric(r, "pos2_px")
             freq = metric(r, "frequency_hz", r.frequency)
+            signed_amplitude = metric(
+                r,
+                "signed_amplitude_px",
+                metric(r, "amplitude_px", r.amplitude),
+            )
+            try:
+                amplitude = abs(float(signed_amplitude))
+            except (TypeError, ValueError):
+                amplitude = signed_amplitude
+            period_source = metric(r, "period_source")
+            if period_source == "" and analysis_mode != LARGE_WAVE_ANALYSIS_MODE:
+                period_source = "sine_fit"
             w.writerow([
                 r.id,
                 r.track_id or "",
@@ -1238,9 +1475,11 @@ def export_waves_csv(
                 metric(r, "period_frames"),
                 metric(r, "period_s", r.period),
                 freq,
+                period_source,
                 pos1,
                 pos2,
-                metric(r, "amplitude_px", r.amplitude),
+                amplitude,
+                signed_amplitude,
                 pos1,
                 pos2,
                 frame1,
@@ -1286,6 +1525,16 @@ def export_waves_csv(
                 config_event_polarity,
                 endpoint_link_enabled,
                 endpoint_link_level,
+                metric(r, "fit_start_frame"),
+                metric(r, "fit_end_frame"),
+                metric(r, "fit_duration_frames"),
+                metric(r, "fit_duration_s"),
+                metric(r, "period_asymmetry"),
+                metric(r, "period_boundary_error_fraction"),
+                metric(r, "period_estimate_valid"),
+                metric(r, "recurrence_period_frames"),
+                metric(r, "recurrence_period_s"),
+                metric(r, "recurrence_frequency_hz"),
                 metric(r, "wave_type"),
                 metric(r, "type_score"),
             ])
