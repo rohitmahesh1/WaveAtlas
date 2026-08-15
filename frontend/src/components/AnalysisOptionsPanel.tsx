@@ -3,6 +3,7 @@ import type { AnalysisMode } from "../utils/analysisOptions";
 const ANALYSIS_OPTIONS: { value: AnalysisMode; label: string }[] = [
   { value: "standard", label: "Standard" },
   { value: "ripple_family", label: "Ripple waves" },
+  { value: "large_wave", label: "Large waves" },
 ];
 
 export function AnalysisOptionsPanel(props: {
@@ -16,7 +17,7 @@ export function AnalysisOptionsPanel(props: {
       <div className="run-options-title">Analysis</div>
       <fieldset className="option-group">
         <legend>Method</legend>
-        <div className="segmented-control two-options">
+        <div className="segmented-control">
           {ANALYSIS_OPTIONS.map((option) => (
             <button
               key={option.value}
