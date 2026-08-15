@@ -16,7 +16,9 @@ from .models import ArtifactKind, EventType, JobStatus
 from .io.image_to_heatmap import image_to_heatmap_bytes
 from .io.table_to_heatmap import table_to_heatmap_payload
 from .extract_core import select_kymo_runner, process_track
-from .analysis_mode import RIPPLE_ANALYSIS_MODE, resolve_analysis_mode
+from .analysis_mode import LARGE_WAVE_ANALYSIS_MODE, RIPPLE_ANALYSIS_MODE, resolve_analysis_mode
+from .large_wave_analysis import analyze_large_wave_events, build_large_wave_track_config
+from .large_wave_extraction import run_large_wave_extraction
 from .ripple_analysis import analyze_ripple_tracks
 from .ripple_extraction import run_ripple_extraction
 from .time_utils import utc_now, utc_now_iso
@@ -224,6 +226,30 @@ def run_job(
                     meta={"image_id": image_id, "overlay": overlay_name},
                 )
 
+        endpoint_links = dbg / "endpoint_links.json"
+        if endpoint_links.exists():
+            check_cancel("cancel_requested_during_debug_overlays")
+            publish_file(
+                kind=ArtifactKind.debug_text,
+                filename=f"{image_id}_endpoint_links.json",
+                local_path=endpoint_links,
+                content_type="application/json",
+                label=f"{image_id}:endpoint_links",
+                meta={"image_id": image_id, "debug": "endpoint_links"},
+            )
+
+        large_wave_ridges = dbg / "large_wave_ridges.json"
+        if large_wave_ridges.exists():
+            check_cancel("cancel_requested_during_debug_overlays")
+            publish_file(
+                kind=ArtifactKind.debug_text,
+                filename=f"{image_id}_large_wave_ridges.json",
+                local_path=large_wave_ridges,
+                content_type="application/json",
+                label=f"{image_id}:large_wave_ridges",
+                meta={"image_id": image_id, "debug": "large_wave_ridges"},
+            )
+
         ot = base_dir / "overlay_tracks.png"
         if ot.exists():
             check_cancel("cancel_requested_during_debug_overlays")
@@ -390,7 +416,7 @@ def run_job(
 
         check_cancel("cancel_requested_after_heatmap")
 
-        if analysis_mode == RIPPLE_ANALYSIS_MODE and heatmap_value_bytes is None:
+        if analysis_mode in {RIPPLE_ANALYSIS_MODE, LARGE_WAVE_ANALYSIS_MODE} and heatmap_value_bytes is None:
             cached_values, cached_meta = load_heatmap_values_artifact()
             if cached_values is not None:
                 heatmap_value_bytes = cached_values
@@ -486,11 +512,23 @@ def run_job(
             image_id: str
             base_dir: Path
             ripple_extraction_cfg = (((config.get("analysis") or {}).get("ripple") or {}).get("extraction") or {})
+            large_wave_extraction_cfg = (
+                (((config.get("analysis") or {}).get("large_wave") or {}).get("extraction") or {})
+            )
             use_ripple_extractor = (
                 analysis_mode == RIPPLE_ANALYSIS_MODE
                 and bool(ripple_extraction_cfg.get("enabled", True))
             )
-            extractor_name = "ripple_multiscale_hough" if use_ripple_extractor else "kymobutler"
+            use_large_wave_extractor = (
+                analysis_mode == LARGE_WAVE_ANALYSIS_MODE
+                and bool(large_wave_extraction_cfg.get("enabled", True))
+            )
+            if use_ripple_extractor:
+                extractor_name = "ripple_multiscale_hough"
+            elif use_large_wave_extractor:
+                extractor_name = "large_wave_multiscale_ensemble"
+            else:
+                extractor_name = "kymobutler"
             if use_ripple_extractor:
                 user_log("Extracting tracks", stage="ripple_extract_start")
                 set_progress("ripple_extract_start", extra={"detail": "Extracting tracks"})
@@ -530,6 +568,45 @@ def run_job(
                 base_dir = ripple_out.base_dir
                 track_paths = list(ripple_out.track_paths)
                 publish_ripple_manifest(image_id, base_dir)
+            elif use_large_wave_extractor:
+                user_log("Extracting tracks", stage="kymo_start")
+                set_progress("kymo_start", extra={"detail": "Extracting tracks"})
+                check_cancel("cancel_requested_before_large_wave_extraction")
+                large_wave_stage_map = {
+                    "load_values": ("load_image", "Loading heatmap"),
+                    "smoothing": ("segmenting", "Segmenting heatmap"),
+                    "tracing": ("tracking", "Tracing tracks"),
+                    "tracing_cusps": ("tracking", "Tracing tracks"),
+                    "bridging": ("endpoint_linking", "Bridging track gaps"),
+                    "deduping": ("deduping", "Removing duplicates"),
+                    "saving": ("saving", "Saving tracks"),
+                }
+                last_large_wave_extract_stage: Optional[str] = None
+
+                def large_wave_extract_progress(stage: str, data: Dict[str, Any]) -> None:
+                    nonlocal last_large_wave_extract_stage
+                    mapped_stage, label = large_wave_stage_map.get(stage, (stage, stage))
+                    extra = dict(data) if data else {}
+                    if stage == "load_values" and heatmap_value_bytes is not None:
+                        extra["value_source"] = "base_heatmap_values"
+                    set_progress(f"kymo_{mapped_stage}", extra=extra or None)
+                    if mapped_stage != last_large_wave_extract_stage:
+                        user_log(label, stage=f"kymo_{mapped_stage}")
+                        last_large_wave_extract_stage = mapped_stage
+
+                large_wave_out = run_large_wave_extraction(
+                    heatmap_path=heatmap_path,
+                    scratch_dir=scratch_dir,
+                    config=config,
+                    heatmap_value_bytes=heatmap_value_bytes,
+                    heatmap_value_meta=heatmap_value_meta,
+                    progress_cb=large_wave_extract_progress,
+                    cancel_cb=cancelled,
+                )
+                check_cancel("cancel_requested_after_large_wave_extraction")
+                image_id = large_wave_out.image_id
+                base_dir = large_wave_out.base_dir
+                track_paths = list(large_wave_out.track_paths)
             else:
                 user_log("Extracting tracks (KymoButler)", stage="kymo_start")
                 set_progress("kymo_start", extra={"detail": "Extracting tracks"})
@@ -543,6 +620,8 @@ def run_job(
                     "skeletonizing": "Skeletonizing tracks",
                     "tracking": "Tracing tracks",
                     "refining": "Refining tracks",
+                    "endpoint_linking": "Bridging track gaps",
+                    "endpoint_linking_done": "Track gaps bridged",
                     "deduping": "Removing duplicates",
                     "scaling": "Scaling to original size",
                     "saving": "Saving tracks",
@@ -766,7 +845,7 @@ def run_job(
             return
 
         # -----------------------------
-        # Standard tracks -> DB rows + overlay events
+        # Standard and large-wave tracks -> DB rows + overlay events
         # -----------------------------
         check_cancel("cancel_requested_before_processing_tracks")
         user_log("Analyzing tracks", stage="processing_tracks")
@@ -787,6 +866,10 @@ def run_job(
         last_processed_for_rate = processed
         ema_rate_tps: Optional[float] = None
         ema_alpha = 0.2
+        large_wave_mode = analysis_mode == LARGE_WAVE_ANALYSIS_MODE
+        track_analysis_config = build_large_wave_track_config(config) if large_wave_mode else config
+        large_wave_track_rows: List[Dict[str, Any]] = []
+        large_wave_overlay_events: List[Dict[str, Any]] = []
 
         for track_index, track_path in enumerate(track_paths):
             check_cancel("cancel_requested_during_processing_tracks")
@@ -826,10 +909,28 @@ def run_job(
                 job_id=job_id,
                 track_index=track_index,
                 track_path=track_path,
-                config=config,
+                config=track_analysis_config,
                 heatmap_meta=heatmap_meta,
             )
             check_cancel("cancel_requested_after_track_analysis")
+
+            if large_wave_mode:
+                track_metrics = track_row.get("metrics") if isinstance(track_row.get("metrics"), dict) else {}
+                track_metrics["analysis_mode"] = LARGE_WAVE_ANALYSIS_MODE
+                track_row["metrics"] = track_metrics
+                overlay_track["metrics"] = {
+                    "analysis_mode": LARGE_WAVE_ANALYSIS_MODE,
+                    "mean_amplitude": track_row.get("amplitude"),
+                    "dominant_frequency": track_row.get("frequency"),
+                    "period": track_metrics.get("period"),
+                    "num_peaks": track_metrics.get("num_peaks"),
+                }
+                for row in wave_rows or []:
+                    metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+                    metrics["track_index"] = int(track_index)
+                    row["metrics"] = metrics
+                large_wave_track_rows.append(track_row)
+                large_wave_overlay_events.append(overlay_track)
 
             # print("Processed track #", track_row, " Wave", wave_rows)
 
@@ -865,7 +966,7 @@ def run_job(
 
             if settings.db_batch_size > 0 and (new_processed % settings.db_batch_size == 0):
                 check_cancel("cancel_requested_before_batch_write")
-                if waves_buf:
+                if waves_buf and not large_wave_mode:
                     job_store.insert_waves_batch(job_id, waves_buf)
                     job_store.bump_counts(job_id, waves_done_delta=len(waves_buf))
                     waves_buf.clear()
@@ -899,6 +1000,98 @@ def run_job(
                 set_progress("processing_tracks", processed=processed, total=len(track_paths), extra=extra)
                 last_progress_ts = now
 
+        large_wave_result = None
+        if large_wave_mode:
+            last_large_wave_stage: Optional[str] = None
+            large_wave_stage_labels = {
+                "large_wave_peak_measurement": "Measuring broad peaks",
+                "large_wave_event_grouping": "Grouping large waves",
+            }
+
+            def large_wave_progress(stage: str, processed_count: int, total_count: int) -> None:
+                nonlocal last_large_wave_stage
+                check_cancel("cancel_requested_during_large_wave_analysis")
+                set_progress(stage, processed=processed_count, total=total_count)
+                if stage != last_large_wave_stage:
+                    user_log(large_wave_stage_labels.get(stage, stage), stage=stage)
+                    last_large_wave_stage = stage
+
+            large_wave_result = analyze_large_wave_events(
+                track_paths=track_paths,
+                track_rows=large_wave_track_rows,
+                wave_rows=waves_buf,
+                config=config,
+                cancel_cb=cancelled,
+                progress_cb=large_wave_progress,
+            )
+            waves_buf = list(large_wave_result.wave_rows)
+
+            for track_row, overlay_track in zip(large_wave_track_rows, large_wave_overlay_events):
+                track_index = int(track_row["track_index"])
+                summary = large_wave_result.track_summaries.get(track_index, {})
+                event_frequency = summary.get("large_wave_frequency_hz")
+                overlay_track["metrics"] = {
+                    "analysis_mode": LARGE_WAVE_ANALYSIS_MODE,
+                    "mean_amplitude": summary.get("mean_large_wave_amplitude_px"),
+                    "dominant_frequency": event_frequency,
+                    "period": (1.0 / float(event_frequency)) if event_frequency else None,
+                    "recurrence_frequency": summary.get(
+                        "large_wave_recurrence_frequency_hz"
+                    ),
+                    "num_peaks": summary.get("large_wave_measurement_count", 0),
+                    **summary,
+                }
+                overlay_track["peaks"] = [
+                    {
+                        "x": measurement["peak_position_px"],
+                        "y": measurement["peak_frame"],
+                        "amp": measurement["signed_amplitude_px"],
+                    }
+                    for measurement in large_wave_result.measurements
+                    if int(measurement["track_index"]) == track_index
+                ]
+                job_store.upsert_track_by_index(
+                    job_id,
+                    track_index,
+                    processed_at=utc_now(),
+                    amplitude=track_row.get("amplitude"),
+                    frequency=track_row.get("frequency"),
+                    error=track_row.get("error"),
+                    x0=track_row.get("x0"),
+                    y0=track_row.get("y0"),
+                    metrics=track_row.get("metrics") or {},
+                    overlay=track_row.get("overlay") or {},
+                )
+                emit(EventType.overlay_track, overlay_track)
+
+            large_wave_exports = [
+                ("large_wave_tracks", "tracks.csv", large_wave_result.tracks_csv, len(large_wave_track_rows)),
+                (
+                    "large_wave_measurements",
+                    "waves.csv",
+                    large_wave_result.measurements_csv,
+                    len(large_wave_result.measurements),
+                ),
+                ("large_wave_events", "events.csv", large_wave_result.events_csv, len(large_wave_result.events)),
+            ]
+            for label, filename, data, row_count in large_wave_exports:
+                check_cancel("cancel_requested_during_large_wave_export")
+                existing = job_store.list_artifacts(job_id, kind=ArtifactKind.other, label=label, limit=1)
+                if existing:
+                    continue
+                publish_bytes(
+                    kind=ArtifactKind.other,
+                    filename=filename,
+                    data=data,
+                    content_type="text/csv",
+                    label=label,
+                    meta={
+                        "analysis_mode": LARGE_WAVE_ANALYSIS_MODE,
+                        "row_count": row_count,
+                        "filename": filename,
+                    },
+                )
+
         if waves_buf:
             check_cancel("cancel_requested_before_final_batch_write")
             job_store.insert_waves_batch(job_id, waves_buf)
@@ -917,11 +1110,27 @@ def run_job(
             job_store.bump_counts(job_id, tracks_done_delta=batch_new_processed)
 
         check_cancel("cancel_requested_before_completion")
-        set_progress("completed", processed=len(track_paths), total=len(track_paths), extra={"eta_secs": 0.0})
+        completion_extra: Dict[str, Any] = {"eta_secs": 0.0, "analysis_mode": analysis_mode}
+        if large_wave_result is not None:
+            completion_extra.update({
+                "large_wave_events_found": len(large_wave_result.events),
+                "large_wave_measurements_found": len(large_wave_result.measurements),
+            })
+        set_progress("completed", processed=len(track_paths), total=len(track_paths), extra=completion_extra)
 
         user_log("Completed", stage="completed")
         job_store.set_status(job_id, JobStatus.completed, emit_event=True)
-        emit(EventType.done, {"ok": True, "duration_s": (utc_now() - started_at).total_seconds()})
+        done_payload: Dict[str, Any] = {
+            "ok": True,
+            "analysis_mode": analysis_mode,
+            "duration_s": (utc_now() - started_at).total_seconds(),
+        }
+        if large_wave_result is not None:
+            done_payload.update({
+                "large_wave_events_found": len(large_wave_result.events),
+                "large_wave_measurements_found": len(large_wave_result.measurements),
+            })
+        emit(EventType.done, done_payload)
 
     except CancellationRequested as e:
         try:
