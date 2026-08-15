@@ -1,9 +1,12 @@
 # app/modules/kb_adapter.py
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass
+import hashlib
+import json
 from pathlib import Path
 import time
-from typing import Callable, Dict, List, Optional, Tuple, Union, Iterable
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, Iterable
 
 import cv2
 import networkx as nx
@@ -561,6 +564,161 @@ def _row_line_points(y0: int, x0: int, y1: int, x1: int, *, include_ends: bool) 
     return pts
 
 
+def _hermite_bridge_points(
+    y0: int,
+    x0: int,
+    y1: int,
+    x1: int,
+    start_slope: float,
+    end_slope: float,
+    *,
+    include_ends: bool,
+) -> List[Tuple[int, int]]:
+    if y1 <= y0:
+        return []
+    span = float(y1 - y0)
+    start = y0 if include_ends else y0 + 1
+    stop = y1 + 1 if include_ends else y1
+    points: List[Tuple[int, int]] = []
+    for y in range(int(start), int(stop)):
+        t = float(y - y0) / span
+        t2 = t * t
+        t3 = t2 * t
+        h00 = 2.0 * t3 - 3.0 * t2 + 1.0
+        h10 = t3 - 2.0 * t2 + t
+        h01 = -2.0 * t3 + 3.0 * t2
+        h11 = t3 - t2
+        x = (
+            h00 * float(x0)
+            + h10 * span * float(start_slope)
+            + h01 * float(x1)
+            + h11 * span * float(end_slope)
+        )
+        points.append((int(y), int(round(x))))
+    return points
+
+
+def _hermite_max_curvature(
+    y0: int,
+    x0: int,
+    y1: int,
+    x1: int,
+    start_slope: float,
+    end_slope: float,
+) -> float:
+    span = float(y1 - y0)
+    if span <= 0:
+        return float("inf")
+    samples = np.linspace(0.0, 1.0, max(3, int(span) + 1))
+    second = (
+        (12.0 * samples - 6.0) * float(x0)
+        + (6.0 * samples - 4.0) * span * float(start_slope)
+        + (-12.0 * samples + 6.0) * float(x1)
+        + (6.0 * samples - 2.0) * span * float(end_slope)
+    ) / (span * span)
+    return float(np.max(np.abs(second)))
+
+
+def _max_step_dx_per_row(points: List[Tuple[int, int]]) -> float:
+    if len(points) < 2:
+        return 0.0
+    values = []
+    for (y0, x0), (y1, x1) in zip(points, points[1:]):
+        dy = int(y1) - int(y0)
+        if dy <= 0:
+            return float("inf")
+        values.append(abs(float(x1) - float(x0)) / float(dy))
+    return float(max(values, default=0.0))
+
+
+def _split_track_at_discontinuities(track: Track, *, max_step_dx_per_row: float) -> List[Track]:
+    points = enforce_one_point_per_row(sorted(track.points, key=lambda point: (point[0], point[1])))
+    if not points:
+        return []
+    chunks: List[List[Tuple[int, int]]] = [[points[0]]]
+    limit = max(0.0, float(max_step_dx_per_row))
+    for point in points[1:]:
+        previous = chunks[-1][-1]
+        dy = int(point[0]) - int(previous[0])
+        step = abs(float(point[1]) - float(previous[1])) / float(max(1, dy))
+        if dy <= 0 or step > limit:
+            chunks.append([point])
+        else:
+            chunks[-1].append(point)
+    return [type(track)(points=chunk, id=track.id) for chunk in chunks if chunk]
+
+
+def _tracks_geometry_hash(tracks: List[Track]) -> str:
+    digest = hashlib.sha256()
+    for index, track in enumerate(tracks):
+        digest.update(f"{index}:{track.id}|".encode("ascii"))
+        for y, x in track.points:
+            digest.update(f"{int(y)},{int(x)};".encode("ascii"))
+    return digest.hexdigest()
+
+
+@dataclass(frozen=True)
+class EndpointLinkPolicy:
+    mode: str
+    max_slope_delta: float
+    max_projected_dx: float
+    min_abs_slope: float
+    length_weight: float
+    linearity_weight: float
+    curve_length_weight: float
+    curve_tangent_weight: float
+    curve_curvature_weight: float
+    curve_max_turn_deg: float
+    curve_max_curvature: float
+
+
+@dataclass(frozen=True)
+class EndpointLinkConstraints:
+    min_bridge_prob: float
+    max_conflict_fraction: float
+    max_chord_slope_px_per_row: float
+    max_step_dx_px_per_row: float
+
+
+@dataclass
+class EndpointLinkCandidate:
+    score: float
+    source: int
+    target: int
+    kind: str
+    connector_points: List[Tuple[int, int]]
+    overlap_start: Optional[int]
+    overlap_end: Optional[int]
+    gap_rows: int
+    endpoint_dx_px: float
+    chord_slope_px_per_row: float
+    slope_delta: float
+    tangent_turn_deg: float
+    curvature_px_per_row2: float
+    support: float
+    conflict_fraction: float
+    max_step_dx_px_per_row: float
+
+    def manifest_row(self) -> Dict[str, Any]:
+        row = asdict(self)
+        row.pop("connector_points", None)
+        row["connector_point_count"] = len(self.connector_points)
+        return row
+
+
+def _endpoint_link_mode(*, prefer_long_linear: bool, prefer_smooth_curves: bool) -> str:
+    if prefer_smooth_curves:
+        return "smooth_curve"
+    if prefer_long_linear:
+        return "long_linear"
+    return "standard"
+
+
+def _points_within_shape(points: List[Tuple[int, int]], shape: Tuple[int, int]) -> bool:
+    h, w = shape
+    return all(0 <= int(y) < h and 0 <= int(x) < w for y, x in points)
+
+
 def _mean_prob_at_points(prob: np.ndarray, points: List[Tuple[int, int]]) -> float:
     if not points:
         return 1.0
@@ -660,39 +818,94 @@ def link_track_endpoints(
     length_weight: float = 0.25,
     linearity_weight: float = 0.25,
     min_abs_slope: float = 0.05,
+    prefer_smooth_curves: bool = False,
+    curve_length_weight: float = 0.30,
+    curve_tangent_weight: float = 0.25,
+    curve_curvature_weight: float = 0.35,
+    curve_max_turn_deg: float = 120.0,
+    curve_max_curvature: float = 0.35,
+    max_chord_slope_px_per_row: float = 2.0,
+    max_step_dx_px_per_row: float = 4.0,
+    max_manifest_rejections: int = 500,
     cancel_cb: Optional[Callable[[], bool]] = None,
 ) -> Tuple[List[Track], Dict[str, object]]:
     _check_cancel(cancel_cb)
-    if not tracks:
-        return [], {
-            "input_tracks": 0,
+    mode = _endpoint_link_mode(
+        prefer_long_linear=prefer_long_linear,
+        prefer_smooth_curves=prefer_smooth_curves,
+    )
+    policy = EndpointLinkPolicy(
+        mode=mode,
+        max_slope_delta=max(0.0, float(max_slope_delta)),
+        max_projected_dx=max(0.0, float(max_dx)),
+        min_abs_slope=max(0.0, float(min_abs_slope)),
+        length_weight=float(length_weight),
+        linearity_weight=float(linearity_weight),
+        curve_length_weight=float(curve_length_weight),
+        curve_tangent_weight=float(curve_tangent_weight),
+        curve_curvature_weight=float(curve_curvature_weight),
+        curve_max_turn_deg=max(1.0, float(curve_max_turn_deg)),
+        curve_max_curvature=max(1e-6, float(curve_max_curvature)),
+    )
+    constraints = EndpointLinkConstraints(
+        min_bridge_prob=float(min_bridge_prob),
+        max_conflict_fraction=max(0.0, float(max_conflict_fraction)),
+        max_chord_slope_px_per_row=max(0.0, float(max_chord_slope_px_per_row)),
+        max_step_dx_px_per_row=max(0.0, float(max_step_dx_px_per_row)),
+    )
+    input_geometry_hash = _tracks_geometry_hash(tracks)
+
+    def empty_stats(input_count: int) -> Dict[str, object]:
+        manifest = {
+            "schema_version": 1,
+            "mode": mode,
+            "policy": asdict(policy),
+            "constraints": asdict(constraints),
+            "input_geometry_hash": input_geometry_hash,
+            "normalized_geometry_hash": None,
+            "output_geometry_hash": None,
+            "rejection_counts": {},
+            "rejected_examples": [],
+            "admissible_candidates": [],
+            "selected_links": [],
+        }
+        return {
+            "link_mode": mode,
+            "input_tracks": input_count,
+            "normalized_tracks": 0,
+            "input_discontinuity_splits": 0,
             "candidate_links": 0,
             "candidate_gap_links": 0,
             "candidate_overlap_links": 0,
             "accepted_links": 0,
             "accepted_gap_links": 0,
             "accepted_overlap_links": 0,
+            "postcondition_splits": 0,
             "output_tracks": 0,
+            "manifest": manifest,
         }
 
+    if not tracks:
+        return [], empty_stats(0)
+
     norm_tracks: List[Track] = []
+    input_discontinuity_splits = 0
     for t in tracks:
         _check_cancel(cancel_cb)
         if t.points:
-            norm_tracks.append(
-                type(t)(points=enforce_one_point_per_row(sorted(t.points, key=lambda p: (p[0], p[1]))), id=t.id)
+            chunks = _split_track_at_discontinuities(
+                type(t)(
+                    points=enforce_one_point_per_row(sorted(t.points, key=lambda p: (p[0], p[1]))),
+                    id=t.id,
+                ),
+                max_step_dx_per_row=constraints.max_step_dx_px_per_row,
             )
+            input_discontinuity_splits += max(0, len(chunks) - 1)
+            norm_tracks.extend(chunks)
     if not norm_tracks:
-        return [], {
-            "input_tracks": len(tracks),
-            "candidate_links": 0,
-            "candidate_gap_links": 0,
-            "candidate_overlap_links": 0,
-            "accepted_links": 0,
-            "accepted_gap_links": 0,
-            "accepted_overlap_links": 0,
-            "output_tracks": 0,
-        }
+        stats = empty_stats(len(tracks))
+        stats["input_discontinuity_splits"] = input_discontinuity_splits
+        return [], stats
 
     starts_by_row: Dict[int, List[int]] = {}
     starts: List[Tuple[int, int]] = []
@@ -717,15 +930,33 @@ def link_track_endpoints(
         length_scores.append(float(len(t.points)) / float(max(1, max_track_length)))
 
     owners = _build_owner_index(norm_tracks)
-    candidates: List[Tuple[float, int, int, str, List[Tuple[int, int]], Optional[int], Optional[int]]] = []
+    candidates: List[EndpointLinkCandidate] = []
     max_gap = max(0, int(max_gap_rows))
-    max_dx_f = max(0.0, float(max_dx))
-    max_slope_delta_f = max(0.0, float(max_slope_delta))
     min_overlap = max(1, int(min_overlap_rows))
     max_overlap = max(min_overlap, int(max_overlap_rows))
     overlap_dx_tol_f = max(0.0, float(overlap_dx_tol))
     candidate_gap_links = 0
     candidate_overlap_links = 0
+    rejection_counts: Dict[str, int] = {}
+    rejected_examples: List[Dict[str, Any]] = []
+
+    def reject(
+        reason: str,
+        *,
+        source: int,
+        target: int,
+        kind: str,
+        metrics: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+        if len(rejected_examples) < max(0, int(max_manifest_rejections)):
+            rejected_examples.append({
+                "source": int(source),
+                "target": int(target),
+                "kind": kind,
+                "reason": reason,
+                **(metrics or {}),
+            })
 
     for i, (ey, ex) in enumerate(ends):
         _check_cancel(cancel_cb)
@@ -739,27 +970,97 @@ def link_track_endpoints(
                 sy, sx = starts[j]
                 tail_slope = tail_slopes[i]
                 head_slope = head_slopes[j]
-                if prefer_long_linear:
-                    if abs(full_slopes[i]) < float(min_abs_slope) or abs(full_slopes[j]) < float(min_abs_slope):
+                if mode == "long_linear":
+                    if abs(full_slopes[i]) < policy.min_abs_slope or abs(full_slopes[j]) < policy.min_abs_slope:
+                        reject("mode_min_abs_slope", source=i, target=j, kind="gap")
                         continue
                     if full_slopes[i] * full_slopes[j] <= 0:
+                        reject("mode_direction_mismatch", source=i, target=j, kind="gap")
                         continue
                 slope_delta = abs(tail_slope - head_slope)
-                if slope_delta > max_slope_delta_f:
-                    continue
+                tangent_turn = abs(float(np.arctan(tail_slope)) - float(np.arctan(head_slope)))
+                tangent_turn_deg = float(np.rad2deg(tangent_turn))
+                curve_curvature = 0.0
+                projected_dx = 0.0
+                if mode == "smooth_curve":
+                    if tangent_turn_deg > policy.curve_max_turn_deg:
+                        reject(
+                            "mode_max_turn",
+                            source=i,
+                            target=j,
+                            kind="gap",
+                            metrics={"tangent_turn_deg": tangent_turn_deg},
+                        )
+                        continue
+                    score_line = _hermite_bridge_points(
+                        int(ey), int(ex), int(sy), int(sx), tail_slope, head_slope, include_ends=True
+                    )
+                    curve_curvature = _hermite_max_curvature(
+                        int(ey), int(ex), int(sy), int(sx), tail_slope, head_slope
+                    )
+                    if curve_curvature > policy.curve_max_curvature:
+                        reject(
+                            "mode_max_curvature",
+                            source=i,
+                            target=j,
+                            kind="gap",
+                            metrics={"curvature_px_per_row2": curve_curvature},
+                        )
+                        continue
+                else:
+                    if slope_delta > policy.max_slope_delta:
+                        reject(
+                            "mode_max_slope_delta",
+                            source=i,
+                            target=j,
+                            kind="gap",
+                            metrics={"slope_delta": slope_delta},
+                        )
+                        continue
+                    pred_head_x = float(ex) + tail_slope * float(gap)
+                    pred_tail_x = float(sx) - head_slope * float(gap)
+                    projected_dx = max(abs(float(sx) - pred_head_x), abs(float(ex) - pred_tail_x))
+                    if projected_dx > policy.max_projected_dx:
+                        reject(
+                            "mode_max_projected_dx",
+                            source=i,
+                            target=j,
+                            kind="gap",
+                            metrics={"projected_dx_px": projected_dx},
+                        )
+                        continue
+                    score_line = _row_line_points(int(ey), int(ex), int(sy), int(sx), include_ends=True)
 
-                pred_head_x = float(ex) + tail_slope * float(gap)
-                pred_tail_x = float(sx) - head_slope * float(gap)
-                projected_dx = max(abs(float(sx) - pred_head_x), abs(float(ex) - pred_tail_x))
-                if projected_dx > max_dx_f:
+                endpoint_dx = abs(float(sx) - float(ex))
+                chord_slope = endpoint_dx / float(max(1, gap))
+                max_step = _max_step_dx_per_row(score_line)
+                common_metrics = {
+                    "gap_rows": int(gap),
+                    "endpoint_dx_px": endpoint_dx,
+                    "chord_slope_px_per_row": chord_slope,
+                    "max_step_dx_px_per_row": max_step,
+                }
+                if chord_slope > constraints.max_chord_slope_px_per_row:
+                    reject("hard_max_chord_slope", source=i, target=j, kind="gap", metrics=common_metrics)
                     continue
-
-                score_line = _row_line_points(int(ey), int(ex), int(sy), int(sx), include_ends=True)
+                if max_step > constraints.max_step_dx_px_per_row:
+                    reject("hard_max_step_dx", source=i, target=j, kind="gap", metrics=common_metrics)
+                    continue
+                if not _points_within_shape(score_line, prob.shape):
+                    reject("hard_out_of_bounds", source=i, target=j, kind="gap", metrics=common_metrics)
+                    continue
                 bridge_prob = _mean_prob_at_points(prob, score_line)
-                if bridge_prob < float(min_bridge_prob):
+                if bridge_prob < constraints.min_bridge_prob:
+                    reject(
+                        "hard_min_bridge_prob",
+                        source=i,
+                        target=j,
+                        kind="gap",
+                        metrics={**common_metrics, "support": bridge_prob},
+                    )
                     continue
 
-                bridge_points = _row_line_points(int(ey), int(ex), int(sy), int(sx), include_ends=False)
+                bridge_points = score_line[1:-1]
                 conflict_fraction = _bridge_conflict_fraction(
                     bridge_points,
                     owners,
@@ -767,21 +1068,57 @@ def link_track_endpoints(
                     target_idx=j,
                     shape=prob.shape,
                 )
-                if conflict_fraction > float(max_conflict_fraction):
+                if conflict_fraction > constraints.max_conflict_fraction:
+                    reject(
+                        "hard_max_conflict",
+                        source=i,
+                        target=j,
+                        kind="gap",
+                        metrics={**common_metrics, "conflict_fraction": conflict_fraction},
+                    )
                     continue
 
                 score = (
                     bridge_prob
-                    - 0.25 * (projected_dx / max(max_dx_f, 1e-6))
-                    - 0.15 * (slope_delta / max(max_slope_delta_f, 1e-6))
+                    - 0.25 * (projected_dx / max(policy.max_projected_dx, 1e-6))
+                    - 0.15 * (slope_delta / max(policy.max_slope_delta, 1e-6))
                     - 0.10 * (float(gap) / max(float(max_gap), 1.0))
                     - 0.50 * conflict_fraction
                 )
-                if prefer_long_linear:
+                if mode == "long_linear":
                     anchor_length = 0.75 * length_scores[i] + 0.25 * length_scores[j]
                     pair_linearity = 0.5 * (linearity_scores[i] + linearity_scores[j])
-                    score += float(length_weight) * anchor_length + float(linearity_weight) * pair_linearity
-                candidates.append((float(score), i, j, "gap", bridge_points, None, None))
+                    score += policy.length_weight * anchor_length + policy.linearity_weight * pair_linearity
+                elif mode == "smooth_curve":
+                    anchor_length = 0.75 * length_scores[i] + 0.25 * length_scores[j]
+                    score = (
+                        bridge_prob
+                        - policy.curve_tangent_weight
+                        * (tangent_turn_deg / max(policy.curve_max_turn_deg, 1e-6))
+                        - policy.curve_curvature_weight
+                        * (curve_curvature / policy.curve_max_curvature)
+                        - 0.10 * (float(gap) / max(float(max_gap), 1.0))
+                        - 0.50 * conflict_fraction
+                        + policy.curve_length_weight * anchor_length
+                    )
+                candidates.append(EndpointLinkCandidate(
+                    score=float(score),
+                    source=i,
+                    target=j,
+                    kind="gap",
+                    connector_points=bridge_points,
+                    overlap_start=None,
+                    overlap_end=None,
+                    gap_rows=int(gap),
+                    endpoint_dx_px=endpoint_dx,
+                    chord_slope_px_per_row=chord_slope,
+                    slope_delta=slope_delta,
+                    tangent_turn_deg=tangent_turn_deg,
+                    curvature_px_per_row2=curve_curvature,
+                    support=bridge_prob,
+                    conflict_fraction=conflict_fraction,
+                    max_step_dx_px_per_row=max_step,
+                ))
                 candidate_gap_links += 1
 
         if not overlap_enabled:
@@ -812,18 +1149,67 @@ def link_track_endpoints(
 
                 tail_slope = tail_slopes[i]
                 head_slope = head_slopes[j]
-                if prefer_long_linear:
-                    if abs(full_slopes[i]) < float(min_abs_slope) or abs(full_slopes[j]) < float(min_abs_slope):
+                if mode == "long_linear":
+                    if abs(full_slopes[i]) < policy.min_abs_slope or abs(full_slopes[j]) < policy.min_abs_slope:
+                        reject("mode_min_abs_slope", source=i, target=j, kind="overlap")
                         continue
                     if full_slopes[i] * full_slopes[j] <= 0:
+                        reject("mode_direction_mismatch", source=i, target=j, kind="overlap")
                         continue
                 slope_delta = abs(tail_slope - head_slope)
-                if slope_delta > max_slope_delta_f:
+                tangent_turn = abs(float(np.arctan(tail_slope)) - float(np.arctan(head_slope)))
+                tangent_turn_deg = float(np.rad2deg(tangent_turn))
+                if mode == "smooth_curve":
+                    if tangent_turn_deg > policy.curve_max_turn_deg:
+                        reject(
+                            "mode_max_turn",
+                            source=i,
+                            target=j,
+                            kind="overlap",
+                            metrics={"tangent_turn_deg": tangent_turn_deg},
+                        )
+                        continue
+                elif slope_delta > policy.max_slope_delta:
+                    reject(
+                        "mode_max_slope_delta",
+                        source=i,
+                        target=j,
+                        kind="overlap",
+                        metrics={"slope_delta": slope_delta},
+                    )
                     continue
 
                 consensus_points = _consensus_overlap_points(prob, row_xs[i], row_xs[j], rows)
+                boundary_points: List[Tuple[int, int]] = []
+                source_before = [point for point in norm_tracks[i].points if int(point[0]) < int(rows[0])]
+                target_after = [point for point in norm_tracks[j].points if int(point[0]) > int(rows[-1])]
+                if source_before:
+                    boundary_points.append(source_before[-1])
+                boundary_points.extend(consensus_points)
+                if target_after:
+                    boundary_points.append(target_after[0])
+                max_step = _max_step_dx_per_row(boundary_points)
+                overlap_metrics = {
+                    "overlap_rows": len(rows),
+                    "mean_dx_px": mean_dx,
+                    "max_row_dx_px": max_row_dx,
+                    "max_step_dx_px_per_row": max_step,
+                }
+                if max_step > constraints.max_step_dx_px_per_row:
+                    reject("hard_max_step_dx", source=i, target=j, kind="overlap", metrics=overlap_metrics)
+                    continue
+                if not _points_within_shape(boundary_points, prob.shape):
+                    reject("hard_out_of_bounds", source=i, target=j, kind="overlap", metrics=overlap_metrics)
+                    continue
                 overlap_prob = _mean_prob_at_points(prob, consensus_points)
-                if overlap_prob < float(min_bridge_prob):
+                if overlap_prob < constraints.min_bridge_prob:
+                    reject(
+                        "hard_min_bridge_prob",
+                        source=i,
+                        target=j,
+                        kind="overlap",
+                        metrics={**overlap_metrics, "support": overlap_prob},
+                    )
                     continue
 
                 conflict_fraction = _bridge_conflict_fraction(
@@ -833,30 +1219,64 @@ def link_track_endpoints(
                     target_idx=j,
                     shape=prob.shape,
                 )
-                if conflict_fraction > float(max_conflict_fraction):
+                if conflict_fraction > constraints.max_conflict_fraction:
+                    reject(
+                        "hard_max_conflict",
+                        source=i,
+                        target=j,
+                        kind="overlap",
+                        metrics={**overlap_metrics, "conflict_fraction": conflict_fraction},
+                    )
                     continue
 
                 score = (
                     overlap_prob
                     + 0.20 * (float(len(rows)) / max(float(max_overlap), 1.0))
                     - 0.25 * (mean_dx / max(overlap_dx_tol_f, 1e-6))
-                    - 0.15 * (slope_delta / max(max_slope_delta_f, 1e-6))
+                    - 0.15 * (slope_delta / max(policy.max_slope_delta, 1e-6))
                     - 0.50 * conflict_fraction
                 )
-                if prefer_long_linear:
+                if mode == "long_linear":
                     anchor_length = 0.75 * length_scores[i] + 0.25 * length_scores[j]
                     pair_linearity = 0.5 * (linearity_scores[i] + linearity_scores[j])
-                    score += float(length_weight) * anchor_length + float(linearity_weight) * pair_linearity
-                candidates.append((float(score), i, j, "overlap", consensus_points, int(rows[0]), int(rows[-1])))
+                    score += policy.length_weight * anchor_length + policy.linearity_weight * pair_linearity
+                elif mode == "smooth_curve":
+                    anchor_length = 0.75 * length_scores[i] + 0.25 * length_scores[j]
+                    score += (
+                        policy.curve_length_weight * anchor_length
+                        - policy.curve_tangent_weight
+                        * (tangent_turn_deg / max(policy.curve_max_turn_deg, 1e-6))
+                    )
+                candidates.append(EndpointLinkCandidate(
+                    score=float(score),
+                    source=i,
+                    target=j,
+                    kind="overlap",
+                    connector_points=consensus_points,
+                    overlap_start=int(rows[0]),
+                    overlap_end=int(rows[-1]),
+                    gap_rows=0,
+                    endpoint_dx_px=mean_dx,
+                    chord_slope_px_per_row=0.0,
+                    slope_delta=slope_delta,
+                    tangent_turn_deg=tangent_turn_deg,
+                    curvature_px_per_row2=0.0,
+                    support=overlap_prob,
+                    conflict_fraction=conflict_fraction,
+                    max_step_dx_px_per_row=max_step,
+                ))
                 candidate_overlap_links += 1
 
-    candidates.sort(key=lambda item: item[0], reverse=True)
+    candidates.sort(key=lambda item: (-item.score, item.source, item.target, item.kind))
     selected_candidates = candidates
-    if prefer_long_linear and candidates:
-        candidate_by_pair = {(item[1], item[2]): item for item in candidates}
+    if mode != "standard" and candidates:
+        candidate_by_pair = {(item.source, item.target): item for item in candidates}
         graph = nx.Graph()
-        for score, source, target, *_rest in candidates:
-            graph.add_edge(("end", source), ("start", target), weight=float(score))
+        tie_order = sorted(candidates, key=lambda item: (item.source, item.target, item.kind))
+        tie_rank = {(item.source, item.target): rank for rank, item in enumerate(tie_order)}
+        for item in candidates:
+            tie = 1e-9 * float(len(candidates) - tie_rank[(item.source, item.target)])
+            graph.add_edge(("end", item.source), ("start", item.target), weight=item.score + tie)
         matches = nx.max_weight_matching(graph, maxcardinality=False, weight="weight")
         matched_pairs: set[Tuple[int, int]] = set()
         for left, right in matches:
@@ -866,22 +1286,25 @@ def link_track_endpoints(
                 matched_pairs.add((int(right[1]), int(left[1])))
         selected_candidates = sorted(
             (candidate_by_pair[pair] for pair in matched_pairs if pair in candidate_by_pair),
-            key=lambda item: item[0],
-            reverse=True,
+            key=lambda item: (-item.score, item.source, item.target, item.kind),
         )
     linked_from: Dict[int, int] = {}
     linked_to: Dict[int, int] = {}
-    links: Dict[Tuple[int, int], Tuple[str, List[Tuple[int, int]], Optional[int], Optional[int]]] = {}
+    links: Dict[Tuple[int, int], EndpointLinkCandidate] = {}
+    accepted_candidates: List[EndpointLinkCandidate] = []
     accepted_gap_links = 0
     accepted_overlap_links = 0
-    for _, i, j, kind, connector_points, overlap_start, overlap_end in selected_candidates:
+    for candidate in selected_candidates:
         _check_cancel(cancel_cb)
+        i = candidate.source
+        j = candidate.target
         if i in linked_from or j in linked_to:
             continue
         linked_from[i] = j
         linked_to[j] = i
-        links[(i, j)] = (kind, connector_points, overlap_start, overlap_end)
-        if kind == "overlap":
+        links[(i, j)] = candidate
+        accepted_candidates.append(candidate)
+        if candidate.kind == "overlap":
             accepted_overlap_links += 1
         else:
             accepted_gap_links += 1
@@ -913,17 +1336,21 @@ def link_track_endpoints(
             nxt = linked_from.get(cur)
             if nxt is None:
                 break
-            kind, connector_points, overlap_start, overlap_end = links.get((cur, nxt), ("gap", [], None, None))
+            candidate = links[(cur, nxt)]
             skip_until_y = None
-            if kind == "overlap" and overlap_start is not None and overlap_end is not None:
+            if (
+                candidate.kind == "overlap"
+                and candidate.overlap_start is not None
+                and candidate.overlap_end is not None
+            ):
                 chain_points = [
                     p for p in chain_points
-                    if not (int(overlap_start) <= int(p[0]) <= int(overlap_end))
+                    if not (int(candidate.overlap_start) <= int(p[0]) <= int(candidate.overlap_end))
                 ]
-                chain_points.extend(connector_points)
-                skip_until_y = int(overlap_end)
+                chain_points.extend(candidate.connector_points)
+                skip_until_y = int(candidate.overlap_end)
             elif insert_bridge_points:
-                chain_points.extend(connector_points)
+                chain_points.extend(candidate.connector_points)
             cur = nxt
 
         out.append(type(norm_tracks[start_idx])(points=enforce_one_point_per_row(chain_points), id=norm_tracks[start_idx].id))
@@ -933,16 +1360,49 @@ def link_track_endpoints(
         if idx not in seen:
             out.append(t)
 
+    postcondition_splits = 0
+    validated_out: List[Track] = []
+    for track in out:
+        chunks = _split_track_at_discontinuities(
+            track,
+            max_step_dx_per_row=constraints.max_step_dx_px_per_row,
+        )
+        postcondition_splits += max(0, len(chunks) - 1)
+        validated_out.extend(chunks)
+    out = validated_out
+
     out.sort(key=lambda t: (t.points[0][0], t.points[0][1]) if t.points else (0, 0))
+    normalized_geometry_hash = _tracks_geometry_hash(norm_tracks)
+    output_geometry_hash = _tracks_geometry_hash(out)
+    manifest = {
+        "schema_version": 1,
+        "mode": mode,
+        "policy": asdict(policy),
+        "constraints": asdict(constraints),
+        "input_geometry_hash": input_geometry_hash,
+        "normalized_geometry_hash": normalized_geometry_hash,
+        "output_geometry_hash": output_geometry_hash,
+        "input_discontinuity_splits": input_discontinuity_splits,
+        "postcondition_splits": postcondition_splits,
+        "rejection_counts": rejection_counts,
+        "rejected_examples": rejected_examples,
+        "admissible_candidates": [candidate.manifest_row() for candidate in candidates],
+        "selected_links": [candidate.manifest_row() for candidate in accepted_candidates],
+    }
     return out, {
+        "link_mode": mode,
         "input_tracks": len(tracks),
+        "normalized_tracks": len(norm_tracks),
+        "input_discontinuity_splits": input_discontinuity_splits,
         "candidate_links": len(candidates),
         "candidate_gap_links": candidate_gap_links,
         "candidate_overlap_links": candidate_overlap_links,
         "accepted_links": len(linked_from),
         "accepted_gap_links": accepted_gap_links,
         "accepted_overlap_links": accepted_overlap_links,
+        "postcondition_splits": postcondition_splits,
         "output_tracks": len(out),
+        "manifest": manifest,
     }
 
 
@@ -1062,6 +1522,15 @@ def run_kymobutler(
     endpoint_link_length_weight: float = 0.25,
     endpoint_link_linearity_weight: float = 0.25,
     endpoint_link_min_abs_slope: float = 0.05,
+    endpoint_link_prefer_smooth_curves: bool = False,
+    endpoint_link_curve_length_weight: float = 0.30,
+    endpoint_link_curve_tangent_weight: float = 0.25,
+    endpoint_link_curve_curvature_weight: float = 0.35,
+    endpoint_link_curve_max_turn_deg: float = 120.0,
+    endpoint_link_curve_max_curvature: float = 0.35,
+    endpoint_link_max_chord_slope_px_per_row: float = 2.0,
+    endpoint_link_max_step_dx_px_per_row: float = 4.0,
+    endpoint_link_max_manifest_rejections: int = 500,
     dedupe_enable: bool = True,
     dedupe_min_rows: Optional[int] = None,
     dedupe_min_score: float = 0.11,
@@ -1321,8 +1790,22 @@ def run_kymobutler(
             length_weight=float(endpoint_link_length_weight),
             linearity_weight=float(endpoint_link_linearity_weight),
             min_abs_slope=float(endpoint_link_min_abs_slope),
+            prefer_smooth_curves=bool(endpoint_link_prefer_smooth_curves),
+            curve_length_weight=float(endpoint_link_curve_length_weight),
+            curve_tangent_weight=float(endpoint_link_curve_tangent_weight),
+            curve_curvature_weight=float(endpoint_link_curve_curvature_weight),
+            curve_max_turn_deg=float(endpoint_link_curve_max_turn_deg),
+            curve_max_curvature=float(endpoint_link_curve_max_curvature),
+            max_chord_slope_px_per_row=float(endpoint_link_max_chord_slope_px_per_row),
+            max_step_dx_px_per_row=float(endpoint_link_max_step_dx_px_per_row),
+            max_manifest_rejections=int(endpoint_link_max_manifest_rejections),
             cancel_cb=_cancelled_throttled,
         )
+        endpoint_link_manifest = endpoint_link_stats.pop("manifest", None)
+        if debug_save_images and endpoint_link_manifest is not None:
+            _check_cancel()
+            with open(dbg_dir / "endpoint_links.json", "w") as f:
+                json.dump(endpoint_link_manifest, f, indent=2, sort_keys=True)
         _progress("endpoint_linking_done", **endpoint_link_stats)
 
     if dedupe_enable and tracks_seg:
@@ -1343,13 +1826,17 @@ def run_kymobutler(
         with open(dbg_dir / "stats.txt", "a") as f:
             f.write(
                 "endpoint_link "
+                f"mode={endpoint_link_stats.get('link_mode', 'standard')} "
                 f"input_tracks={endpoint_link_stats.get('input_tracks', 0)} "
+                f"normalized_tracks={endpoint_link_stats.get('normalized_tracks', 0)} "
+                f"input_discontinuity_splits={endpoint_link_stats.get('input_discontinuity_splits', 0)} "
                 f"candidate_links={endpoint_link_stats.get('candidate_links', 0)} "
                 f"candidate_gap_links={endpoint_link_stats.get('candidate_gap_links', 0)} "
                 f"candidate_overlap_links={endpoint_link_stats.get('candidate_overlap_links', 0)} "
                 f"accepted_links={endpoint_link_stats.get('accepted_links', 0)} "
                 f"accepted_gap_links={endpoint_link_stats.get('accepted_gap_links', 0)} "
                 f"accepted_overlap_links={endpoint_link_stats.get('accepted_overlap_links', 0)} "
+                f"postcondition_splits={endpoint_link_stats.get('postcondition_splits', 0)} "
                 f"output_tracks={endpoint_link_stats.get('output_tracks', 0)}\n"
             )
 
