@@ -28,6 +28,8 @@ export function stageLabel(stage: string | null): string {
     ripple_track_geometry: "Analyzing tracks",
     ripple_family_grouping: "Grouping tracks",
     ripple_interval_analysis: "Measuring waves",
+    large_wave_peak_measurement: "Measuring broad peaks",
+    large_wave_event_grouping: "Grouping large waves",
     completed: "Completed",
     failed: "Failed",
     cancelled: "Cancelled",
