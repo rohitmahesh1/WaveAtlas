@@ -33,6 +33,7 @@ export type OverlayTrackEvent = {
     frequency_hz?: number | null;
     ripple_frequency_hz?: number | null;
     frequency_method?: string | null;
+    large_wave_recurrence_frequency_hz?: number | null;
   };
 };
 
