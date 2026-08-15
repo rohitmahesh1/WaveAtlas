@@ -7,9 +7,9 @@ const PROCESSING_OPTIONS: { value: HeatmapProcessingMode; label: string }[] = [
 ];
 
 const PALETTE_OPTIONS: { value: HeatmapPalette; label: string; swatch: string }[] = [
-  { value: "default", label: "Default", swatch: "linear-gradient(90deg, #111111 0%, #ff3a00 55%, #fff4a2 100%)" },
+  { value: "default", label: "Analysis default", swatch: "linear-gradient(90deg, #0d0887 0%, #bd3786 50%, #f0f921 100%)" },
   { value: "gray", label: "Greyscale", swatch: "linear-gradient(90deg, #111111 0%, #8a8f94 50%, #ffffff 100%)" },
-  { value: "plasma", label: "Plasma", swatch: "linear-gradient(90deg, #22006a 0%, #d13c7a 55%, #fff33b 100%)" },
+  { value: "plasma", label: "Plasma", swatch: "linear-gradient(90deg, #0d0887 0%, #bd3786 50%, #f0f921 100%)" },
   { value: "hot", label: "Hot", swatch: "linear-gradient(90deg, #050505 0%, #d7191c 58%, #fff6aa 100%)" },
 ];
 
