@@ -790,21 +790,119 @@ body {
 }
 
 .mini-chart {
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: #0b0e14;
-  padding: 8px;
+  min-width: 0;
+  border: 1px solid #28313a;
+  border-radius: 8px;
+  background: #0b0f14;
+  padding: 10px;
   display: flex;
   flex-direction: column;
+  gap: 10px;
+}
+
+.mini-chart-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.mini-chart-selection {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.mini-chart-selection-title {
+  color: #f1f5f9;
+  font-size: 13px;
+  font-weight: 750;
+  line-height: 1.25;
+}
+
+.mini-chart-selection-meta {
+  overflow: hidden;
+  color: #94a3b8;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mini-zoom-strip {
+  flex: 0 0 auto;
+  display: inline-grid;
+  grid-template-columns: 30px 30px 48px;
+  gap: 4px;
+}
+
+.mini-icon-btn,
+.mini-reset-btn,
+.mini-window-btn {
+  border: 1px solid #38434e;
+  border-radius: 5px;
+  background: #151b22;
+  color: #e2e8f0;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.mini-icon-btn {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.mini-reset-btn {
+  width: 48px;
+  height: 30px;
+  padding: 0;
+}
+
+.mini-icon-btn:hover,
+.mini-reset-btn:hover,
+.mini-window-btn:hover {
+  border-color: #64748b;
+  background: #202832;
+}
+
+.mini-icon-btn:focus-visible,
+.mini-reset-btn:focus-visible,
+.mini-window-btn:focus-visible,
+.mini-select:focus-visible {
+  outline: 2px solid #f6a723;
+  outline-offset: 2px;
+}
+
+.mini-icon-btn:disabled,
+.mini-reset-btn:disabled,
+.mini-window-btn:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.mini-regression-picker {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: center;
   gap: 8px;
+  min-width: 0;
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .mini-controls {
   display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
+  min-width: 0;
   color: #cbd5e1;
   font-size: 11px;
 }
@@ -820,13 +918,14 @@ body {
 }
 
 .mini-layer-strip {
-  display: inline-flex;
+  display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 4px;
-  margin-left: auto;
+  width: 100%;
   padding: 3px;
-  border-radius: 999px;
-  background: rgba(226, 232, 240, 0.08);
+  border-radius: 6px;
+  background: #121820;
   color: #94a3b8;
 }
 
@@ -838,8 +937,9 @@ body {
 .mini-layer-chip {
   display: inline-flex;
   align-items: center;
+  min-height: 25px;
   padding: 3px 7px;
-  border-radius: 999px;
+  border-radius: 4px;
   color: #94a3b8;
   cursor: pointer;
   transition:
@@ -854,8 +954,8 @@ body {
 }
 
 .mini-layer-chip.active {
-  background: rgba(226, 232, 240, 0.16);
-  color: #e2e8f0;
+  background: #2a343f;
+  color: #f1f5f9;
 }
 
 .mini-layer-chip:has(input:disabled) {
@@ -867,7 +967,9 @@ body {
   width: 100%;
   position: relative;
   overflow: hidden;
-  border-radius: 10px;
+  border: 1px solid #252e38;
+  border-radius: 6px;
+  background: #080b10;
 }
 
 .mini-svg {
@@ -876,16 +978,51 @@ body {
   display: block;
 }
 
+.mini-plot-background {
+  fill: #0a0e14;
+}
+
+.mini-fit-window {
+  fill: rgba(255, 173, 51, 0.055);
+}
+
+.mini-axis-title {
+  fill: rgba(148, 163, 184, 0.9);
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.mini-peak-target {
+  cursor: pointer;
+}
+
+.mini-peak-hit {
+  fill: transparent;
+  pointer-events: all;
+}
+
 .mini-peak {
-  fill: #ff6b6b;
+  fill: #ff6464;
   stroke: #ffffff;
-  stroke-width: 1px;
+  stroke-width: 1.5px;
+  pointer-events: none;
 }
 
 .mini-peak.selected {
-  fill: #ffd166;
-  stroke: #0b0e14;
-  stroke-width: 1.4px;
+  fill: #ffc857;
+  stroke: #ffffff;
+  stroke-width: 2px;
+}
+
+.mini-peak-target:focus-visible {
+  outline: none;
+}
+
+.mini-peak-target:focus-visible .mini-peak-hit {
+  fill: none;
+  stroke: #ffc857;
+  stroke-width: 2px;
 }
 
 .peak-regression-picker {
@@ -898,11 +1035,14 @@ body {
 }
 
 .mini-select {
-  max-width: 210px;
-  border: 0;
-  border-radius: 999px;
-  padding: 2px 20px 2px 8px;
-  background: rgba(226, 232, 240, 0.12);
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  height: 30px;
+  border: 1px solid #38434e;
+  border-radius: 5px;
+  padding: 3px 28px 3px 8px;
+  background: #151b22;
   color: #e2e8f0;
   font: inherit;
   color-scheme: dark;
@@ -919,7 +1059,7 @@ body {
 
 .mini-legend {
   display: flex;
-  gap: 10px;
+  gap: 8px 12px;
   flex-wrap: wrap;
   font-size: 11px;
   color: #cbd5e1;
@@ -932,9 +1072,9 @@ body {
 }
 
 .legend-swatch {
-  width: 10px;
-  height: 10px;
-  border-radius: 999px;
+  width: 14px;
+  height: 3px;
+  border-radius: 1px;
   display: inline-block;
 }
 
@@ -943,15 +1083,19 @@ body {
 }
 
 .swatch-fit {
-  background: var(--accent);
+  background: #2dd4bf;
 }
 
 .swatch-sine {
-  background: #d56b00;
+  height: 4px;
+  background: #ffad33;
 }
 
 .swatch-peak {
-  background: #d94836;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ff6464;
 }
 
 .empty-text {
@@ -963,13 +1107,41 @@ body {
   position: absolute;
   z-index: 2;
   padding: 4px 8px;
-  border-radius: 8px;
-  background: rgba(2, 6, 23, 0.9);
-  border: 1px solid rgba(148, 163, 184, 0.25);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 116px;
+  border-radius: 5px;
+  background: rgba(8, 11, 16, 0.96);
+  border: 1px solid #3a4652;
   color: #e2e8f0;
   font-size: 11px;
   pointer-events: none;
   transform: translate(0, -6px);
+}
+
+.mini-tooltip strong {
+  color: #ffc857;
+}
+
+.mini-tooltip span {
+  color: #cbd5e1;
+  white-space: nowrap;
+}
+
+.mini-chart-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.mini-window-btn {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 4px 9px;
+  white-space: nowrap;
 }
 
 .zoom-viewport {
