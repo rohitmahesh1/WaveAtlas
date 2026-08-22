@@ -482,6 +482,7 @@ def build_peak_rows(
     compare_fit_targets = _bool_cfg(features_cfg.get("compare_fit_targets"), True)
 
     global_fpp = (sampling_rate / float(global_freq_hz)) if (sampling_rate and global_freq_hz and global_freq_hz > 0) else None
+    fallback_flags = np.asarray((peak_props or {}).get("fallback_peak", []), dtype=bool)
 
     for idx_in_list, peak_i in enumerate(p):
         frame_value_img = float(frame[peak_i])
@@ -547,6 +548,7 @@ def build_peak_rows(
             "fit_signal_sign": sign,
             "peak_index": int(idx_in_list + 1),
             "peak_i": int(peak_i),
+            "fallback_peak": bool(fallback_flags[idx_in_list]) if idx_in_list < fallback_flags.size else False,
             "frame": frame_value,
             "pos_px": pos_px,
             "x_px": x_px,
@@ -611,6 +613,7 @@ def build_wave_rows(
     global_fpp = (sampling_rate / float(freq_hz)) if (sampling_rate and freq_hz and freq_hz > 0) else None
     frame_min = float(np.nanmin(frame)) if frame.size else np.nan
     frame_max = float(np.nanmax(frame)) if frame.size else np.nan
+    fallback_flags = np.asarray((peak_props or {}).get("fallback_peak", []), dtype=bool)
 
     for k, peak_i_raw in enumerate(p):
         peak_i = int(peak_i_raw)
@@ -739,6 +742,7 @@ def build_wave_rows(
             "peak_index": int(k + 1),
             "peak_count": 1,
             "has_peak": True,
+            "fallback_peak": bool(fallback_flags[k]) if k < fallback_flags.size else False,
             "previous_peak_i": int(prev_i) if prev_i is not None else None,
             "next_peak_i": int(next_i) if next_i is not None else None,
             "peak_frame_raw": peak_frame_raw,

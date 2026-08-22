@@ -45,7 +45,11 @@ from ..models import (
 from ..pipeline import PipelineSettings, run_job
 from ..analysis_mode import LARGE_WAVE_ANALYSIS_MODE, RIPPLE_ANALYSIS_MODE, resolve_analysis_mode
 from ..time_utils import utc_now_iso
-from ..extract_core import PEAK_POLARITY_ALIASES, _suppress_cross_polarity_peak_sets
+from ..extract_core import (
+    PEAK_POLARITY_ALIASES,
+    _ensure_track_minimum_peak_sets,
+    _suppress_cross_polarity_peak_sets,
+)
 from ..large_wave_fit import (
     fit_asymmetric_basin_residual,
     fit_large_wave,
@@ -298,7 +302,14 @@ def _detect_peaks_for_detail(
             nms_enable=bool(peaks_cfg.get("nms_enable", True)),
             nms_dominance_frac=float(peaks_cfg.get("nms_dominance_frac", 0.55)),
         )
-        return ensure_minimum_peaks(residual, peaks, props, minimum=int(peaks_cfg.get("minimum_per_track", 1)))
+        return ensure_minimum_peaks(
+            residual,
+            peaks,
+            props,
+            minimum=int(peaks_cfg.get("minimum_per_track", 1)),
+            edge_margin=peaks_cfg.get("edge_margin_frames"),
+            edge_score_floor=float(peaks_cfg.get("edge_score_floor", 0.2)),
+        )
     legacy_kwargs: Dict[str, Any] = {
         "prominence": float(peaks_cfg.get("prominence", 1.0)),
         "width": float(peaks_cfg.get("width", 1.0)),
@@ -306,7 +317,14 @@ def _detect_peaks_for_detail(
     if peaks_cfg.get("distance", None) is not None:
         legacy_kwargs["distance"] = int(peaks_cfg["distance"])
     peaks, props = detect_peaks(residual, **legacy_kwargs)
-    return ensure_minimum_peaks(residual, peaks, props, minimum=int(peaks_cfg.get("minimum_per_track", 1)))
+    return ensure_minimum_peaks(
+        residual,
+        peaks,
+        props,
+        minimum=int(peaks_cfg.get("minimum_per_track", 1)),
+        edge_margin=peaks_cfg.get("edge_margin_frames"),
+        edge_score_floor=float(peaks_cfg.get("edge_score_floor", 0.2)),
+    )
 
 
 def _normalize_detail_event_polarity(value: Any) -> str:
@@ -330,18 +348,30 @@ def _detect_peak_sets_for_detail(
     frames_per_period: Optional[float],
 ) -> List[Dict[str, Any]]:
     specs = _detail_peak_polarity_specs(peaks_cfg.get("event_polarity", peaks_cfg.get("polarity", "both")))
+    base_signal = np.asarray(residual, dtype=float)
+    track_minimum_scope = str(peaks_cfg.get("minimum_scope", "polarity")).lower() == "track"
+    detection_cfg = dict(peaks_cfg)
+    if track_minimum_scope:
+        detection_cfg["minimum_per_track"] = 0
     out: List[Dict[str, Any]] = []
     for spec in specs:
         sign = int(spec["sign"])
-        signal = np.asarray(residual, dtype=float) * float(sign)
-        peaks_idx, peak_props = _detect_peaks_for_detail(signal, peaks_cfg, frames_per_period)
+        signal = base_signal * float(sign)
+        peaks_idx, peak_props = _detect_peaks_for_detail(
+            signal,
+            detection_cfg,
+            frames_per_period,
+        )
         out.append({
             **spec,
             "signal": signal,
             "peaks_idx": np.asarray(peaks_idx, dtype=int),
             "peak_props": peak_props,
         })
-    return _suppress_cross_polarity_peak_sets(out, peaks_cfg)
+    filtered = _suppress_cross_polarity_peak_sets(out, peaks_cfg)
+    if track_minimum_scope:
+        filtered = _ensure_track_minimum_peak_sets(filtered, base_signal, peaks_cfg)
+    return filtered
 
 
 def _large_wave_peak_events_for_detail(

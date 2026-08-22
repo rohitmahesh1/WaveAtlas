@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
@@ -23,6 +23,15 @@ class LargeWaveFit:
     metrics: Dict[str, Any]
 
 
+@dataclass(frozen=True)
+class LargeWaveBasinCandidate:
+    """A same-side residual basin observed at one smoothing scale."""
+
+    window_lo: int
+    window_hi: int
+    smoothing_sigma_rows: float
+
+
 def large_wave_basin_window(
     residual: np.ndarray,
     *,
@@ -30,6 +39,7 @@ def large_wave_basin_window(
     minimum_width_frames: Optional[float],
     width_multiplier: float,
     smoothing_sigma_rows: float,
+    baseline_tolerance_fraction: float = 0.0,
 ) -> Optional[Tuple[int, int]]:
     values = np.asarray(residual, dtype=float)
     if center_idx < 0 or center_idx >= len(values) or len(values) < 3:
@@ -40,12 +50,13 @@ def large_wave_basin_window(
     if not math.isfinite(center_value) or abs(center_value) <= 1e-9:
         return None
     sign = 1.0 if center_value > 0 else -1.0
+    baseline_tolerance = abs(center_value) * max(0.0, float(baseline_tolerance_fraction))
 
     lo = center_idx
-    while lo > 0 and float(smooth[lo - 1]) * sign > 0:
+    while lo > 0 and float(smooth[lo - 1]) * sign > baseline_tolerance:
         lo -= 1
     hi = center_idx
-    while hi < len(smooth) - 1 and float(smooth[hi + 1]) * sign > 0:
+    while hi < len(smooth) - 1 and float(smooth[hi + 1]) * sign > baseline_tolerance:
         hi += 1
 
     try:
@@ -72,6 +83,59 @@ def large_wave_basin_window(
         int(math.ceil(float(center_idx) + float(base_hi - center_idx) * multiplier)),
     )
     return target_lo, target_hi
+
+
+def large_wave_basin_candidates(
+    residual: np.ndarray,
+    *,
+    center_idx: int,
+    minimum_width_frames: Optional[float],
+    width_multiplier: float,
+    smoothing_sigma_rows: float,
+    smoothing_scale_multipliers: Sequence[float],
+    max_sigma_fraction: float = 0.125,
+    baseline_tolerance_fraction: float = 0.02,
+) -> List[LargeWaveBasinCandidate]:
+    """Return unique nested basins from local through broad smoothing scales."""
+
+    values = np.asarray(residual, dtype=float)
+    if values.size < 3:
+        return []
+    base_sigma = max(0.0, float(smoothing_sigma_rows))
+    multipliers = [1.0]
+    for value in smoothing_scale_multipliers:
+        try:
+            multiplier = max(0.0, float(value))
+        except (TypeError, ValueError):
+            continue
+        if multiplier not in multipliers:
+            multipliers.append(multiplier)
+    max_sigma = max(base_sigma, float(values.size) * max(0.0, float(max_sigma_fraction)))
+    unique: Dict[Tuple[int, int], LargeWaveBasinCandidate] = {}
+    for multiplier in sorted(multipliers):
+        sigma = min(base_sigma * multiplier, max_sigma)
+        window = large_wave_basin_window(
+            values,
+            center_idx=center_idx,
+            minimum_width_frames=minimum_width_frames,
+            width_multiplier=width_multiplier,
+            smoothing_sigma_rows=sigma,
+            baseline_tolerance_fraction=baseline_tolerance_fraction,
+        )
+        if window is None:
+            continue
+        lo, hi = int(window[0]), int(window[1])
+        candidate = LargeWaveBasinCandidate(lo, hi, sigma)
+        previous = unique.get((lo, hi))
+        if previous is None or sigma < previous.smoothing_sigma_rows:
+            unique[(lo, hi)] = candidate
+    return sorted(
+        unique.values(),
+        key=lambda candidate: (
+            candidate.window_hi - candidate.window_lo,
+            candidate.smoothing_sigma_rows,
+        ),
+    )
 
 
 def fit_asymmetric_basin_residual(
@@ -160,6 +224,11 @@ def fit_large_wave(
     minimum_width_frames: Optional[float] = None,
     width_multiplier: float = 1.0,
     boundary_smoothing_sigma_rows: float = 4.0,
+    boundary_smoothing_scales: Optional[Sequence[float]] = None,
+    boundary_max_sigma_fraction: float = 0.125,
+    boundary_baseline_tolerance_fraction: float = 0.02,
+    fit_error_tolerance: float = 0.25,
+    max_fit_error_vnmse: float = 0.8,
     endpoint_anchor_rows: int = 7,
     curvature_half_window_rows: int = 8,
     max_period_boundary_error_fraction: float = 0.5,
@@ -175,6 +244,70 @@ def fit_large_wave(
         return None
 
     global_residual = positions - global_base
+    if fixed_window is None and boundary_smoothing_scales:
+        basin_candidates = large_wave_basin_candidates(
+            global_residual,
+            center_idx=center_idx,
+            minimum_width_frames=minimum_width_frames,
+            width_multiplier=width_multiplier,
+            smoothing_sigma_rows=boundary_smoothing_sigma_rows,
+            smoothing_scale_multipliers=boundary_smoothing_scales,
+            max_sigma_fraction=boundary_max_sigma_fraction,
+            baseline_tolerance_fraction=boundary_baseline_tolerance_fraction,
+        )
+        candidate_fits: List[LargeWaveFit] = []
+        for basin in basin_candidates:
+            candidate_fit = fit_large_wave(
+                frame=frame_values,
+                position=positions,
+                global_baseline=global_base,
+                center_idx=center_idx,
+                event_kind=event_kind,
+                sampling_rate=sampling_rate,
+                minimum_width_frames=minimum_width_frames,
+                width_multiplier=width_multiplier,
+                boundary_smoothing_sigma_rows=boundary_smoothing_sigma_rows,
+                boundary_smoothing_scales=None,
+                boundary_max_sigma_fraction=boundary_max_sigma_fraction,
+                boundary_baseline_tolerance_fraction=boundary_baseline_tolerance_fraction,
+                fit_error_tolerance=fit_error_tolerance,
+                max_fit_error_vnmse=max_fit_error_vnmse,
+                endpoint_anchor_rows=endpoint_anchor_rows,
+                curvature_half_window_rows=curvature_half_window_rows,
+                max_period_boundary_error_fraction=max_period_boundary_error_fraction,
+                fixed_window=(basin.window_lo, basin.window_hi),
+                refine_apex=refine_apex,
+            )
+            if candidate_fit is None:
+                continue
+            candidate_metrics = {
+                **candidate_fit.metrics,
+                "fit_boundary_sigma_rows": basin.smoothing_sigma_rows,
+            }
+            candidate_fits.append(replace(candidate_fit, metrics=candidate_metrics))
+        if not candidate_fits:
+            return None
+        selected = _select_multiscale_fit(
+            candidate_fits,
+            error_tolerance=fit_error_tolerance,
+            max_error_vnmse=max_fit_error_vnmse,
+        )
+        parent = max(
+            basin_candidates,
+            key=lambda basin: basin.window_hi - basin.window_lo,
+        )
+        selected_metrics = {
+            **selected.metrics,
+            "fit_window_source": "large_wave_multiscale_local_chord",
+            "fit_window_selection": "longest_coherent_multiscale_basin",
+            "fit_window_candidate_count": len(candidate_fits),
+            "fit_support_window_lo": parent.window_lo,
+            "fit_support_window_hi": parent.window_hi,
+            "fit_support_window_width_frames": float(parent.window_hi - parent.window_lo),
+            "fit_support_boundary_sigma_rows": parent.smoothing_sigma_rows,
+        }
+        return replace(selected, metrics=selected_metrics)
+
     window = fixed_window or large_wave_basin_window(
         global_residual,
         center_idx=center_idx,
@@ -388,6 +521,51 @@ def fit_large_wave(
         residual_fit=fitted_residual,
         fitted_position=fitted_position,
         metrics=metrics,
+    )
+
+
+def _select_multiscale_fit(
+    fits: Sequence[LargeWaveFit],
+    *,
+    error_tolerance: float,
+    max_error_vnmse: float,
+) -> LargeWaveFit:
+    """Choose maximum coverage among fits that remain close to the best error."""
+
+    finite_errors = [
+        float(fit.metrics["fit_error_vnmse"])
+        for fit in fits
+        if fit.metrics.get("fit_error_vnmse") is not None
+        and math.isfinite(float(fit.metrics["fit_error_vnmse"]))
+    ]
+    best_error = min(finite_errors) if finite_errors else math.inf
+    tolerance_limit = best_error + max(0.0, float(error_tolerance))
+    absolute_limit = max(0.0, float(max_error_vnmse))
+    coherent = [
+        fit
+        for fit in fits
+        if fit.metrics.get("fit_error_vnmse") is not None
+        and math.isfinite(float(fit.metrics["fit_error_vnmse"]))
+        and float(fit.metrics["fit_error_vnmse"]) <= tolerance_limit
+        and float(fit.metrics["fit_error_vnmse"]) <= absolute_limit
+    ]
+    if not coherent:
+        return min(
+            fits,
+            key=lambda fit: (
+                float(fit.metrics["fit_error_vnmse"])
+                if fit.metrics.get("fit_error_vnmse") is not None
+                and math.isfinite(float(fit.metrics["fit_error_vnmse"]))
+                else math.inf,
+                -float(fit.metrics.get("fit_window_width_frames", 0.0)),
+            ),
+        )
+    return max(
+        coherent,
+        key=lambda fit: (
+            float(fit.metrics.get("fit_window_width_frames", 0.0)),
+            -float(fit.metrics["fit_error_vnmse"]),
+        ),
     )
 
 

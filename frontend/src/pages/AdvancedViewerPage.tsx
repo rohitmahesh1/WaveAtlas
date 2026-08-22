@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { OverlayCanvas, UNASSIGNED_FAMILY_KEY } from "../OverlayCanvas";
-import type { OverlayTrackEvent } from "../OverlayCanvas";
+import type { OverlayProjection, OverlayTrackEvent } from "../OverlayCanvas";
 import type { FieldDef, FilterOp } from "../types";
 import { stageLabel } from "../utils/format";
 import { RunPanel } from "../components/RunPanel";
@@ -176,6 +176,7 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
   const [hideTracks, setHideTracks] = useState<boolean>(false);
   const defaultOverlayColor = "#008c5a";
   const [overlayColor, setOverlayColor] = useState<string>(defaultOverlayColor);
+  const [viewerProjection, setViewerProjection] = useState<OverlayProjection | null>(null);
 
   const {
     jobId,
@@ -268,15 +269,24 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
       ? "track"
       : null;
 
-  const { trackDetail, trackDetailLoading, trackDetailError, resetTrackDetail } = useTrackDetail(
-    jobId,
-    activeSelectedTrackId
-  );
-
   const selectedTrack = useMemo(() => {
     if (activeSelectedTrackId == null) return null;
     return filteredTracks.find((t) => String(t.id ?? t.track_index) === String(activeSelectedTrackId)) ?? null;
   }, [filteredTracks, activeSelectedTrackId]);
+
+  const trackDetailRevision = selectedTrack
+    ? [
+        status,
+        selectedTrack.metrics?.analysis_mode ?? "standard",
+        selectedTrack.metrics?.num_peaks ?? selectedTrack.peaks?.length ?? 0,
+        selectedTrack.peaks?.length ?? 0,
+      ].join(":")
+    : String(status);
+  const { trackDetail, trackDetailLoading, trackDetailError, resetTrackDetail } = useTrackDetail(
+    jobId,
+    activeSelectedTrackId,
+    trackDetailRevision,
+  );
 
   const familyLegend = useMemo(() => {
     if (analysisMode !== "ripple_family") return [];
@@ -686,6 +696,7 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
               overlayColor={overlayColor}
               baseImageUrl={baseImageUrl}
               frameCoordinateHeight={baseImageInfo?.outputHeight ?? baseImageInfo?.sourceRows}
+              viewerProjection={viewerProjection}
               debugImageUrl={debugImageUrl}
               debugOpacity={debugOpacity}
               onDownloadTrackDetail={downloadSelectedTrack}
@@ -822,6 +833,7 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
               selectionScope={activeSelectionScope}
               onClickTrack={handleClickTrack}
               colorOverrideFn={analysisMode === "ripple_family" ? colorTrackByFamily : undefined}
+              onProjectionChange={setViewerProjection}
             />
           </div>
           {analysisMode === "ripple_family" && familyLegend.length > 0 ? (

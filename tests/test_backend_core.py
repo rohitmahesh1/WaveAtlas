@@ -43,7 +43,9 @@ from app.large_wave_extraction import (
 from app.large_wave_analysis import (
     STANDARD_WAVE_FIELDS,
     _assign_recurrence_periods,
+    _dedupe_track_measurements,
     analyze_large_wave_events,
+    build_large_wave_track_config,
 )
 from app.large_wave_fit import fit_large_wave
 from app.modules.kb_adapter import link_track_endpoints
@@ -53,6 +55,7 @@ from app.models import ArtifactKind, Artifact, JobRead, JobStatus, Track as Trac
 from app.pipeline import PipelineSettings
 from app.ripple_analysis import analyze_ripple_tracks
 from app.ripple_extraction import _Trace, _dedupe_and_extend
+from app.signal.peaks import ensure_minimum_peaks
 from app.time_utils import utc_isoformat
 
 
@@ -183,6 +186,18 @@ class BackendCoreTests(unittest.TestCase):
             ],
             0.5,
         )
+        large_peaks = config["analysis"]["large_wave"]["peaks"]
+        self.assertEqual(large_peaks["minimum_per_track"], 1)
+        self.assertEqual(large_peaks["minimum_scope"], "track")
+        self.assertEqual(large_peaks["cross_polarity_min_distance"], 30)
+        self.assertEqual(large_peaks["edge_margin_frames"], 40)
+        large_events = config["analysis"]["large_wave"]["events"]
+        self.assertEqual(large_events["fit_boundary_smoothing_scales"], [1.0, 2.0, 3.0, 4.0])
+        self.assertEqual(large_events["fit_candidate_error_tolerance"], 0.25)
+        self.assertEqual(large_events["min_peak_separation_frames"], 30)
+        self.assertEqual(large_events["peak_separation_width_fraction"], 0.3)
+        self.assertEqual(large_events["duplicate_window_overlap_fraction"], 0.65)
+        self.assertEqual(large_events["duplicate_support_overlap_fraction"], 0.8)
         endpoint_link = config["kymo"]["onnx"]["postproc"]["endpoint_link"]
         self.assertTrue(endpoint_link["enabled"])
         self.assertNotIn("level", endpoint_link)
@@ -972,6 +987,254 @@ class BackendCoreTests(unittest.TestCase):
         self.assertEqual(by_kind["max"]["peaks_idx"].tolist(), [1])
         self.assertEqual(by_kind["min"]["peaks_idx"].tolist(), [5])
 
+    def test_required_fallback_peak_prefers_track_interior(self) -> None:
+        signal = np.zeros(101, dtype=float)
+        signal[0] = 10.0
+        signal[50] = 8.0
+
+        peaks, props = ensure_minimum_peaks(
+            signal,
+            np.asarray([], dtype=int),
+            minimum=1,
+            edge_margin=25,
+            edge_score_floor=0.1,
+        )
+
+        self.assertEqual(peaks.tolist(), [50])
+        self.assertEqual(np.asarray(props["fallback_peak"], dtype=bool).tolist(), [True])
+
+    def test_large_wave_track_minimum_creates_one_fallback_across_both_polarities(self) -> None:
+        peak_sets = _detect_peak_sets(
+            np.zeros(101, dtype=float),
+            {
+                "event_polarity": "both",
+                "adaptive": False,
+                "minimum_per_track": 1,
+                "minimum_scope": "track",
+                "prominence": 10.0,
+                "width": 5,
+                "distance": 30,
+                "cross_polarity_min_distance": 30,
+                "edge_margin_frames": 30,
+            },
+            frames_per_period=None,
+        )
+
+        detected = [
+            (peak_set["event_kind"], int(peak_i), bool(fallback))
+            for peak_set in peak_sets
+            for peak_i, fallback in zip(
+                np.asarray(peak_set["peaks_idx"], dtype=int).tolist(),
+                np.asarray(peak_set["peak_props"].get("fallback_peak", []), dtype=bool).tolist(),
+            )
+        ]
+
+        self.assertEqual(len(detected), 1)
+        self.assertTrue(detected[0][2])
+
+    def test_large_wave_multiscale_fit_spans_a_broad_basin_across_a_local_notch(self) -> None:
+        frame = np.arange(301, dtype=float)
+        baseline = 20.0 + 0.03 * frame
+        shape = np.zeros_like(frame)
+        lo, center, hi = 40, 120, 250
+        shape[lo : center + 1] = np.cos(
+            0.5 * np.pi * (center - frame[lo : center + 1]) / (center - lo)
+        )
+        shape[center : hi + 1] = np.cos(
+            0.5 * np.pi * (frame[center : hi + 1] - center) / (hi - center)
+        )
+        shape *= 15.0
+        shape[165:172] -= 18.0
+
+        fit = fit_large_wave(
+            frame=frame,
+            position=baseline + shape,
+            global_baseline=baseline,
+            center_idx=center,
+            event_kind="max",
+            sampling_rate=10.0,
+            boundary_smoothing_sigma_rows=2.0,
+            boundary_smoothing_scales=[1.0, 2.0, 3.0, 4.0],
+            refine_apex=False,
+        )
+
+        self.assertIsNotNone(fit)
+        assert fit is not None
+        self.assertGreaterEqual(fit.metrics["fit_window_width_frames"], 200.0)
+        self.assertEqual(fit.metrics["fit_window_selection"], "longest_coherent_multiscale_basin")
+        self.assertGreater(fit.metrics["fit_window_candidate_count"], 1)
+
+    def test_large_wave_support_basin_suppresses_opposite_local_wiggle(self) -> None:
+        candidates = [
+            {
+                "peak_i": 146,
+                "peak_frame": 146.0,
+                "event_kind": "max",
+                "fit_window_lo": 61,
+                "fit_window_hi": 228,
+                "fit_window_width_frames": 167.0,
+                "fit_support_window_lo": 59,
+                "fit_support_window_hi": 221,
+                "amplitude_px": 18.0,
+                "fit_error_vnmse": 0.29,
+            },
+            {
+                "peak_i": 195,
+                "peak_frame": 195.0,
+                "event_kind": "min",
+                "fit_window_lo": 189,
+                "fit_window_hi": 202,
+                "fit_window_width_frames": 13.0,
+                "fit_support_window_lo": 59,
+                "fit_support_window_hi": 221,
+                "amplitude_px": 3.0,
+                "fit_error_vnmse": 0.16,
+            },
+        ]
+
+        selected = _dedupe_track_measurements(
+            candidates,
+            cfg={
+                "min_peak_separation_frames": 30,
+                "peak_separation_width_fraction": 0.3,
+                "duplicate_window_overlap_fraction": 0.65,
+                "duplicate_support_overlap_fraction": 0.8,
+            },
+            track_frame_min=0.0,
+            track_frame_max=292.0,
+        )
+
+        self.assertEqual([candidate["peak_i"] for candidate in selected], [146])
+
+    def test_large_wave_peak_selection_suppresses_close_opposite_extrema_and_penalizes_edges(self) -> None:
+        candidates = [
+            {
+                "peak_i": 5,
+                "peak_frame": 5.0,
+                "event_kind": "max",
+                "fit_window_lo": 0,
+                "fit_window_hi": 55,
+                "fit_window_width_frames": 55.0,
+                "amplitude_px": 20.0,
+                "fit_error_vnmse": 0.0,
+            },
+            {
+                "peak_i": 35,
+                "peak_frame": 35.0,
+                "event_kind": "min",
+                "fit_window_lo": 10,
+                "fit_window_hi": 70,
+                "fit_window_width_frames": 60.0,
+                "amplitude_px": 15.0,
+                "fit_error_vnmse": 0.0,
+            },
+            {
+                "peak_i": 130,
+                "peak_frame": 130.0,
+                "event_kind": "max",
+                "fit_window_lo": 105,
+                "fit_window_hi": 155,
+                "fit_window_width_frames": 50.0,
+                "amplitude_px": 12.0,
+                "fit_error_vnmse": 0.0,
+            },
+        ]
+
+        selected = _dedupe_track_measurements(
+            candidates,
+            cfg={
+                "min_peak_separation_frames": 30,
+                "peak_separation_width_fraction": 0.3,
+                "duplicate_window_overlap_fraction": 0.65,
+                "edge_margin_frames": 40,
+                "edge_score_floor": 0.2,
+            },
+            track_frame_min=0.0,
+            track_frame_max=180.0,
+        )
+
+        self.assertEqual([row["peak_i"] for row in selected], [35, 130])
+        self.assertLess(candidates[0]["peak_selection_edge_weight"], candidates[1]["peak_selection_edge_weight"])
+
+    def test_large_wave_peak_selection_always_keeps_best_available_candidate(self) -> None:
+        only_candidate = {
+            "peak_i": 2,
+            "peak_frame": 2.0,
+            "event_kind": "max",
+            "fit_window_lo": 0,
+            "fit_window_hi": 20,
+            "fit_window_width_frames": 20.0,
+            "amplitude_px": 1.0,
+            "fit_error_vnmse": 1.0,
+        }
+
+        selected = _dedupe_track_measurements(
+            [only_candidate],
+            cfg={"edge_margin_frames": 40, "edge_score_floor": 0.1},
+            track_frame_min=0.0,
+            track_frame_max=100.0,
+        )
+
+        self.assertEqual(selected, [only_candidate])
+
+    def test_large_wave_fallback_produces_a_measured_peak_for_each_track(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            frame = np.arange(0, 201, dtype=float)
+            shape = np.exp(-0.5 * ((frame - 100.0) / 22.0) ** 2)
+            position = 30.0 + 0.05 * frame + 0.8 * shape
+            track_path = _synthetic_track_path(tmp, position)
+            config = _base_config(event_polarity="both")
+            config["analysis"] = {
+                "mode": "large_wave",
+                "large_wave": {
+                    "peaks": {
+                        "event_polarity": "both",
+                        "minimum_per_track": 1,
+                        "prominence": 100.0,
+                        "width": 5,
+                        "distance": 30,
+                        "cross_polarity_min_distance": 30,
+                        "edge_margin_frames": 40,
+                        "edge_score_floor": 0.2,
+                    },
+                    "events": {
+                        "min_tracks": 1,
+                        "min_amplitude_px": 3.0,
+                        "min_prominence_px": 2.0,
+                        "min_width_frames": 5.0,
+                        "fit_window_width_multiplier": 1.0,
+                        "fit_boundary_smoothing_sigma_rows": 2.0,
+                        "endpoint_anchor_rows": 3,
+                        "fallback_minimum_width_frames": 30,
+                        "min_peak_separation_frames": 30,
+                        "peak_separation_width_fraction": 0.3,
+                        "duplicate_window_overlap_fraction": 0.65,
+                        "edge_margin_frames": 40,
+                        "edge_score_floor": 0.2,
+                    },
+                },
+            }
+            track_config = build_large_wave_track_config(config)
+            track_row, wave_rows, _peak_rows, _overlay = process_track(
+                job_id=uuid4(),
+                track_index=0,
+                track_path=track_path,
+                config=track_config,
+            )
+            for row in wave_rows:
+                row["metrics"]["track_index"] = 0
+            result = analyze_large_wave_events(
+                track_paths=[track_path],
+                track_rows=[track_row],
+                wave_rows=wave_rows,
+                config=config,
+            )
+
+        self.assertGreaterEqual(len(wave_rows), 1)
+        self.assertTrue(any(bool(row["metrics"].get("fallback_peak")) for row in wave_rows))
+        self.assertGreaterEqual(len(result.measurements), 1)
+        self.assertTrue(any(bool(row.get("fallback_peak")) for row in result.measurements))
+
     def test_track_detail_minima_fit_metadata_maps_back_to_original_sign(self) -> None:
         fit_meta = {
             "fit_amp_A": 2.0,
@@ -1174,15 +1437,18 @@ class BackendCoreTests(unittest.TestCase):
                 },
             }
 
+            track_rows = [{"track_index": 0, "metrics": {"num_peaks": 2}}]
             result = analyze_large_wave_events(
                 track_paths=[track_path],
-                track_rows=[{"track_index": 0, "metrics": {}}],
+                track_rows=track_rows,
                 wave_rows=[candidate, duplicate],
                 config=config,
             )
 
         self.assertEqual(len(result.measurements), 1)
         self.assertEqual(len(result.wave_rows), 1)
+        self.assertEqual(track_rows[0]["metrics"]["num_peaks"], 1)
+        self.assertEqual(track_rows[0]["metrics"]["large_wave_measurement_count"], 1)
         measurement = result.measurements[0]
         self.assertEqual(measurement["fit_method"], "asymmetric_half_cosine_local_chord")
         self.assertAlmostEqual(measurement["amplitude_px"], measurement["fit_amp_A"], places=6)

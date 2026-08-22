@@ -1,5 +1,5 @@
 import type { TrackDetail } from "../api";
-import type { OverlayTrackEvent } from "../OverlayCanvas";
+import type { OverlayProjection, OverlayTrackEvent } from "../OverlayCanvas";
 import { TrackDetailChart } from "./TrackDetailChart";
 
 export function SelectionPanel(props: {
@@ -23,6 +23,7 @@ export function SelectionPanel(props: {
   overlayColor?: string;
   baseImageUrl?: string | null;
   frameCoordinateHeight?: number | null;
+  viewerProjection?: OverlayProjection | null;
   debugImageUrl?: string | null;
   debugOpacity?: number;
   onDownloadTrackDetail?: () => void;
@@ -40,6 +41,7 @@ export function SelectionPanel(props: {
     overlayColor,
     baseImageUrl,
     frameCoordinateHeight,
+    viewerProjection,
     debugImageUrl,
     debugOpacity,
     onDownloadTrackDetail,
@@ -260,6 +262,7 @@ export function SelectionPanel(props: {
                   overlayColor={overlayColor}
                   baseImageUrl={baseImageUrl}
                   frameCoordinateHeight={frameCoordinateHeight}
+                  viewerProjection={viewerProjection}
                   debugImageUrl={debugImageUrl}
                   debugOpacity={debugOpacity}
                 />

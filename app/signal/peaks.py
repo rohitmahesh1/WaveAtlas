@@ -87,6 +87,8 @@ def ensure_minimum_peaks(
     properties: Optional[dict] = None,
     *,
     minimum: int = 1,
+    edge_margin: Optional[int] = None,
+    edge_score_floor: float = 0.2,
 ) -> Tuple[np.ndarray, dict]:
     """
     Ensure a non-empty signal has at least one peak.
@@ -104,7 +106,22 @@ def ensure_minimum_peaks(
 
     finite = np.isfinite(sig)
     if np.any(finite):
-        fallback_idx = int(np.argmax(np.where(finite, sig, -np.inf)))
+        finite_values = sig[finite]
+        minimum_value = float(np.min(finite_values))
+        strength = np.where(finite, sig - minimum_value, 0.0)
+        margin = max(0, int(edge_margin or 0))
+        if margin > 0 and sig.size > 1:
+            distance_to_edge = np.minimum(
+                np.arange(sig.size, dtype=float),
+                np.arange(sig.size - 1, -1, -1, dtype=float),
+            )
+            floor = float(np.clip(edge_score_floor, 0.0, 1.0))
+            edge_weight = floor + (1.0 - floor) * np.clip(distance_to_edge / margin, 0.0, 1.0)
+            # The small baseline term makes a flat signal prefer the interior.
+            fallback_score = (strength + max(float(np.max(strength)), 1.0) * 1e-6) * edge_weight
+        else:
+            fallback_score = strength
+        fallback_idx = int(np.argmax(np.where(finite, fallback_score, -np.inf)))
         fallback_prominence = float(sig[fallback_idx] - np.nanmedian(sig[finite]))
     else:
         fallback_idx = int(sig.size // 2)

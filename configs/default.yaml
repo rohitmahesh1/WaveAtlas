@@ -143,10 +143,15 @@ analysis:
     peaks:
       event_polarity: both
       adaptive: false
-      minimum_per_track: 0
+      minimum_per_track: 1
+      minimum_scope: track
       prominence: 3.0
       width: 5
       distance: 30
+      cross_polarity_min_distance: 30
+      cross_polarity_policy: stronger
+      edge_margin_frames: 40
+      edge_score_floor: 0.2
       smoothing_sigma_rows: 3.0
     events:
       min_tracks: 2
@@ -157,8 +162,21 @@ analysis:
       curvature_half_window_rows: 8
       fit_window_width_multiplier: 1.0
       fit_boundary_smoothing_sigma_rows: 4.0
+      fit_boundary_smoothing_scales: [1.0, 2.0, 3.0, 4.0]
+      fit_boundary_max_sigma_fraction: 0.125
+      fit_boundary_baseline_tolerance_fraction: 0.02
+      fit_candidate_error_tolerance: 0.25
+      fit_candidate_max_error_vnmse: 0.8
       endpoint_anchor_rows: 7
       max_period_boundary_error_fraction: 0.5
+      min_peak_separation_frames: 30
+      peak_separation_width_fraction: 0.3
+      duplicate_window_overlap_fraction: 0.65
+      duplicate_support_overlap_fraction: 0.8
+      edge_margin_frames: 40
+      edge_margin_fraction: 0.1
+      edge_score_floor: 0.2
+      fallback_minimum_width_frames: 30
 
 detrend:
   degree: 1

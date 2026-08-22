@@ -870,18 +870,25 @@ def _detect_peak_sets(
     smoothing_sigma = float(peaks_cfg.get("smoothing_sigma_rows", 0.0) or 0.0)
     if smoothing_sigma > 0 and base_signal.size > 1:
         base_signal = gaussian_filter1d(base_signal, sigma=smoothing_sigma, mode="nearest")
+    track_minimum_scope = str(peaks_cfg.get("minimum_scope", "polarity")).lower() == "track"
+    detection_cfg = dict(peaks_cfg)
+    if track_minimum_scope:
+        detection_cfg["minimum_per_track"] = 0
     out: List[Dict[str, Any]] = []
     for spec in specs:
         sign = int(spec["sign"])
         signal = base_signal * float(sign)
-        peaks_idx, peak_props = _detect_peaks(signal, peaks_cfg, frames_per_period)
+        peaks_idx, peak_props = _detect_peaks(signal, detection_cfg, frames_per_period)
         out.append({
             **spec,
             "signal": signal,
             "peaks_idx": np.asarray(peaks_idx, dtype=int),
             "peak_props": peak_props,
         })
-    return _suppress_cross_polarity_peak_sets(out, peaks_cfg)
+    filtered = _suppress_cross_polarity_peak_sets(out, peaks_cfg)
+    if track_minimum_scope:
+        filtered = _ensure_track_minimum_peak_sets(filtered, base_signal, peaks_cfg)
+    return filtered
 
 
 def _peak_set_strengths(peak_set: Dict[str, Any]) -> np.ndarray:
@@ -972,6 +979,50 @@ def _suppress_cross_polarity_peak_sets(
     return filtered
 
 
+def _ensure_track_minimum_peak_sets(
+    peak_sets: List[Dict[str, Any]],
+    base_signal: np.ndarray,
+    peaks_cfg: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Apply the minimum once after all polarities have competed."""
+
+    minimum = max(0, int(peaks_cfg.get("minimum_per_track", 1)))
+    detected = sum(
+        int(np.asarray(peak_set.get("peaks_idx", []), dtype=int).size)
+        for peak_set in peak_sets
+    )
+    if minimum <= 0 or detected >= minimum or np.asarray(base_signal).size == 0:
+        return peak_sets
+
+    fallback_idx, fallback_props = ensure_minimum_peaks(
+        np.abs(np.asarray(base_signal, dtype=float)),
+        np.asarray([], dtype=int),
+        {},
+        minimum=1,
+        edge_margin=peaks_cfg.get("edge_margin_frames"),
+        edge_score_floor=float(peaks_cfg.get("edge_score_floor", 0.2)),
+    )
+    if fallback_idx.size == 0 or not peak_sets:
+        return peak_sets
+
+    peak_i = int(fallback_idx[0])
+    event_kind = "min" if float(base_signal[peak_i]) < 0 else "max"
+    target_i = next(
+        (
+            index
+            for index, peak_set in enumerate(peak_sets)
+            if str(peak_set.get("event_kind")) == event_kind
+        ),
+        0,
+    )
+    out = [dict(peak_set) for peak_set in peak_sets]
+    target = dict(out[target_i])
+    target["peaks_idx"] = fallback_idx
+    target["peak_props"] = fallback_props
+    out[target_i] = target
+    return out
+
+
 def _event_sort_key(row: Dict[str, Any]) -> Tuple[int, int]:
     metrics = row.get("metrics")
     if not isinstance(metrics, dict):
@@ -1055,7 +1106,14 @@ def _detect_peaks(
             nms_enable=bool(peaks_cfg.get("nms_enable", True)),
             nms_dominance_frac=float(peaks_cfg.get("nms_dominance_frac", 0.55)),
         )
-        return ensure_minimum_peaks(residual, peaks, props, minimum=int(peaks_cfg.get("minimum_per_track", 1)))
+        return ensure_minimum_peaks(
+            residual,
+            peaks,
+            props,
+            minimum=int(peaks_cfg.get("minimum_per_track", 1)),
+            edge_margin=peaks_cfg.get("edge_margin_frames"),
+            edge_score_floor=float(peaks_cfg.get("edge_score_floor", 0.2)),
+        )
     legacy_kwargs: Dict[str, Any] = {
         "prominence": float(peaks_cfg.get("prominence", 1.0)),
         "width": float(peaks_cfg.get("width", 1.0)),
@@ -1063,7 +1121,14 @@ def _detect_peaks(
     if peaks_cfg.get("distance", None) is not None:
         legacy_kwargs["distance"] = int(peaks_cfg["distance"])
     peaks, props = detect_peaks(residual, **legacy_kwargs)
-    return ensure_minimum_peaks(residual, peaks, props, minimum=int(peaks_cfg.get("minimum_per_track", 1)))
+    return ensure_minimum_peaks(
+        residual,
+        peaks,
+        props,
+        minimum=int(peaks_cfg.get("minimum_per_track", 1)),
+        edge_margin=peaks_cfg.get("edge_margin_frames"),
+        edge_score_floor=float(peaks_cfg.get("edge_score_floor", 0.2)),
+    )
 
 
 def _infer_sample(track_path: Path) -> str:

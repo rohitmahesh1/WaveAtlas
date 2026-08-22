@@ -288,6 +288,14 @@ def analyze_large_wave_events(
                 except (TypeError, ValueError):
                     continue
                 event_kind = "min" if str(metrics.get("event_kind", row.get("event_kind"))) == "min" else "max"
+                fallback_peak = bool(metrics.get("fallback_peak", False))
+                minimum_width_frames = _optional_float(metrics.get("bulge_width_frames"))
+                if fallback_peak:
+                    fallback_width = max(
+                        3.0,
+                        float(event_cfg.get("fallback_minimum_width_frames", 30.0)),
+                    )
+                    minimum_width_frames = max(minimum_width_frames or 0.0, fallback_width)
                 fit = fit_large_wave(
                     frame=frame,
                     position=position,
@@ -295,10 +303,25 @@ def analyze_large_wave_events(
                     center_idx=seed_peak_i,
                     event_kind=event_kind,
                     sampling_rate=sampling_rate,
-                    minimum_width_frames=_optional_float(metrics.get("bulge_width_frames")),
+                    minimum_width_frames=minimum_width_frames,
                     width_multiplier=float(event_cfg.get("fit_window_width_multiplier", 1.0)),
                     boundary_smoothing_sigma_rows=float(
                         event_cfg.get("fit_boundary_smoothing_sigma_rows", 4.0)
+                    ),
+                    boundary_smoothing_scales=event_cfg.get(
+                        "fit_boundary_smoothing_scales", [1.0]
+                    ),
+                    boundary_max_sigma_fraction=float(
+                        event_cfg.get("fit_boundary_max_sigma_fraction", 0.125)
+                    ),
+                    boundary_baseline_tolerance_fraction=float(
+                        event_cfg.get("fit_boundary_baseline_tolerance_fraction", 0.02)
+                    ),
+                    fit_error_tolerance=float(
+                        event_cfg.get("fit_candidate_error_tolerance", 0.25)
+                    ),
+                    max_fit_error_vnmse=float(
+                        event_cfg.get("fit_candidate_max_error_vnmse", 0.8)
                     ),
                     endpoint_anchor_rows=int(event_cfg.get("endpoint_anchor_rows", 7)),
                     curvature_half_window_rows=int(event_cfg.get("curvature_half_window_rows", 8)),
@@ -321,7 +344,12 @@ def analyze_large_wave_events(
                 measurement["_source_row"] = row
                 track_candidates.append(measurement)
 
-            for measurement in _dedupe_track_measurements(track_candidates):
+            for measurement in _dedupe_track_measurements(
+                track_candidates,
+                cfg=event_cfg,
+                track_frame_min=float(frame[0]),
+                track_frame_max=float(frame[-1]),
+            ):
                 measurement_id = f"LWM{len(measurements) + 1:04d}"
                 measurement["measurement_id"] = measurement_id
                 row = measurement.pop("_source_row")
@@ -364,7 +392,11 @@ def analyze_large_wave_events(
         track_index = int(track_row.get("track_index", -1))
         summary = track_summaries.get(track_index, _empty_track_summary(track_index, track_paths))
         metrics = track_row.get("metrics") if isinstance(track_row.get("metrics"), dict) else {}
-        metrics.update({"analysis_mode": "large_wave", **summary})
+        metrics.update({
+            "analysis_mode": "large_wave",
+            "num_peaks": summary.get("large_wave_measurement_count", 0),
+            **summary,
+        })
         track_row["metrics"] = metrics
         track_row["amplitude"] = summary.get("mean_large_wave_amplitude_px")
         track_row["frequency"] = summary.get("large_wave_frequency_hz")
@@ -393,6 +425,7 @@ def _measure_fit(
     cfg: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
     source_metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+    fallback_peak = bool(source_metrics.get("fallback_peak", False))
     fit_metrics = dict(fit.metrics)
     peak_i = int(fit.center_idx)
     event_kind = fit.event_kind
@@ -402,11 +435,11 @@ def _measure_fit(
     prominence = amplitude
     width_frames = float(fit_metrics["width_half_prominence_frames"])
 
-    if amplitude < float(cfg.get("min_amplitude_px", 3.0)):
+    if not fallback_peak and amplitude < float(cfg.get("min_amplitude_px", 3.0)):
         return None
-    if prominence < float(cfg.get("min_prominence_px", 2.0)):
+    if not fallback_peak and prominence < float(cfg.get("min_prominence_px", 2.0)):
         return None
-    if width_frames < float(cfg.get("min_width_frames", 5.0)):
+    if not fallback_peak and width_frames < float(cfg.get("min_width_frames", 5.0)):
         return None
 
     measurement = {
@@ -440,37 +473,106 @@ def _measure_fit(
             else None
         ),
         "grouped_event": False,
+        "fallback_peak": fallback_peak,
         **fit_metrics,
     }
     return measurement
 
 
-def _dedupe_track_measurements(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    def score(item: Dict[str, Any]) -> float:
+def _dedupe_track_measurements(
+    candidates: List[Dict[str, Any]],
+    *,
+    cfg: Optional[Dict[str, Any]] = None,
+    track_frame_min: Optional[float] = None,
+    track_frame_max: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    cfg = cfg or {}
+    frame_values = [_finite(item.get("peak_frame"), np.nan) for item in candidates]
+    finite_frames = [value for value in frame_values if np.isfinite(value)]
+    frame_min = _finite(track_frame_min, min(finite_frames) if finite_frames else 0.0)
+    frame_max = _finite(track_frame_max, max(finite_frames) if finite_frames else frame_min)
+    track_span = max(0.0, frame_max - frame_min)
+    edge_margin = max(
+        0.0,
+        float(cfg.get("edge_margin_frames", 0.0)),
+        track_span * max(0.0, float(cfg.get("edge_margin_fraction", 0.0))),
+    )
+    edge_floor = float(np.clip(float(cfg.get("edge_score_floor", 0.2)), 0.0, 1.0))
+    min_separation = max(0.0, float(cfg.get("min_peak_separation_frames", 0.0)))
+    width_separation_fraction = max(
+        0.0,
+        float(cfg.get("peak_separation_width_fraction", 0.0)),
+    )
+    overlap_limit = float(np.clip(
+        float(cfg.get("duplicate_window_overlap_fraction", 0.8)),
+        0.0,
+        1.0,
+    ))
+    support_overlap_limit = float(np.clip(
+        float(cfg.get("duplicate_support_overlap_fraction", 0.8)),
+        0.0,
+        1.0,
+    ))
+
+    def base_score(item: Dict[str, Any]) -> float:
         width = max(1.0, _finite(item.get("fit_window_width_frames"), 1.0))
         error = max(0.0, _finite(item.get("fit_error_vnmse"), 1.0))
         return width * max(1.0, _finite(item.get("amplitude_px"), 1.0)) / (1.0 + error)
 
+    def selection_score(item: Dict[str, Any]) -> float:
+        peak_frame = _finite(item.get("peak_frame"), frame_min)
+        edge_distance = max(0.0, min(peak_frame - frame_min, frame_max - peak_frame))
+        edge_weight = (
+            edge_floor + (1.0 - edge_floor) * min(1.0, edge_distance / edge_margin)
+            if edge_margin > 0
+            else 1.0
+        )
+        score = base_score(item) * edge_weight
+        item["peak_selection_edge_distance_frames"] = edge_distance
+        item["peak_selection_edge_weight"] = edge_weight
+        item["peak_selection_score"] = score
+        return score
+
+    def conflicts(candidate: Dict[str, Any], existing: Dict[str, Any]) -> bool:
+        candidate_frame = _finite(candidate.get("peak_frame"), np.nan)
+        existing_frame = _finite(existing.get("peak_frame"), np.nan)
+        candidate_width = max(0.0, _finite(candidate.get("fit_window_width_frames"), 0.0))
+        existing_width = max(0.0, _finite(existing.get("fit_window_width_frames"), 0.0))
+        adaptive_separation = width_separation_fraction * min(candidate_width, existing_width)
+        required_separation = max(min_separation, adaptive_separation)
+        if (
+            np.isfinite(candidate_frame)
+            and np.isfinite(existing_frame)
+            and abs(candidate_frame - existing_frame) <= required_separation
+        ):
+            return True
+        if _window_overlap_fraction(candidate, existing) >= overlap_limit:
+            return True
+        return _window_overlap_fraction(
+            candidate,
+            existing,
+            lo_key="fit_support_window_lo",
+            hi_key="fit_support_window_hi",
+        ) >= support_overlap_limit
+
     kept: List[Dict[str, Any]] = []
-    for candidate in sorted(candidates, key=score, reverse=True):
-        duplicate = False
-        for existing in kept:
-            if candidate.get("event_kind") != existing.get("event_kind"):
-                continue
-            overlap = _window_overlap_fraction(candidate, existing)
-            if overlap >= 0.8 or int(candidate["peak_i"]) == int(existing["peak_i"]):
-                duplicate = True
-                break
-        if not duplicate:
+    for candidate in sorted(candidates, key=selection_score, reverse=True):
+        if not any(conflicts(candidate, existing) for existing in kept):
             kept.append(candidate)
     return sorted(kept, key=lambda item: float(item["peak_frame"]))
 
 
-def _window_overlap_fraction(a: Dict[str, Any], b: Dict[str, Any]) -> float:
-    a_lo = int(a.get("fit_window_lo", 0))
-    a_hi = int(a.get("fit_window_hi", a_lo))
-    b_lo = int(b.get("fit_window_lo", 0))
-    b_hi = int(b.get("fit_window_hi", b_lo))
+def _window_overlap_fraction(
+    a: Dict[str, Any],
+    b: Dict[str, Any],
+    *,
+    lo_key: str = "fit_window_lo",
+    hi_key: str = "fit_window_hi",
+) -> float:
+    a_lo = int(a.get(lo_key, a.get("fit_window_lo", 0)))
+    a_hi = int(a.get(hi_key, a.get("fit_window_hi", a_lo)))
+    b_lo = int(b.get(lo_key, b.get("fit_window_lo", 0)))
+    b_hi = int(b.get(hi_key, b.get("fit_window_hi", b_lo)))
     overlap = max(0, min(a_hi, b_hi) - max(a_lo, b_lo))
     smaller = max(1, min(a_hi - a_lo, b_hi - b_lo))
     return float(overlap) / float(smaller)

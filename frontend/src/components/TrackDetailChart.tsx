@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { TrackDetail, TrackPeakRegression } from "../api";
+import type { OverlayProjection } from "../OverlayCanvas";
 
 type ChartPoint = { x: number; y: number };
 type ChartSize = { width: number; height: number };
@@ -75,22 +76,31 @@ function buildScale(
   minX: number,
   maxX: number,
   minY: number,
-  maxY: number
+  maxY: number,
+  xToYScaleRatio: number
 ): ChartScale {
   const requestedSpanX = Math.max(1e-6, maxX - minX);
   const requestedSpanY = Math.max(1e-6, maxY - minY);
   const plotWidth = Math.max(1, width - margins.left - margins.right);
   const plotHeight = Math.max(1, height - margins.top - margins.bottom);
-  const unitScale = Math.min(plotWidth / requestedSpanX, plotHeight / requestedSpanY);
-  const spanX = plotWidth / unitScale;
-  const spanY = plotHeight / unitScale;
+  const scaleRatio = Number.isFinite(xToYScaleRatio) && xToYScaleRatio > 0
+    ? xToYScaleRatio
+    : 1;
+  // Fit the local domain without changing the main heatmap's x:y projection.
+  const yScale = Math.min(
+    plotWidth / (requestedSpanX * scaleRatio),
+    plotHeight / requestedSpanY
+  );
+  const xScale = yScale * scaleRatio;
+  const spanX = plotWidth / xScale;
+  const spanY = plotHeight / yScale;
   const centerX = (minX + maxX) / 2;
   const centerY = (minY + maxY) / 2;
   const displayMinX = centerX - spanX / 2;
   const displayMinY = centerY - spanY / 2;
   return {
-    xScale: unitScale,
-    yScale: unitScale,
+    xScale,
+    yScale,
     plotX: margins.left,
     plotY: margins.top,
     plotWidth,
@@ -164,6 +174,7 @@ export function TrackDetailChart({
   overlayColor = "#008c5a",
   baseImageUrl,
   frameCoordinateHeight,
+  viewerProjection,
   debugImageUrl,
   debugOpacity = 0.6,
 }: {
@@ -171,6 +182,7 @@ export function TrackDetailChart({
   overlayColor?: string;
   baseImageUrl?: string | null;
   frameCoordinateHeight?: number | null;
+  viewerProjection?: OverlayProjection | null;
   debugImageUrl?: string | null;
   debugOpacity?: number;
 }) {
@@ -278,6 +290,9 @@ export function TrackDetailChart({
   const coordinateMaxY = Number.isFinite(resolvedCoordinateHeight) && resolvedCoordinateHeight > 0
     ? resolvedCoordinateHeight - 1
     : safeMaxY;
+  const mainViewerScaleRatio = viewerProjection && viewerProjection.xScale > 0 && viewerProjection.yScale > 0
+    ? viewerProjection.xScale / viewerProjection.yScale
+    : 1;
   const toDisplayFrame = (sourceFrame: number) => coordinateMaxY - sourceFrame;
   const toSourceFrame = (displayFrame: number) => coordinateMaxY - displayFrame;
   const viewKey = `${detail.track_index}:${safeMinX}:${safeMaxX}:${safeMinY}:${safeMaxY}`;
@@ -321,9 +336,18 @@ export function TrackDetailChart({
         domain.minX,
         domain.maxX,
         domain.minY,
-        domain.maxY
+        domain.maxY,
+        mainViewerScaleRatio
       ),
-    [chartSize.width, chartSize.height, domain.minX, domain.maxX, domain.minY, domain.maxY]
+    [
+      chartSize.width,
+      chartSize.height,
+      domain.minX,
+      domain.maxX,
+      domain.minY,
+      domain.maxY,
+      mainViewerScaleRatio,
+    ]
   );
   const clipId = useId();
   const regressionSelectId = useId();

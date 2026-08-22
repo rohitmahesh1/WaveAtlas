@@ -959,10 +959,13 @@ def run_job(
             new_processed += 1
             batch_new_processed += 1
 
-            if settings.emit_overlay_every_tracks > 0 and (new_processed % settings.emit_overlay_every_tracks == 0):
+            if (
+                not large_wave_mode
+                and settings.emit_overlay_every_tracks > 0
+                and new_processed % settings.emit_overlay_every_tracks == 0
+            ):
                 check_cancel("cancel_requested_before_overlay_event")
                 emit(EventType.overlay_track, overlay_track)
-                #print("emitting overlay")
 
             if settings.db_batch_size > 0 and (new_processed % settings.db_batch_size == 0):
                 check_cancel("cancel_requested_before_batch_write")

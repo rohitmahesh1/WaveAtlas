@@ -12,12 +12,18 @@ function isAbortError(err: unknown) {
   return err instanceof DOMException && err.name === "AbortError";
 }
 
-export function useTrackDetail(jobId: string | null, selectedTrackId: string | number | null) {
+export function useTrackDetail(
+  jobId: string | null,
+  selectedTrackId: string | number | null,
+  revision: string | number | null = null,
+) {
   const [result, setResult] = useState<TrackDetailResult | null>(null);
   const rawTrackIndex = selectedTrackId == null ? null : Number(selectedTrackId);
   const trackIndex = rawTrackIndex != null && Number.isFinite(rawTrackIndex) ? rawTrackIndex : null;
   const invalidSelection = jobId && selectedTrackId != null && trackIndex == null ? "Invalid track id" : null;
-  const requestKey = jobId && trackIndex != null ? `${jobId}:${trackIndex}` : null;
+  const requestKey = jobId && trackIndex != null
+    ? `${jobId}:${trackIndex}:${revision == null ? "initial" : String(revision)}`
+    : null;
 
   useEffect(() => {
     if (!jobId || trackIndex == null || !requestKey) return;

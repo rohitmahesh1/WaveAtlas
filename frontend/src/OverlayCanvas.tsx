@@ -111,6 +111,15 @@ export type HeatmapValues = {
   max?: number | null;
 };
 
+export type OverlayProjection = {
+  sourceWidth: number;
+  sourceHeight: number;
+  displayWidth: number;
+  displayHeight: number;
+  xScale: number;
+  yScale: number;
+};
+
 export function OverlayCanvas(props: {
   imageUrl: string | null;
   debugImageUrl?: string | null;
@@ -129,6 +138,7 @@ export function OverlayCanvas(props: {
   filterFn?: (t: OverlayTrackEvent) => boolean;
   colorOverrideFn?: (t: OverlayTrackEvent) => string | undefined;
   hitRadiusPx?: number;
+  onProjectionChange?: (projection: OverlayProjection | null) => void;
 }) {
   const {
     imageUrl,
@@ -148,6 +158,7 @@ export function OverlayCanvas(props: {
     filterFn,
     colorOverrideFn,
     hitRadiusPx = 8,
+    onProjectionChange,
   } = props;
 
   const imgRef = useRef<HTMLImageElement | null>(null);
@@ -206,6 +217,22 @@ export function OverlayCanvas(props: {
     ro.observe(viewport);
     return () => ro.disconnect();
   }, [imageSize]);
+
+  useEffect(() => {
+    if (!onProjectionChange) return;
+    if (!imageSize || stageSize.width <= 0 || stageSize.height <= 0) {
+      onProjectionChange(null);
+      return;
+    }
+    onProjectionChange({
+      sourceWidth: imageSize.width,
+      sourceHeight: imageSize.height,
+      displayWidth: stageSize.width,
+      displayHeight: stageSize.height,
+      xScale: stageSize.width / imageSize.width,
+      yScale: stageSize.height / imageSize.height,
+    });
+  }, [imageSize, stageSize.height, stageSize.width, onProjectionChange]);
 
   useLayoutEffect(() => {
     const tooltip = tooltipRef.current;
