@@ -391,10 +391,11 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
 
   async function pollForBaseHeatmap(id: string) {
     const myToken = ++pollTokenRef.current;
+    let displayImageFound = false;
     for (let i = 0; i < 60; i++) {
       if (pollTokenRef.current !== myToken) return;
       try {
-        const [job, overlayArts, baseArts, valueArts, imageUploads] = await Promise.all([
+        const results = await Promise.allSettled([
           getJob(id),
           listArtifacts(id, { kind: "overlay", limit: 2000 }),
           listArtifacts(id, { kind: "base_heatmap", limit: 1 }),
@@ -402,42 +403,67 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
           listArtifacts(id, { kind: "upload_image", limit: 1 }),
         ]);
         if (pollTokenRef.current !== myToken) return;
-        setAnalysisMode(normalizeAnalysisMode(job.analysis_mode));
-        const overlays = overlayArts
-          .filter((a) => {
-            if (!a.label || !a.download_url) return false;
-            const label = String(a.label);
-            if (label.endsWith(":stats") || label === "stats") return false;
-            if (a.content_type && !a.content_type.startsWith("image/")) return false;
-            return true;
-          })
-          .map((a) => {
-            const label = normalizeOverlayLabel(String(a.label));
-            return { label, url: normalizeOverlayUrl(a.download_url) };
-          });
-        if (overlays.length) {
-          const uniq = new Map<string, string>();
-          for (const o of overlays) uniq.set(o.label, o.url);
-          const list = Array.from(uniq.entries())
-            .map(([label, url]) => ({ label, url }))
-            .sort((a, b) => a.label.localeCompare(b.label));
-          setDebugOverlays(list);
+
+        const missingJob = results.some(
+          (result) => result.status === "rejected" && isApiError(result.reason, 404)
+        );
+        if (missingJob) {
+          clearMissingJobSession(id);
+          return;
         }
-        const base = baseArts.find((a) => a.kind === "base_heatmap" || a.label === "base_heatmap");
+
+        const [jobResult, overlayResult, baseResult, valuesResult, imageResult] = results;
+        let statusText = "";
+        if (jobResult.status === "fulfilled") {
+          statusText = String(jobResult.value.status || "");
+          setAnalysisMode(normalizeAnalysisMode(jobResult.value.analysis_mode));
+        }
+
+        if (overlayResult.status === "fulfilled") {
+          const overlays = overlayResult.value
+            .filter((a) => {
+              if (!a.label || !a.download_url) return false;
+              const label = String(a.label);
+              if (label.endsWith(":stats") || label === "stats") return false;
+              if (a.content_type && !a.content_type.startsWith("image/")) return false;
+              return true;
+            })
+            .map((a) => {
+              const label = normalizeOverlayLabel(String(a.label));
+              return { label, url: normalizeOverlayUrl(a.download_url) };
+            });
+          if (overlays.length) {
+            const uniq = new Map<string, string>();
+            for (const o of overlays) uniq.set(o.label, o.url);
+            const list = Array.from(uniq.entries())
+              .map(([label, url]) => ({ label, url }))
+              .sort((a, b) => a.label.localeCompare(b.label));
+            setDebugOverlays(list);
+          }
+        }
+
+        const base = baseResult.status === "fulfilled"
+          ? baseResult.value.find((a) => a.kind === "base_heatmap" || a.label === "base_heatmap")
+          : undefined;
         let info: HeatmapCoordInfo | null = null;
         if (base?.download_url) {
-          setBaseImageUrl(base.download_url);
+          setBaseImageUrl(normalizeOverlayUrl(base.download_url));
           info = parseHeatmapCoordInfo(base.meta);
           setBaseImageInfo(info);
+          displayImageFound = true;
         }
-        const valuesArtifact = valueArts.find((a) => a.label === "base_heatmap_values");
+        const valuesArtifact = valuesResult.status === "fulfilled"
+          ? valuesResult.value.find((a) => a.label === "base_heatmap_values")
+          : undefined;
         if (valuesArtifact && valuesArtifact.id !== heatmapValuesArtifactIdRef.current) {
           const loaded = await loadHeatmapValuesArtifact(valuesArtifact, info);
           if (pollTokenRef.current !== myToken) return;
           heatmapValuesArtifactIdRef.current = valuesArtifact.id;
           setHeatmapValues(loaded);
         }
-        const original = imageUploads.find((a) => a.kind === "upload_image" || a.label === "upload");
+        const original = imageResult.status === "fulfilled"
+          ? imageResult.value.find((a) => a.kind === "upload_image" || a.label === "upload")
+          : undefined;
         if (original?.download_url) {
           const url = normalizeOverlayUrl(original.download_url);
           setOriginalImageUrl(url);
@@ -445,10 +471,16 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
             setBaseImageUrl(url);
             setBaseImageInfo(null);
             clearHeatmapValues();
+            displayImageFound = true;
           }
         }
-        const statusText = String(job.status || "");
-        if (statusStopsArtifactPolling(statusText)) {
+
+        if (statusText === "completed" && displayImageFound) {
+          setStatus(statusText);
+          stopArtifactPolling();
+          return;
+        }
+        if (statusStopsArtifactPolling(statusText) && statusText !== "completed") {
           setStatus(statusText);
           stopArtifactPolling();
           if (statusText === "cancelled" || statusText === "cancel_requested") {
@@ -537,7 +569,9 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
           if (st) {
             const statusText = String(st);
             setStatus(statusText);
-            if (statusStopsArtifactPolling(statusText)) stopArtifactPolling();
+            if (statusStopsArtifactPolling(statusText) && statusText !== "completed") {
+              stopArtifactPolling();
+            }
           }
           const prog = asRecord(payload?.progress);
           if (prog?.stage) {
@@ -555,7 +589,9 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
           if (st) {
             const statusText = String(st);
             setStatus(statusText);
-            if (statusStopsArtifactPolling(statusText)) stopArtifactPolling();
+            if (statusStopsArtifactPolling(statusText) && statusText !== "completed") {
+              stopArtifactPolling();
+            }
             if (statusText === "cancelled") {
               setCurrentStage("cancelled");
               setStageDetail(null);
