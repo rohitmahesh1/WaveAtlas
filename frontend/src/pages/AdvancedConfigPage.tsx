@@ -216,8 +216,8 @@ export default function AdvancedConfigPage() {
               try {
                 await resumeJob(jobId);
                 loadJob(jobId);
-              } catch {
-                // no-op
+              } catch (error) {
+                window.alert(error instanceof Error ? error.message : "Could not resume this analysis.");
               }
             }}
             onNewRun={() => {

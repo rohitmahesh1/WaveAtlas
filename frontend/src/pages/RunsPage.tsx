@@ -53,8 +53,8 @@ export default function RunsPage(props: { onOpenViewer: () => void }) {
                 await resumeJob(id);
                 loadJob(id);
                 onOpenViewer();
-              } catch {
-                // no-op
+              } catch (error) {
+                window.alert(error instanceof Error ? error.message : "Could not resume this analysis.");
               }
             }}
             onDownload={downloadWaves}

@@ -45,4 +45,12 @@ legacy/
 # Temporary Backend artifacts
 export/
 waveatlas-cli/
+desktop/node_modules/
+desktop/payload/
+desktop/build/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+desktop/src-tauri/icons/
+desktop/build-manifest.json
+desktop/THIRD_PARTY_NOTICES.txt
 ioae071.pdf

@@ -13,7 +13,14 @@ export class ApiError extends Error {
   body: string;
 
   constructor(response: Response, body: string) {
-    super(body || `${response.status} ${response.statusText}`);
+    let message = body || `${response.status} ${response.statusText}`;
+    try {
+      const parsed: unknown = JSON.parse(body);
+      if (parsed && typeof parsed === "object" && "detail" in parsed && typeof parsed.detail === "string") {
+        message = parsed.detail;
+      }
+    } catch { /* Plain-text errors are already readable. */ }
+    super(message);
     this.name = "ApiError";
     this.status = response.status;
     this.statusText = response.statusText;
@@ -346,4 +353,22 @@ export function wsUrl(path: string, params?: Record<string, string | number | bo
   }
 
   return u.toString();
+}
+
+export type RuntimeInfo = {
+  mode: "desktop" | "hosted";
+  version: string | null;
+  upload_transport: "local" | "gcs";
+  max_active_jobs: number | null;
+};
+let runtimePromise: Promise<RuntimeInfo> | undefined;
+export function getRuntime(): Promise<RuntimeInfo> {
+  runtimePromise ??= fetch(`${API_BASE}/api/runtime`, { credentials: "include" }).then(async (res) => {
+    if (!res.ok) await throwApiError(res);
+    return res.json() as Promise<RuntimeInfo>;
+  }).catch((error: unknown) => {
+    runtimePromise = undefined;
+    throw error;
+  });
+  return runtimePromise;
 }

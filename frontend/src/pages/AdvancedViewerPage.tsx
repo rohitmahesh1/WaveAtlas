@@ -666,8 +666,8 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
                 await resumeJob(jobId);
                 loadJob(jobId);
                 refreshJobs();
-              } catch {
-                // no-op for now
+              } catch (error) {
+                window.alert(error instanceof Error ? error.message : "Could not resume this analysis.");
               }
             }}
             onNewRun={() => {
@@ -733,8 +733,8 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
                 await resumeJob(id);
                 loadJob(id);
                 refreshJobs();
-              } catch {
-                // no-op for now
+              } catch (error) {
+                window.alert(error instanceof Error ? error.message : "Could not resume this analysis.");
               }
             }}
             onDownload={downloadPrimaryAnalysis}

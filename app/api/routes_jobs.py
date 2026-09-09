@@ -42,7 +42,7 @@ from ..models import (
     Track,
     Wave,
 )
-from ..pipeline import PipelineSettings, run_job
+from ..pipeline import PipelineSettings
 from ..analysis_mode import LARGE_WAVE_ANALYSIS_MODE, RIPPLE_ANALYSIS_MODE, resolve_analysis_mode
 from ..time_utils import utc_now_iso
 from ..extract_core import (
@@ -895,6 +895,7 @@ async def upload_table(
 @router.post("/jobs/{job_id}/start", response_model=JobRead)
 def start_job(
     job_id: UUID,
+    request: Request,
     background: BackgroundTasks,
     response: Response,
     owner_session_id: UUID = Depends(get_owner_session_id),
@@ -911,28 +912,17 @@ def start_job(
     settings = _pipeline_settings_from_env()
     config = _effective_pipeline_config(job)
 
-    job, claimed = store.claim_start(job_id, config=config)
-    if not claimed:
-        return _job_read_with_filename(session, job)
-
-    def _run() -> None:
-        with Session(engine) as bg_session:
-            bg_store = JobStore(session=bg_session)
-            run_job(
-                job_id,
-                job_store=bg_store,
-                artifact_store=artifact_store,
-                config=config,
-                settings=settings,
-            )
-
-    background.add_task(_run)
+    from .job_execution import schedule_job
+    job = schedule_job(store=store, job=job, config=config, settings=settings,
+                       artifacts=artifact_store, background=background, engine=engine,
+                       desktop=getattr(request.app.state, "desktop", None))
     return _job_read_with_filename(session, job)
 
 
 @router.post("/jobs/{job_id}/resume", response_model=JobRead)
 def resume_job(
     job_id: UUID,
+    request: Request,
     background: BackgroundTasks,
     response: Response,
     owner_session_id: UUID = Depends(get_owner_session_id),
@@ -949,23 +939,10 @@ def resume_job(
     settings = _pipeline_settings_from_env()
     config = _effective_pipeline_config(job)
 
-    job, claimed = store.claim_resume(job_id, config=config)
-    if not claimed:
-        return _job_read_with_filename(session, job)
-
-    def _run() -> None:
-        with Session(engine) as bg_session:
-            bg_store = JobStore(session=bg_session)
-            run_job(
-                job_id,
-                job_store=bg_store,
-                artifact_store=artifact_store,
-                config=config,
-                settings=settings,
-                resume=True,
-            )
-
-    background.add_task(_run)
+    from .job_execution import schedule_job
+    job = schedule_job(store=store, job=job, config=config, settings=settings,
+                       artifacts=artifact_store, background=background, engine=engine,
+                       desktop=getattr(request.app.state, "desktop", None), resume=True)
     return _job_read_with_filename(session, job)
 
 

@@ -1,5 +1,7 @@
 # WaveAtlas
 
+Windows desktop support is being developed on `feat/windows-distribution`. See the [Windows build and release guide](desktop/README.md) for local storage, packaging, signing, and validation. The hosted development workflow remains available.
+
 WaveAtlas is a data analysis and visualization platform for turning kymograph-style research data into quantitative, inspectable wave dynamics. It accepts tabular intensity data or color-mapped image uploads, converts them into analysis-ready heatmaps, runs a KymoButler-inspired ONNX/Python extraction pipeline, and presents the resulting tracks, peaks, regressions, and metrics in an interactive browser viewer.
 
 ## What It Does
