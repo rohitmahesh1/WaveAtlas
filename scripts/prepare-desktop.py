@@ -6,7 +6,9 @@ import argparse
 import hashlib
 from importlib import metadata
 import json
+import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -20,11 +22,28 @@ def digest(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def build_commit() -> str:
+    commit = os.environ.get("WAVEATLAS_BUILD_COMMIT")
+    if commit is None:
+        try:
+            commit = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+            ).strip()
+        except (FileNotFoundError, subprocess.CalledProcessError) as error:
+            raise RuntimeError(
+                "Unable to determine the source commit; set WAVEATLAS_BUILD_COMMIT "
+                "when building from an exported source archive."
+            ) from error
+    if re.fullmatch(r"[0-9a-fA-F]{40}", commit) is None:
+        raise RuntimeError("The source commit must be a 40-character Git object ID.")
+    return commit.lower()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--fetch-models", action="store_true")
     args = parser.parse_args()
-    models = json.loads((ROOT / "desktop/models.json").read_text())
+    models = json.loads((ROOT / "desktop/models.json").read_text(encoding="utf-8"))
     exports = ROOT / "export"
     exports.mkdir(exist_ok=True)
     for name, expected in models["files"].items():
@@ -51,19 +70,16 @@ def main():
     from app.desktop import VERSION
 
     for file in ("desktop/src-tauri/tauri.conf.json", "desktop/package.json"):
-        if json.loads((ROOT / file).read_text())["version"] != VERSION:
+        if json.loads((ROOT / file).read_text(encoding="utf-8"))["version"] != VERSION:
             raise RuntimeError(f"Version mismatch in {file}")
     packages = {
         d.metadata["Name"]: d.version
         for d in metadata.distributions()
         if d.metadata["Name"]
     }
-    commit = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
-    ).strip()
     manifest = {
         "version": VERSION,
-        "commit": commit,
+        "commit": build_commit(),
         "model_release": models["release"],
         "models": models["files"],
         "python": sys.version.split()[0],

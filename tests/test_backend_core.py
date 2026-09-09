@@ -33,6 +33,7 @@ from app.api.routes_jobs import (
 )
 from app.io.image_to_heatmap import image_to_heatmap_bytes
 from app.io.table_to_heatmap import table_to_heatmap_bytes, table_to_heatmap_payload
+from app.heatmap_values import read_cv_image, write_cv_image
 from app.job_store import JobStore, _PEAK_MODEL_KEYS, _WAVE_MODEL_KEYS, _json_safe, _row_for_metric_model
 from app.large_wave_extraction import (
     _RidgeTrace,
@@ -124,13 +125,23 @@ def _base_config(*, fit_target: str | None = None, event_polarity: str = "both")
 
 
 class BackendCoreTests(unittest.TestCase):
+    def test_image_io_supports_unicode_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "Workspace ü with spaces" / "heatmap.png"
+            path.parent.mkdir()
+            expected = np.arange(64, dtype=np.uint8).reshape((8, 8))
+            write_cv_image(path, expected)
+            actual = read_cv_image(path, 0)
+            self.assertIsNotNone(actual)
+            np.testing.assert_array_equal(actual, expected)
+
     def test_analysis_mode_defaults_to_standard_and_accepts_ripple_aliases(self) -> None:
         self.assertEqual(resolve_analysis_mode({}), STANDARD_ANALYSIS_MODE)
         self.assertEqual(resolve_analysis_mode({"analysis": {"mode": "ripple"}}), RIPPLE_ANALYSIS_MODE)
         self.assertEqual(resolve_analysis_mode({"analysis": {"mode": "ripple_family"}}), RIPPLE_ANALYSIS_MODE)
 
     def test_default_config_enables_requested_extraction_defaults(self) -> None:
-        config = yaml.safe_load(Path("configs/default.yaml").read_text())
+        config = yaml.safe_load(Path("configs/default.yaml").read_text(encoding="utf-8"))
 
         self.assertEqual(config["peaks"]["event_polarity"], "both")
         self.assertEqual(config["features"]["fit_target"], "raw_wave")

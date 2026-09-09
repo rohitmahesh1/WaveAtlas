@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 import json
 import os
 from pathlib import Path
@@ -132,7 +133,7 @@ class DesktopTests(unittest.TestCase):
         with self.assertRaises(Timeout):
             other.lock.acquire()
         self.assertEqual(self.workspace.configure(), self.owner)
-        with sqlite3.connect(self.workspace.database) as db:
+        with closing(sqlite3.connect(self.workspace.database)) as db:
             # Roll back only the migration metadata and its new schema columns.
             for table in ("waves", "peaks"):
                 db.execute(f"DROP INDEX ix_{table}_job_event_kind")
@@ -142,6 +143,7 @@ class DesktopTests(unittest.TestCase):
             db.execute(
                 "UPDATE alembic_version SET version_num='0002_image_upload_kind'"
             )
+            db.commit()
         self.workspace.migrate()
         self.assertEqual(
             len(list((self.workspace.root / "backups").glob("*.sqlite"))), 1
@@ -152,8 +154,9 @@ class DesktopTests(unittest.TestCase):
         )
 
     def test_newer_schema_is_rejected_without_mutating_database(self):
-        with sqlite3.connect(self.workspace.database) as db:
+        with closing(sqlite3.connect(self.workspace.database)) as db:
             db.execute("UPDATE alembic_version SET version_num='future_release'")
+            db.commit()
         before = self.workspace.database.read_bytes()
         with self.assertRaisesRegex(RuntimeError, "newer WaveAtlas"):
             self.workspace.migrate()

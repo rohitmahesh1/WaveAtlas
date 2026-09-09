@@ -12,7 +12,12 @@ from scipy.signal import find_peaks
 from skimage.transform import probabilistic_hough_line
 
 from .cancel import CancellationRequested
-from .heatmap_values import load_heatmap_values, normalize_heatmap_values
+from .heatmap_values import (
+    load_heatmap_values,
+    normalize_heatmap_values,
+    read_cv_image,
+    write_cv_image,
+)
 
 
 CancelCallback = Optional[Callable[[], bool]]
@@ -968,7 +973,7 @@ def _write_debug_artifacts(
     traces: Sequence[_Trace],
     manifest: Dict[str, Any],
 ) -> None:
-    image = cv2.imread(str(heatmap_path), cv2.IMREAD_COLOR)
+    image = read_cv_image(heatmap_path, cv2.IMREAD_COLOR)
     if image is None:
         image = np.zeros((*candidates.shape, 3), dtype=np.uint8)
     if image.shape[:2] != candidates.shape:
@@ -982,11 +987,11 @@ def _write_debug_artifacts(
         cv2.polylines(final_mask, [points], False, 255, 1, cv2.LINE_8)
     if probability is not None:
         scaled = np.clip(probability * 255.0, 0, 255).astype(np.uint8)
-        cv2.imwrite(str(debug_dir / "prob.png"), scaled)
-    cv2.imwrite(str(debug_dir / "mask_raw.png"), candidates.astype(np.uint8) * 255)
-    cv2.imwrite(str(debug_dir / "mask_filtered.png"), seeds)
-    cv2.imwrite(str(debug_dir / "skeleton.png"), final_mask)
-    cv2.imwrite(str(base_dir / "overlay_tracks.png"), overlay)
+        write_cv_image(debug_dir / "prob.png", scaled)
+    write_cv_image(debug_dir / "mask_raw.png", candidates.astype(np.uint8) * 255)
+    write_cv_image(debug_dir / "mask_filtered.png", seeds)
+    write_cv_image(debug_dir / "skeleton.png", final_mask)
+    write_cv_image(base_dir / "overlay_tracks.png", overlay)
     (debug_dir / "stats.txt").write_text(
         "\n".join(
             [

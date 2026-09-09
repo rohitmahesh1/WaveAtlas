@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 import json
 import os
 import sqlite3
@@ -91,7 +92,7 @@ class Workspace:
         scripts = ScriptDirectory.from_config(config)
         current = None
         if self.database.exists():
-            with sqlite3.connect(self.database) as db:
+            with closing(sqlite3.connect(self.database)) as db:
                 tables = {
                     r[0]
                     for r in db.execute(
@@ -120,8 +121,8 @@ class Workspace:
                     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
                     backup = self.root / "backups" / f"before-upgrade-{stamp}.sqlite"
                     with (
-                        sqlite3.connect(self.database) as src,
-                        sqlite3.connect(backup) as dest,
+                        closing(sqlite3.connect(self.database)) as src,
+                        closing(sqlite3.connect(backup)) as dest,
                     ):
                         src.backup(dest)
         command.upgrade(config, "head")

@@ -143,7 +143,7 @@ def _pipeline_config_from_env() -> Dict[str, Any]:
     p = _pipeline_config_path()
     if not p.exists():
         raise HTTPException(status_code=500, detail=f"Pipeline config not found: {p}")
-    data = yaml.safe_load(p.read_text())
+    data = yaml.safe_load(p.read_text(encoding="utf-8"))
     if data is None:
         return {}
     if not isinstance(data, dict):
@@ -678,7 +678,7 @@ def get_default_config_text() -> Response:
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"Config not found: {path}")
     try:
-        raw = path.read_text()
+        raw = path.read_text(encoding="utf-8")
         parsed = yaml.safe_load(raw)
         if parsed is not None and not isinstance(parsed, dict):
             raise HTTPException(status_code=500, detail="Default config must be a YAML mapping")
@@ -694,7 +694,7 @@ def get_config_docs() -> Response:
     path = _config_docs_path()
     if not path.exists():
         raise HTTPException(status_code=404, detail="Config docs not found")
-    return Response(content=path.read_text(), media_type="text/markdown")
+    return Response(content=path.read_text(encoding="utf-8"), media_type="text/markdown")
 
 
 @router.post("/config/validate")

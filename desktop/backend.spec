@@ -19,7 +19,7 @@ for package in ("onnxruntime", "skimage"):
 
 a = Analysis([str(root / "desktop/backend_entry.py")], pathex=[str(root)],
     binaries=binaries, datas=datas, hiddenimports=hiddenimports,
-    excludes=["google", "psycopg2", "tkinter", "pytest", "httpx", "IPython"],
+    excludes=["psycopg2", "tkinter", "pytest", "httpx", "IPython"],
     hooksconfig={"matplotlib": {"backends": ["Agg"]}})
 pyz = PYZ(a.pure)
 # Console subsystem preserves the private stdio protocol. The native shell starts

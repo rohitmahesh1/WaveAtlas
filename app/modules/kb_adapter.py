@@ -15,6 +15,7 @@ from skimage.filters import apply_hysteresis_threshold
 from skimage.morphology import thin as _thin
 
 from ..cancel import CancellationRequested
+from ..heatmap_values import read_cv_image, write_cv_image
 from .kymobutler_pt import get_kymobutler, filter_components, prob_to_mask, prune_endpoints
 from .tracker import CrossingTracker, Track, enforce_one_point_per_row
 
@@ -1583,7 +1584,7 @@ def run_kymobutler(
     dbg_dir.mkdir(parents=True, exist_ok=True)
 
     _progress("load_image")
-    gray_orig = cv2.imread(str(heatmap_path), cv2.IMREAD_GRAYSCALE)
+    gray_orig = read_cv_image(heatmap_path, cv2.IMREAD_GRAYSCALE)
     if gray_orig is None:
         raise FileNotFoundError(heatmap_path)
     h0, w0 = gray_orig.shape
@@ -1712,18 +1713,18 @@ def run_kymobutler(
 
     if debug_save_images:
         _check_cancel()
-        cv2.imwrite(str(dbg_dir / "prob.png"), (prob * 255).astype(np.uint8))
+        write_cv_image(dbg_dir / "prob.png", (prob * 255).astype(np.uint8))
         _check_cancel()
-        cv2.imwrite(str(dbg_dir / "mask_raw.png"), (mask0 * 255))
+        write_cv_image(dbg_dir / "mask_raw.png", mask0 * 255)
         _check_cancel()
-        cv2.imwrite(str(dbg_dir / "mask_clean.png"), (mask * 255))
+        write_cv_image(dbg_dir / "mask_clean.png", mask * 255)
         _check_cancel()
-        cv2.imwrite(str(dbg_dir / "mask_filtered.png"), (mask_f * 255))
+        write_cv_image(dbg_dir / "mask_filtered.png", mask_f * 255)
         _check_cancel()
-        cv2.imwrite(str(dbg_dir / "skeleton.png"), (skel * 255))
+        write_cv_image(dbg_dir / "skeleton.png", skel * 255)
         if hmask is not None:
             _check_cancel()
-            cv2.imwrite(str(dbg_dir / "mask_hysteresis.png"), (hmask.astype(np.uint8) * 255))
+            write_cv_image(dbg_dir / "mask_hysteresis.png", hmask.astype(np.uint8) * 255)
         with open(dbg_dir / "stats.txt", "w") as f:
             f.write(f"prob_min={float(prob.min()):.6f} prob_max={float(prob.max()):.6f}\n")
             f.write(f"thr_used={float(used_thr):.6f}\n")
@@ -1858,7 +1859,7 @@ def run_kymobutler(
             for y, x in t.points:
                 cv2.circle(overlay, (int(x), int(y)), 1, (0, 255, 0), -1)
         _check_cancel()
-        cv2.imwrite(str(base_dir / "overlay_tracks.png"), overlay)
+        write_cv_image(base_dir / "overlay_tracks.png", overlay)
 
     if verbose:
         lengths = [_track_len_rows(t) for t in tracks] if tracks else []

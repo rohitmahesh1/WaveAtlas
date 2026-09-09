@@ -7,6 +7,7 @@ stay on loopback. The private readiness message is never printed to build logs.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 from pathlib import Path
 import queue
@@ -79,14 +80,22 @@ class Backend:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--backend", type=Path)
+    parser.add_argument("--workspace", type=Path)
     args = parser.parse_args()
     command = (
         [str(args.backend.resolve())]
         if args.backend
         else [sys.executable, "-m", "app.desktop.entry"]
     )
-    with tempfile.TemporaryDirectory(prefix="waveatlas-smoke-") as temporary:
-        workspace = Path(temporary) / "Lab workspace ü"
+    workspace_context = (
+        contextlib.nullcontext(args.workspace.resolve())
+        if args.workspace
+        else tempfile.TemporaryDirectory(prefix="waveatlas-smoke-")
+    )
+    with workspace_context as temporary:
+        workspace = Path(temporary)
+        if args.workspace is None:
+            workspace /= "Lab workspace ü"
         backend = Backend(command, workspace)
         try:
             assert backend.request("/api/runtime")["upload_transport"] == "local"
@@ -150,8 +159,15 @@ def main():
                         break
                     time.sleep(0.5)
                 if job["status"] != "completed":
+                    log_path = workspace / "logs/backend.log"
+                    details = (
+                        log_path.read_text(encoding="utf-8", errors="replace")[-12000:]
+                        if log_path.is_file()
+                        else "Backend log is unavailable."
+                    )
                     raise RuntimeError(
-                        f"{mode} analysis failed: {job.get('error', job['status'])}"
+                        f"{mode} analysis failed: {job.get('error', job['status'])}\n"
+                        f"Backend log tail:\n{details}"
                     )
                 assert job["tracks_done"] > 0, f"No tracks were measured for {mode}"
                 artifacts = backend.request(f"/api/jobs/{job_id}/artifacts")
