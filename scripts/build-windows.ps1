@@ -23,7 +23,7 @@ Run-Checked "python" @("-m", "PyInstaller", "--noconfirm", "--distpath", "deskto
 Run-Checked "$root/desktop/payload/waveatlas-backend.exe" @("--workspace", "$root/desktop/build/check-workspace", "--check")
 Run-Checked "python" @("scripts/smoke-desktop.py", "--backend", "$root/desktop/payload/waveatlas-backend.exe")
 if ($Signed) {
-    if (-not $env:WAVEATLAS_SIGN_COMMAND) { throw "Set WAVEATLAS_SIGN_COMMAND to a signing wrapper accepting one file path. See desktop/README.md." }
+    if (-not $env:WAVEATLAS_SIGN_COMMAND) { throw "Set WAVEATLAS_SIGN_COMMAND to a signing wrapper that accepts one file path, signs and timestamps it, and fails on errors." }
     Run-Checked $env:WAVEATLAS_SIGN_COMMAND @("$root/desktop/payload/waveatlas-backend.exe")
     $config = @{ bundle = @{ windows = @{ signCommand = @{ cmd = $env:WAVEATLAS_SIGN_COMMAND; args = @("%1") } } } }
     $config | ConvertTo-Json -Depth 6 | Set-Content "desktop/build/signing.json" -Encoding utf8

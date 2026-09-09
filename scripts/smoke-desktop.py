@@ -1,6 +1,6 @@
 """Exercise the actual packaged backend with real models, without a browser.
 
-Used on Windows in CI and with the source backend during development. Requests
+Used with the Windows executable or the source backend during development. Requests
 stay on loopback. The private readiness message is never printed to build logs.
 """
 
