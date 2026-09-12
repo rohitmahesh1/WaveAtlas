@@ -5,11 +5,188 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>WaveAtlas</title>
     <style>
-      body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #111827; color: #e5e7eb; font: 16px/1.6 system-ui, sans-serif; }
-      main { max-width: 560px; padding: 48px; }
-      h1 { color: #67e8f9; font-size: 32px; }
-      #message { white-space: pre-wrap; overflow-wrap: anywhere; }
+      :root {
+        color-scheme: light;
+        font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+        color: #1b242a;
+        background: #f6f4ef;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+      }
+
+      body {
+        overflow: hidden;
+        background:
+          radial-gradient(circle at 20% 0%, rgba(255, 255, 255, 0.95), transparent 48%),
+          radial-gradient(circle at 90% 100%, rgba(221, 237, 233, 0.72), transparent 44%),
+          #f6f4ef;
+      }
+
+      main {
+        min-height: 100%;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 40px 56px 44px;
+        text-align: center;
+      }
+
+      .app-mark {
+        width: 68px;
+        height: 68px;
+        margin-bottom: 18px;
+        filter: drop-shadow(0 10px 18px rgba(12, 92, 77, 0.16));
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 29px;
+        font-weight: 650;
+        letter-spacing: -0.035em;
+      }
+
+      .tagline {
+        margin: 5px 0 0;
+        color: #6d7b80;
+        font-size: 13px;
+        letter-spacing: 0.01em;
+      }
+
+      .status {
+        display: flex;
+        align-items: flex-start;
+        gap: 12px;
+        width: min(100%, 420px);
+        min-height: 48px;
+        margin-top: 42px;
+        text-align: left;
+      }
+
+      .progress-ring {
+        flex: 0 0 auto;
+        width: 19px;
+        height: 19px;
+        margin-top: 2px;
+        border: 2px solid rgba(17, 122, 101, 0.18);
+        border-top-color: #117a65;
+        border-radius: 50%;
+        animation: spin 0.85s linear infinite;
+      }
+
+      .error-symbol {
+        display: none;
+        flex: 0 0 auto;
+        width: 21px;
+        height: 21px;
+        border-radius: 50%;
+        background: #9a3d38;
+        color: #ffffff;
+        font-size: 14px;
+        font-weight: 700;
+        line-height: 21px;
+        text-align: center;
+      }
+
+      .status-copy {
+        min-width: 0;
+      }
+
+      #status-title {
+        margin: 0;
+        color: #263238;
+        font-size: 14px;
+        font-weight: 600;
+      }
+
+      #message {
+        margin: 2px 0 0;
+        color: #6d7b80;
+        font-size: 13px;
+        line-height: 1.45;
+        overflow-wrap: anywhere;
+        white-space: pre-wrap;
+      }
+
+      .error-help {
+        display: none;
+        margin: 9px 0 0;
+        color: #6d7b80;
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      body[data-state="error"] .status {
+        margin-top: 32px;
+      }
+
+      body[data-state="error"] .progress-ring {
+        display: none;
+      }
+
+      body[data-state="error"] .error-symbol,
+      body[data-state="error"] .error-help {
+        display: block;
+      }
+
+      body[data-state="error"] #status-title {
+        color: #762f2b;
+      }
+
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .progress-ring {
+          animation-duration: 1.8s;
+        }
+      }
     </style>
   </head>
-  <body><main><h1>WaveAtlas</h1><p id="message">Opening your workspace and checking application files…</p><p>Application logs are available from Help → Open Logs.</p></main></body>
+  <body data-state="loading">
+    <main aria-live="polite">
+      <svg class="app-mark" viewBox="0 0 64 64" role="img" aria-label="WaveAtlas">
+        <defs>
+          <linearGradient id="mark-background" x1="10%" y1="10%" x2="90%" y2="90%">
+            <stop offset="0%" stop-color="#117a65" />
+            <stop offset="100%" stop-color="#0c5c4d" />
+          </linearGradient>
+        </defs>
+        <rect width="64" height="64" rx="16" fill="url(#mark-background)" />
+        <path
+          d="M8 39c6.5 0 6.5-14 13-14s6.5 14 13 14 6.5-14 13-14 6.5 14 13 14"
+          fill="none"
+          stroke="#f6f4ef"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          stroke-width="6"
+        />
+        <circle cx="34" cy="39" r="5.5" fill="#f3c56b" stroke="#f6f4ef" stroke-width="2" />
+      </svg>
+      <h1>WaveAtlas</h1>
+      <p class="tagline">Local kymograph analysis</p>
+
+      <section class="status">
+        <span class="progress-ring" aria-hidden="true"></span>
+        <span class="error-symbol" aria-hidden="true">!</span>
+        <div class="status-copy">
+          <p id="status-title">Starting WaveAtlas</p>
+          <p id="message">Getting your workspace ready…</p>
+          <p class="error-help">For diagnostic details, select Help → Open Logs.</p>
+        </div>
+      </section>
+    </main>
+  </body>
 </html>

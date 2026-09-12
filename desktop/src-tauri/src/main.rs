@@ -42,7 +42,9 @@ impl Drop for Backend {
 fn show_error(app: &tauri::AppHandle, message: &str) {
     if let Some(window) = app.get_webview_window("loading") {
         let _ = window.eval(&format!(
-            "document.getElementById('message').textContent = {}",
+            "document.body.dataset.state = 'error'; \
+             document.getElementById('status-title').textContent = 'WaveAtlas could not start'; \
+             document.getElementById('message').textContent = {}",
             serde_json::to_string(message).unwrap()
         ));
         let _ = window.show();
