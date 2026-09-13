@@ -6,7 +6,7 @@ import os
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from .artifact_store import ArtifactStore
 from .cancel import CancellationRequested
@@ -17,11 +17,22 @@ from .io.image_to_heatmap import image_to_heatmap_bytes
 from .io.table_to_heatmap import table_to_heatmap_payload
 from .extract_core import select_kymo_runner, process_track
 from .analysis_mode import LARGE_WAVE_ANALYSIS_MODE, RIPPLE_ANALYSIS_MODE, resolve_analysis_mode
-from .large_wave_analysis import analyze_large_wave_events, build_large_wave_track_config
+from .large_wave_analysis import (
+    LargeWavePreparedTrack,
+    analyze_large_wave_events,
+    prepare_large_wave_track,
+)
 from .large_wave_extraction import run_large_wave_extraction
 from .ripple_analysis import analyze_ripple_tracks
 from .ripple_extraction import run_ripple_extraction
+from .config_validation import normalize_and_validate_config
+from .run_manifest import (
+    publish_run_manifest_artifact,
+    sha256_bytes,
+    sha256_file,
+)
 from .time_utils import utc_now, utc_now_iso
+from .track_coordinates import track_artifact_metadata, track_manifest_metadata
 
 
 @dataclass(frozen=True)
@@ -107,6 +118,8 @@ def run_job(
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         meta_dict = _coerce_meta(meta=meta, metadata=metadata)
+        meta_dict.setdefault("filename", filename)
+        meta_dict.setdefault("sha256", sha256_bytes(data))
 
         blob_path, byte_size = artifact_store.put_bytes(
             job_id=job_id,
@@ -157,6 +170,8 @@ def run_job(
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         meta_dict = _coerce_meta(meta=meta, metadata=metadata)
+        meta_dict.setdefault("filename", filename)
+        meta_dict.setdefault("sha256", sha256_file(local_path))
 
         blob_path, byte_size = artifact_store.put_file(
             job_id=job_id,
@@ -195,6 +210,25 @@ def run_job(
             )
         else:
             emit(EventType.progress, {"artifact": {"kind": kind.value, "label": label, "blob_path": blob_path}})
+
+    def publish_run_manifest(*, analysis_mode: str, heatmap_meta: Optional[Dict[str, Any]]) -> None:
+        check_cancel("cancel_requested_before_result_manifest")
+        artifact = publish_run_manifest_artifact(
+            job_id=job_id,
+            analysis_mode=analysis_mode,
+            config=config,
+            heatmap_meta=heatmap_meta,
+            job_store=job_store,
+            artifact_store=artifact_store,
+            cancel_cb=cancelled,
+        )
+        emit(EventType.progress, {
+            "artifact": {
+                "kind": artifact.kind.value,
+                "label": artifact.label,
+                "blob_path": artifact.blob_path,
+            }
+        })
 
     def publish_debug_overlays(image_id: str, base_dir: Path) -> None:
         check_cancel("cancel_requested_before_debug_overlays")
@@ -290,11 +324,12 @@ def run_job(
         check_cancel("cancel_requested_after_heatmap_values_resume")
         return data, dict(getattr(arts[0], "meta", {}) or {})
 
-    resume_cfg = (config.get("service") or {}).get("resume") or {}
-    resume_enabled = bool(resume_cfg.get("enabled", False)) or bool(resume)
-    analysis_mode = resolve_analysis_mode(config)
-
+    resume_enabled = bool(resume)
     try:
+        config = normalize_and_validate_config(config)
+        resume_cfg = (config.get("service") or {}).get("resume") or {}
+        resume_enabled = bool(resume_cfg.get("enabled", False)) or bool(resume)
+        analysis_mode = resolve_analysis_mode(config)
         # -----------------------------
         # Job init
         # -----------------------------
@@ -346,6 +381,7 @@ def run_job(
             upload = uploads[0]
             check_cancel("cancel_requested_before_input_download")
             input_bytes = artifact_store.get_bytes(upload.blob_path)
+            input_sha256 = sha256_bytes(input_bytes)
             input_filename = (upload.meta or {}).get("filename")
             check_cancel("cancel_requested_after_input_download")
 
@@ -379,6 +415,9 @@ def run_job(
                 **(heatmap_meta or {}),
                 "source_artifact_id": str(upload.id),
                 "source_artifact_kind": upload.kind.value,
+                "source_filename": input_filename,
+                "source_byte_size": len(input_bytes),
+                "source_sha256": input_sha256,
             }
             check_cancel("cancel_requested_before_heatmap_publish")
             publish_bytes(
@@ -696,14 +735,19 @@ def run_job(
                         label=label,
                         content_type="application/octet-stream",
                         byte_size=byte_size,
-                        meta={"track_index": int(track_index)},
+                        meta={
+                            **track_artifact_metadata(track_index, heatmap_meta),
+                            "filename": f"track_{track_index}.npy",
+                            "sha256": sha256_file(track_path),
+                        },
                     )
 
-                manifest_payload = {
-                    "total_tracks": len(track_paths),
-                    "analysis_mode": analysis_mode,
-                    "extractor": extractor_name,
-                }
+                manifest_payload = track_manifest_metadata(
+                    total_tracks=len(track_paths),
+                    analysis_mode=analysis_mode,
+                    extractor=extractor_name,
+                    heatmap_meta=heatmap_meta,
+                )
                 check_cancel("cancel_requested_before_track_manifest_write")
                 publish_bytes(
                     kind=ArtifactKind.track_manifest,
@@ -750,6 +794,7 @@ def run_job(
                 job_id=job_id,
                 track_paths=track_paths,
                 config=config,
+                heatmap_meta=heatmap_meta,
                 cancel_cb=cancelled,
                 progress_cb=ripple_progress,
             )
@@ -783,7 +828,11 @@ def run_job(
                             label=label,
                             content_type="application/octet-stream",
                             byte_size=byte_size,
-                            meta={"track_index": track_index},
+                            meta={
+                                **track_artifact_metadata(track_index, heatmap_meta),
+                                "filename": f"track_{track_index}.npy",
+                                "sha256": sha256_file(track_path),
+                            },
                         )
 
                 job_store.upsert_track_by_index(
@@ -825,6 +874,10 @@ def run_job(
                     },
                 )
 
+            publish_run_manifest(
+                analysis_mode=RIPPLE_ANALYSIS_MODE,
+                heatmap_meta=heatmap_meta,
+            )
             check_cancel("cancel_requested_before_completion")
             completion_extra = {
                 "analysis_mode": RIPPLE_ANALYSIS_MODE,
@@ -851,7 +904,12 @@ def run_job(
         user_log("Analyzing tracks", stage="processing_tracks")
         job_store.bump_counts(job_id, tracks_total=len(track_paths))
 
-        processed_set = set(job_store.get_processed_track_indices(job_id)) if resume_enabled else set()
+        large_wave_mode = analysis_mode == LARGE_WAVE_ANALYSIS_MODE
+        processed_set = (
+            set(job_store.get_processed_track_indices(job_id))
+            if resume_enabled and not large_wave_mode
+            else set()
+        )
         check_cancel("cancel_requested_before_processing_tracks")
         processed = len(processed_set)
         set_progress("processing_tracks", processed=processed, total=len(track_paths))
@@ -866,10 +924,7 @@ def run_job(
         last_processed_for_rate = processed
         ema_rate_tps: Optional[float] = None
         ema_alpha = 0.2
-        large_wave_mode = analysis_mode == LARGE_WAVE_ANALYSIS_MODE
-        track_analysis_config = build_large_wave_track_config(config) if large_wave_mode else config
-        large_wave_track_rows: List[Dict[str, Any]] = []
-        large_wave_overlay_events: List[Dict[str, Any]] = []
+        large_wave_prepared_tracks: List[LargeWavePreparedTrack] = []
 
         for track_index, track_path in enumerate(track_paths):
             check_cancel("cancel_requested_during_processing_tracks")
@@ -901,59 +956,60 @@ def run_job(
                         label=label,
                         content_type="application/octet-stream",
                         byte_size=byte_size,
-                        meta={"track_index": int(track_index)},
+                        meta={
+                            **track_artifact_metadata(track_index, heatmap_meta),
+                            "filename": f"track_{track_index}.npy",
+                            "sha256": sha256_file(track_path),
+                        },
                     )
 
             check_cancel("cancel_requested_before_track_analysis")
-            track_row, wave_rows, peak_rows, overlay_track = process_track(
-                job_id=job_id,
-                track_index=track_index,
-                track_path=track_path,
-                config=track_analysis_config,
-                heatmap_meta=heatmap_meta,
-            )
-            check_cancel("cancel_requested_after_track_analysis")
-
             if large_wave_mode:
-                track_metrics = track_row.get("metrics") if isinstance(track_row.get("metrics"), dict) else {}
-                track_metrics["analysis_mode"] = LARGE_WAVE_ANALYSIS_MODE
-                track_row["metrics"] = track_metrics
-                overlay_track["metrics"] = {
-                    "analysis_mode": LARGE_WAVE_ANALYSIS_MODE,
-                    "mean_amplitude": track_row.get("amplitude"),
-                    "dominant_frequency": track_row.get("frequency"),
-                    "period": track_metrics.get("period"),
-                    "num_peaks": track_metrics.get("num_peaks"),
-                }
-                for row in wave_rows or []:
-                    metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
-                    metrics["track_index"] = int(track_index)
-                    row["metrics"] = metrics
-                large_wave_track_rows.append(track_row)
-                large_wave_overlay_events.append(overlay_track)
+                prepared_track = prepare_large_wave_track(
+                    job_id=job_id,
+                    track_index=track_index,
+                    track_path=track_path,
+                    config=config,
+                    heatmap_meta=heatmap_meta,
+                )
+                large_wave_prepared_tracks.append(prepared_track)
+                track_row = prepared_track.track_row
+                wave_rows = prepared_track.candidate_rows
+                peak_rows: List[Dict[str, Any]] = []
+                overlay_track = prepared_track.overlay_event
+            else:
+                track_row, wave_rows, peak_rows, overlay_track = process_track(
+                    job_id=job_id,
+                    track_index=track_index,
+                    track_path=track_path,
+                    config=config,
+                    heatmap_meta=heatmap_meta,
+                )
+            check_cancel("cancel_requested_after_track_analysis")
 
             # print("Processed track #", track_row, " Wave", wave_rows)
 
-            track = job_store.upsert_track_by_index(
-                job_id,
-                track_index,
-                processed_at=utc_now(),
-                amplitude=track_row.get("amplitude"),
-                frequency=track_row.get("frequency"),
-                error=track_row.get("error"),
-                x0=track_row.get("x0"),
-                y0=track_row.get("y0"),
-                metrics=track_row.get("metrics") or {},
-                overlay=track_row.get("overlay") or {},
-            )
+            if not large_wave_mode:
+                track = job_store.upsert_track_by_index(
+                    job_id,
+                    track_index,
+                    processed_at=utc_now(),
+                    amplitude=track_row.get("amplitude"),
+                    frequency=track_row.get("frequency"),
+                    error=track_row.get("error"),
+                    x0=track_row.get("x0"),
+                    y0=track_row.get("y0"),
+                    metrics=track_row.get("metrics") or {},
+                    overlay=track_row.get("overlay") or {},
+                )
 
-            for row in wave_rows or []:
-                row["track_id"] = track.id
-            for row in peak_rows or []:
-                row["track_id"] = track.id
+                for row in wave_rows or []:
+                    row["track_id"] = track.id
+                for row in peak_rows or []:
+                    row["track_id"] = track.id
 
-            waves_buf.extend(wave_rows or [])
-            peaks_buf.extend(peak_rows or [])
+                waves_buf.extend(wave_rows or [])
+                peaks_buf.extend(peak_rows or [])
 
             processed += 1
             new_processed += 1
@@ -967,9 +1023,13 @@ def run_job(
                 check_cancel("cancel_requested_before_overlay_event")
                 emit(EventType.overlay_track, overlay_track)
 
-            if settings.db_batch_size > 0 and (new_processed % settings.db_batch_size == 0):
+            if (
+                not large_wave_mode
+                and settings.db_batch_size > 0
+                and new_processed % settings.db_batch_size == 0
+            ):
                 check_cancel("cancel_requested_before_batch_write")
-                if waves_buf and not large_wave_mode:
+                if waves_buf:
                     job_store.insert_waves_batch(job_id, waves_buf)
                     job_store.bump_counts(job_id, waves_done_delta=len(waves_buf))
                     waves_buf.clear()
@@ -1020,16 +1080,15 @@ def run_job(
                     last_large_wave_stage = stage
 
             large_wave_result = analyze_large_wave_events(
-                track_paths=track_paths,
-                track_rows=large_wave_track_rows,
-                wave_rows=waves_buf,
+                prepared_tracks=large_wave_prepared_tracks,
                 config=config,
                 cancel_cb=cancelled,
                 progress_cb=large_wave_progress,
             )
-            waves_buf = list(large_wave_result.wave_rows)
-
-            for track_row, overlay_track in zip(large_wave_track_rows, large_wave_overlay_events):
+            for track_row, overlay_track in zip(
+                large_wave_result.track_rows,
+                large_wave_result.overlay_events,
+            ):
                 track_index = int(track_row["track_index"])
                 summary = large_wave_result.track_summaries.get(track_index, {})
                 event_frequency = summary.get("large_wave_frequency_hz")
@@ -1044,31 +1103,23 @@ def run_job(
                     "num_peaks": summary.get("large_wave_measurement_count", 0),
                     **summary,
                 }
+                overlay_track["freq_hz"] = event_frequency
+                overlay_track["period"] = (
+                    1.0 / float(event_frequency) if event_frequency else None
+                )
                 overlay_track["peaks"] = [
                     {
                         "x": measurement["peak_position_px"],
-                        "y": measurement["peak_frame"],
+                        "y": measurement["peak_image_row"],
                         "amp": measurement["signed_amplitude_px"],
                     }
                     for measurement in large_wave_result.measurements
                     if int(measurement["track_index"]) == track_index
                 ]
-                job_store.upsert_track_by_index(
-                    job_id,
-                    track_index,
-                    processed_at=utc_now(),
-                    amplitude=track_row.get("amplitude"),
-                    frequency=track_row.get("frequency"),
-                    error=track_row.get("error"),
-                    x0=track_row.get("x0"),
-                    y0=track_row.get("y0"),
-                    metrics=track_row.get("metrics") or {},
-                    overlay=track_row.get("overlay") or {},
-                )
-                emit(EventType.overlay_track, overlay_track)
+                track_row["overlay"] = overlay_track
 
             large_wave_exports = [
-                ("large_wave_tracks", "tracks.csv", large_wave_result.tracks_csv, len(large_wave_track_rows)),
+                ("large_wave_tracks", "tracks.csv", large_wave_result.tracks_csv, len(large_wave_result.track_rows)),
                 (
                     "large_wave_measurements",
                     "waves.csv",
@@ -1077,21 +1128,62 @@ def run_job(
                 ),
                 ("large_wave_events", "events.csv", large_wave_result.events_csv, len(large_wave_result.events)),
             ]
-            for label, filename, data, row_count in large_wave_exports:
-                check_cancel("cancel_requested_during_large_wave_export")
-                existing = job_store.list_artifacts(job_id, kind=ArtifactKind.other, label=label, limit=1)
-                if existing:
-                    continue
-                publish_bytes(
-                    kind=ArtifactKind.other,
-                    filename=filename,
-                    data=data,
-                    content_type="text/csv",
-                    label=label,
-                    meta={
-                        "analysis_mode": LARGE_WAVE_ANALYSIS_MODE,
-                        "row_count": row_count,
-                        "filename": filename,
+            publication_id = uuid4().hex
+            staged_artifacts: List[Dict[str, Any]] = []
+            staged_blob_paths: List[str] = []
+            publication_committed = False
+            try:
+                for label, filename, data, row_count in large_wave_exports:
+                    check_cancel("cancel_requested_during_large_wave_export")
+                    blob_path, byte_size = artifact_store.put_bytes(
+                        job_id=job_id,
+                        kind=ArtifactKind.other.value,
+                        filename=filename,
+                        data=data,
+                        content_type="text/csv",
+                        label=f"{label}-staging-{publication_id}",
+                    )
+                    staged_blob_paths.append(blob_path)
+                    staged_artifacts.append({
+                        "label": label,
+                        "blob_path": blob_path,
+                        "content_type": "text/csv",
+                        "byte_size": byte_size,
+                        "meta": {
+                            "analysis_mode": LARGE_WAVE_ANALYSIS_MODE,
+                            "row_count": row_count,
+                            "filename": filename,
+                            "publication_id": publication_id,
+                            "sha256": sha256_bytes(data),
+                        },
+                    })
+
+                check_cancel("cancel_requested_before_large_wave_publication")
+                created_artifacts, old_blob_paths = job_store.replace_large_wave_results(
+                    job_id,
+                    track_rows=large_wave_result.track_rows,
+                    wave_rows=large_wave_result.wave_rows,
+                    artifacts=staged_artifacts,
+                )
+                publication_committed = True
+            finally:
+                if not publication_committed:
+                    for blob_path in staged_blob_paths:
+                        artifact_store.delete_blob(blob_path)
+
+            for blob_path in old_blob_paths:
+                artifact_store.delete_blob(blob_path)
+            for overlay_track in large_wave_result.overlay_events:
+                emit(EventType.overlay_track, overlay_track)
+            for artifact in created_artifacts:
+                emit(
+                    EventType.progress,
+                    {
+                        "artifact": {
+                            "kind": artifact.kind.value,
+                            "label": artifact.label,
+                            "blob_path": artifact.blob_path,
+                        }
                     },
                 )
 
@@ -1108,10 +1200,11 @@ def run_job(
             peaks_buf.clear()
 
         # Final counts
-        if batch_new_processed:
+        if batch_new_processed and not large_wave_mode:
             check_cancel("cancel_requested_before_final_counts")
             job_store.bump_counts(job_id, tracks_done_delta=batch_new_processed)
 
+        publish_run_manifest(analysis_mode=analysis_mode, heatmap_meta=heatmap_meta)
         check_cancel("cancel_requested_before_completion")
         completion_extra: Dict[str, Any] = {"eta_secs": 0.0, "analysis_mode": analysis_mode}
         if large_wave_result is not None:

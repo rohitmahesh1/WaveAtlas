@@ -3,18 +3,24 @@ logging:
   jsonl_events: true
 
 io:
-  sampling_rate: &sr 5.0
+  sampling_rate: 5.0
   image_globs: ["*.png", "*.jpg", "*.jpeg"]
   track_glob: "*.npy"
   table_globs: ["*.csv", "*.tsv", "*.xls", "*.xlsx"]
 
 heatmap:
   table_mode: auto
+  non_finite_policy: reject
   lower: -1e20
   upper: 1e16
   binarize: true
   origin: lower
   cmap: plasma
+  continuous:
+    binarize: false
+    cmap: plasma
+    vmin: null
+    vmax: null
   area:
     binarize: false
     cmap: plasma
@@ -195,7 +201,6 @@ peaks:
   cross_polarity_policy: stronger
 
 period:
-  sampling_rate: *sr
   min_freq: 0.02
   max_freq: 2.0
 

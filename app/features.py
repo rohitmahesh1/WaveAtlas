@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from .track_coordinates import frame_from_image_row, image_row_from_frame
+
 
 # -----------------------
 # ID helpers
@@ -121,22 +123,6 @@ def _prefixed_fit_as_primary(prefixed_fit: Dict[str, Any], prefix: str) -> Dict[
     return out
 
 
-def _coord_height(coord_meta: Optional[dict]) -> Optional[float]:
-    if not coord_meta:
-        return None
-    for key in ("output_height", "source_rows", "nrows"):
-        value = coord_meta.get(key)
-        if value in (None, ""):
-            continue
-        try:
-            height = float(value)
-        except Exception:
-            continue
-        if np.isfinite(height) and height > 0:
-            return height
-    return None
-
-
 def map_heatmap_x(x: float, coord_meta: Optional[dict] = None) -> float:
     _ = coord_meta
     return float(x)
@@ -145,13 +131,7 @@ def map_heatmap_x(x: float, coord_meta: Optional[dict] = None) -> float:
 def map_heatmap_y(y: float, coord_meta: Optional[dict] = None) -> float:
     if not np.isfinite(y):
         return float(y)
-    height = _coord_height(coord_meta)
-    origin = str((coord_meta or {}).get("coord_origin", (coord_meta or {}).get("origin", "upper"))).lower()
-    if height is None:
-        return float(y)
-    if origin == "lower":
-        return float((height - 1.0) - float(y))
-    return float(y)
+    return float(frame_from_image_row(float(y), coord_meta))
 
 
 # -----------------------
@@ -452,6 +432,7 @@ def build_peak_rows(
     *,
     frame: np.ndarray,
     position: np.ndarray,
+    image_row: Optional[np.ndarray] = None,
     residual: np.ndarray,
     peaks_idx: np.ndarray,
     peak_props: dict,
@@ -472,6 +453,11 @@ def build_peak_rows(
 
     p = np.asarray(peaks_idx, dtype=int)
     fit_res = np.asarray(residual if fit_residual is None else fit_residual, dtype=float)
+    image_rows = (
+        np.asarray(image_row, dtype=float)
+        if image_row is not None
+        else image_row_from_frame(frame, coord_meta)
+    )
     sign = 1 if int(fit_signal_sign) >= 0 else -1
     if p.size == 0:
         return rows
@@ -485,10 +471,9 @@ def build_peak_rows(
     fallback_flags = np.asarray((peak_props or {}).get("fallback_peak", []), dtype=bool)
 
     for idx_in_list, peak_i in enumerate(p):
-        frame_value_img = float(frame[peak_i])
-        pos_px_img = float(position[peak_i])
-        frame_value = map_heatmap_y(frame_value_img, coord_meta)
-        pos_px = map_heatmap_x(pos_px_img, coord_meta)
+        frame_value = float(frame[peak_i])
+        image_row_value = float(image_rows[peak_i])
+        pos_px = float(position[peak_i])
         amp = float(residual[peak_i])
         event_amp = float(fit_res[peak_i])
 
@@ -550,6 +535,7 @@ def build_peak_rows(
             "peak_i": int(peak_i),
             "fallback_peak": bool(fallback_flags[idx_in_list]) if idx_in_list < fallback_flags.size else False,
             "frame": frame_value,
+            "image_row": image_row_value,
             "pos_px": pos_px,
             "x_px": x_px,
             "y_px": y_px,
@@ -582,6 +568,7 @@ def build_wave_rows(
     *,
     frame: np.ndarray,
     position: np.ndarray,
+    image_row: Optional[np.ndarray] = None,
     residual: np.ndarray,
     peaks_idx: np.ndarray,
     peak_props: dict,
@@ -602,6 +589,11 @@ def build_wave_rows(
 
     p = np.asarray(peaks_idx, dtype=int)
     fit_res = np.asarray(residual if fit_residual is None else fit_residual, dtype=float)
+    image_rows = (
+        np.asarray(image_row, dtype=float)
+        if image_row is not None
+        else image_row_from_frame(frame, coord_meta)
+    )
     sign = 1 if int(fit_signal_sign) >= 0 else -1
     if p.size == 0:
         return rows
@@ -620,40 +612,38 @@ def build_wave_rows(
         prev_i = int(p[k - 1]) if k - 1 >= 0 else None
         next_i = int(p[k + 1]) if k + 1 < p.size else None
 
-        peak_frame_raw = float(frame[peak_i])
-        peak_pos_raw = float(position[peak_i])
-        peak_frame = map_heatmap_y(peak_frame_raw, coord_meta)
-        peak_pos = map_heatmap_x(peak_pos_raw, coord_meta)
+        peak_frame = float(frame[peak_i])
+        peak_image_row = float(image_rows[peak_i])
+        peak_pos = float(position[peak_i])
         period_est = _local_period_frames_from_peaks(p, k, frame)
         if not (period_est and period_est > 0) and global_fpp and global_fpp > 0:
             period_est = float(global_fpp)
 
         if period_est and np.isfinite(period_est) and period_est > 0:
             if prev_i is not None:
-                frame1_raw = (float(frame[prev_i]) + peak_frame_raw) / 2.0
+                frame1 = (float(frame[prev_i]) + peak_frame) / 2.0
             else:
-                frame1_raw = peak_frame_raw - (float(period_est) / 2.0)
+                frame1 = peak_frame - (float(period_est) / 2.0)
 
             if next_i is not None:
-                frame2_raw = (peak_frame_raw + float(frame[next_i])) / 2.0
+                frame2 = (peak_frame + float(frame[next_i])) / 2.0
             else:
-                frame2_raw = peak_frame_raw + (float(period_est) / 2.0)
+                frame2 = peak_frame + (float(period_est) / 2.0)
         else:
-            frame1_raw = peak_frame_raw
-            frame2_raw = peak_frame_raw
+            frame1 = peak_frame
+            frame2 = peak_frame
 
-        if frame2_raw < frame1_raw:
-            frame1_raw, frame2_raw = frame2_raw, frame1_raw
+        if frame2 < frame1:
+            frame1, frame2 = frame2, frame1
 
-        period_frames = frame2_raw - frame1_raw
+        period_frames = frame2 - frame1
         period_s = (period_frames / sampling_rate) if sampling_rate else float("nan")
         freq = (1.0 / period_s) if (np.isfinite(period_s) and period_s > 0) else (float(freq_hz) if (freq_hz and freq_hz > 0) else np.nan)
 
-        pos1 = map_heatmap_x(_interp_position_at_frame(frame, position, frame1_raw), coord_meta)
-        pos2 = map_heatmap_x(_interp_position_at_frame(frame, position, frame2_raw), coord_meta)
-
-        frame1_coord = map_heatmap_y(frame1_raw, coord_meta)
-        frame2_coord = map_heatmap_y(frame2_raw, coord_meta)
+        pos1 = _interp_position_at_frame(frame, position, frame1)
+        pos2 = _interp_position_at_frame(frame, position, frame2)
+        frame1_image_row = float(image_row_from_frame(frame1, coord_meta))
+        frame2_image_row = float(image_row_from_frame(frame2, coord_meta))
 
         amp = float(residual[peak_i])
         event_amp = float(fit_res[peak_i])
@@ -662,7 +652,7 @@ def build_wave_rows(
         vel = (dpos / period_s) if (np.isfinite(period_s) and period_s != 0) else float("nan")
         wavelength = float(abs(dpos))
 
-        mask = (frame >= frame1_raw) & (frame <= frame2_raw)
+        mask = (frame >= frame1) & (frame <= frame2)
         if int(np.count_nonzero(mask)) >= 2:
             ang_mean, ang_std = orientation_deg(frame[mask], position[mask])
             frame_seg = frame[mask]
@@ -677,8 +667,6 @@ def build_wave_rows(
         xmax = float(np.nanmax(pos_seg)) if pos_seg.size else np.nan
         ymin = float(np.nanmin(frame_seg)) if frame_seg.size else np.nan
         ymax = float(np.nanmax(frame_seg)) if frame_seg.size else np.nan
-        ymin_coord = map_heatmap_y(ymax, coord_meta)
-        ymax_coord = map_heatmap_y(ymin, coord_meta)
 
         bulge = bulge_from_props(peak_i, p, peak_props or {}, sampling_rate)
 
@@ -713,18 +701,18 @@ def build_wave_rows(
             cfg=features_cfg.get("classify", {}),
         )
 
-        # Click point in heatmap coords (x_px = column, y_px = row).
+        # Click point in bottom-left scientific coordinates.
         x_px = int(round(peak_pos)) if np.isfinite(peak_pos) else None
         y_px = int(round(peak_frame)) if np.isfinite(peak_frame) else None
 
         # Time window for this wave (best-effort)
-        t_start = (frame1_raw / sampling_rate) if (sampling_rate and np.isfinite(frame1_raw)) else None
-        t_end = (frame2_raw / sampling_rate) if (sampling_rate and np.isfinite(frame2_raw)) else None
+        t_start = (frame1 / sampling_rate) if (sampling_rate and np.isfinite(frame1)) else None
+        t_end = (frame2 / sampling_rate) if (sampling_rate and np.isfinite(frame2)) else None
         seconds_delta = (t_end - t_start) if (t_start is not None and t_end is not None) else float("nan")
         boundary_extrapolated = bool(
             np.isfinite(frame_min)
             and np.isfinite(frame_max)
-            and (frame1_raw < frame_min or frame2_raw > frame_max)
+            and (frame1 < frame_min or frame2 > frame_max)
         )
 
         metrics = {
@@ -745,16 +733,19 @@ def build_wave_rows(
             "fallback_peak": bool(fallback_flags[k]) if k < fallback_flags.size else False,
             "previous_peak_i": int(prev_i) if prev_i is not None else None,
             "next_peak_i": int(next_i) if next_i is not None else None,
-            "peak_frame_raw": peak_frame_raw,
-            "peak_position_raw": peak_pos_raw,
+            "peak_frame_raw": peak_image_row,
+            "peak_image_row": peak_image_row,
+            "peak_position_raw": peak_pos,
             "peak_frame_y_axis": peak_frame,
             "peak_position_x_axis": peak_pos,
             "event_value": event_amp,
             "peak_value_original": amp,
-            "frame1_raw": frame1_raw,
-            "frame2_raw": frame2_raw,
-            "frame1": frame1_coord,
-            "frame2": frame2_coord,
+            "frame1_raw": frame1_image_row,
+            "frame2_raw": frame2_image_row,
+            "frame1_image_row": frame1_image_row,
+            "frame2_image_row": frame2_image_row,
+            "frame1": frame1,
+            "frame2": frame2,
             "period_frames": period_frames,
             "period_s": period_s,
             "frequency_hz": freq,
@@ -765,7 +756,7 @@ def build_wave_rows(
             "seconds_delta": seconds_delta,
             "velocity_px_per_s": vel,
             "wavelength_px": wavelength,
-            "bbox": {"xmin": xmin, "xmax": xmax, "ymin": min(ymin_coord, ymax_coord), "ymax": max(ymin_coord, ymax_coord)},
+            "bbox": {"xmin": xmin, "xmax": xmax, "ymin": ymin, "ymax": ymax},
             "boundary_extrapolated": boundary_extrapolated,
             "orientation_deg": ang_mean,
             "orientation_std_deg": ang_std,
@@ -780,8 +771,8 @@ def build_wave_rows(
                 "Track": maybe_track_id if maybe_track_id is not None else track_stem,
                 "Wave number": int(k + 1),
                 "Event polarity": event_polarity,
-                "Frame position 1": frame1_coord,
-                "Frame position 2": frame2_coord,
+                "Frame position 1": frame1,
+                "Frame position 2": frame2,
                 "Period (frames)": period_frames,
                 "Period (s)": period_s,
                 "Frequency (Hz)": freq,

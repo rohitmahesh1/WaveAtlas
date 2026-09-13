@@ -74,6 +74,7 @@ export type TrackPeakPoint = {
   peak_index: number;
   peak_i: number;
   frame: number;
+  image_row?: number;
   position: number;
   amplitude?: number | null;
   in_slice?: boolean;
@@ -105,6 +106,8 @@ export type TrackDetail = {
   track_index: number;
   analysis_mode?: string;
   time_index: number[];
+  frame?: number[];
+  image_row?: number[];
   position: number[];
   baseline: number[];
   residual?: number[] | null;

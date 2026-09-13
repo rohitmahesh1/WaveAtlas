@@ -45,7 +45,14 @@ def load_heatmap_values(
             f"Continuous heatmap value count mismatch: got {values.size}, expected {rows * cols}"
         )
     values = values.reshape((rows, cols)).copy()
-    origin = str(value_meta.get("coord_origin", value_meta.get("origin", "upper"))).lower()
+    # Rendering orientation determines how source rows align with PNG rows.
+    # Scientific coordinates always use a separate bottom-left frame axis.
+    origin = str(
+        value_meta.get(
+            "render_origin",
+            value_meta.get("origin", value_meta.get("coord_origin", "upper")),
+        )
+    ).lower()
     row_order = str(value_meta.get("value_row_order", "top_to_bottom_source")).lower()
     if origin == "lower" and row_order == "top_to_bottom_source":
         values = np.flipud(values)

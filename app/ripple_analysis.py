@@ -11,7 +11,8 @@ import networkx as nx
 import numpy as np
 
 from .cancel import CancellationRequested
-from .extract_core import load_track_frame_position
+from .sampling import resolve_sampling_rate
+from .track_coordinates import coordinate_origin, load_track_coordinates
 
 
 CancelCallback = Optional[Callable[[], bool]]
@@ -23,6 +24,7 @@ class _TrackGeometry:
     track_index: int
     track_path: Path
     frame: np.ndarray
+    image_row: np.ndarray
     position: np.ndarray
     slope: float
     intercept: float
@@ -192,6 +194,7 @@ def analyze_ripple_tracks(
     job_id: UUID,
     track_paths: Sequence[Path],
     config: Dict[str, Any],
+    heatmap_meta: Optional[Dict[str, Any]] = None,
     cancel_cb: CancelCallback = None,
     progress_cb: ProgressCallback = None,
 ) -> RippleAnalysisResult:
@@ -199,22 +202,24 @@ def analyze_ripple_tracks(
     ripple_cfg = (((config.get("analysis") or {}).get("ripple") or {}))
     family_cfg = (ripple_cfg.get("family") or {})
     frequency_cfg = (ripple_cfg.get("frequency") or {})
-    sampling_rate = float((config.get("io") or {}).get("sampling_rate", 1.0))
+    sampling_rate = resolve_sampling_rate(config)
     min_track_rows = int(ripple_cfg.get("min_track_rows", 30))
     min_abs_slope = float(ripple_cfg.get("min_abs_slope", 0.05))
     max_line_rmse = float(ripple_cfg.get("max_line_rmse_px", 12.0))
-    track_order = _track_order(config)
-
     geometries: List[_TrackGeometry] = []
     total = len(track_paths)
     for track_index, track_path in enumerate(track_paths):
         _check_cancel(cancel_cb)
-        frame, position = load_track_frame_position(track_path, order=track_order)
+        coordinates = load_track_coordinates(
+            track_path,
+            heatmap_meta=heatmap_meta,
+        )
         geometry = _fit_track_geometry(
             track_index=track_index,
             track_path=track_path,
-            frame=frame,
-            position=position,
+            frame=coordinates.frame,
+            image_row=coordinates.image_row,
+            position=coordinates.position,
             min_track_rows=min_track_rows,
             min_abs_slope=min_abs_slope,
             max_line_rmse=max_line_rmse,
@@ -286,6 +291,11 @@ def analyze_ripple_tracks(
             frequency_hz=frequency_hz,
             frequency_method=frequency_method,
         )
+        metrics.update({
+            "coordinate_space": "bottom_left_frame_position",
+            "coord_origin": coordinate_origin(heatmap_meta),
+            "pixel_mapping": (heatmap_meta or {}).get("pixel_mapping"),
+        })
         track_rows.append({
             "track_index": geometry.track_index,
             "amplitude": None,
@@ -371,12 +381,13 @@ def _fit_track_geometry(
     track_index: int,
     track_path: Path,
     frame: np.ndarray,
+    image_row: np.ndarray,
     position: np.ndarray,
     min_track_rows: int,
     min_abs_slope: float,
     max_line_rmse: float,
 ) -> _TrackGeometry:
-    frame, position = _clean_track(frame, position)
+    frame, image_row, position = _clean_track(frame, image_row, position)
     slope, intercept, rmse, r2 = _robust_line_fit(frame, position)
     direction = "positive" if slope > min_abs_slope else "negative" if slope < -min_abs_slope else "stationary"
     y_start = float(frame[0]) if frame.size else 0.0
@@ -395,6 +406,7 @@ def _fit_track_geometry(
         track_index=track_index,
         track_path=track_path,
         frame=frame,
+        image_row=image_row,
         position=position,
         slope=slope,
         intercept=intercept,
@@ -412,25 +424,37 @@ def _fit_track_geometry(
     )
 
 
-def _clean_track(frame: np.ndarray, position: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+def _clean_track(
+    frame: np.ndarray,
+    image_row: np.ndarray,
+    position: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     y = np.asarray(frame, dtype=float).reshape(-1)
+    image_y = np.asarray(image_row, dtype=float).reshape(-1)
     x = np.asarray(position, dtype=float).reshape(-1)
-    n = min(y.size, x.size)
+    n = min(y.size, image_y.size, x.size)
     y = y[:n]
+    image_y = image_y[:n]
     x = x[:n]
-    finite = np.isfinite(y) & np.isfinite(x)
+    finite = np.isfinite(y) & np.isfinite(image_y) & np.isfinite(x)
     y = y[finite]
+    image_y = image_y[finite]
     x = x[finite]
     if y.size == 0:
-        return y, x
+        return y, image_y, x
     order = np.argsort(y, kind="stable")
     y = y[order]
+    image_y = image_y[order]
     x = x[order]
     unique_y, inverse = np.unique(y, return_inverse=True)
     if unique_y.size != y.size:
         medians = np.asarray([np.median(x[inverse == i]) for i in range(unique_y.size)], dtype=float)
-        return unique_y, medians
-    return y, x
+        image_medians = np.asarray(
+            [np.median(image_y[inverse == i]) for i in range(unique_y.size)],
+            dtype=float,
+        )
+        return unique_y, image_medians, medians
+    return y, image_y, x
 
 
 def _robust_line_fit(frame: np.ndarray, position: np.ndarray) -> Tuple[float, float, float, Optional[float]]:
@@ -712,7 +736,7 @@ def _overlay_event(
         "track_index": geometry.track_index,
         "sample": _sample_name(geometry.track_path),
         "poly": [
-            {"x": float(geometry.position[index]), "y": float(geometry.frame[index])}
+            {"x": float(geometry.position[index]), "y": float(geometry.image_row[index])}
             for index in indices
         ],
         "peaks": [],
@@ -720,14 +744,6 @@ def _overlay_event(
         "period": metrics.get("period"),
         "metrics": metrics,
     }
-
-
-def _track_order(config: Dict[str, Any]) -> str:
-    kymo = (config.get("kymo") or {})
-    order = str(kymo.get("track_xy_order", "auto")).lower()
-    if order == "auto":
-        return "yx" if str(kymo.get("backend", "onnx")).lower() == "onnx" else "xy"
-    return order
 
 
 def _frame_at_x(track: _TrackGeometry, x: float) -> float:

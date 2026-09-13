@@ -19,11 +19,24 @@ _LARGE_WAVE_ALIASES = {
 }
 
 
-def resolve_analysis_mode(config: Dict[str, Any] | None) -> str:
-    analysis = ((config or {}).get("analysis") or {})
-    raw = str(analysis.get("mode", STANDARD_ANALYSIS_MODE)).strip().lower()
+def normalize_analysis_mode(value: Any) -> str:
+    raw = str(value if value is not None else STANDARD_ANALYSIS_MODE).strip().lower()
+    if raw == STANDARD_ANALYSIS_MODE:
+        return STANDARD_ANALYSIS_MODE
     if raw in _RIPPLE_ALIASES:
         return RIPPLE_ANALYSIS_MODE
     if raw in _LARGE_WAVE_ALIASES:
         return LARGE_WAVE_ANALYSIS_MODE
-    return STANDARD_ANALYSIS_MODE
+    raise ValueError(
+        f"Unknown analysis.mode {raw!r}; expected standard, ripple_family, or large_wave"
+    )
+
+
+def resolve_analysis_mode(config: Dict[str, Any] | None) -> str:
+    analysis = ((config or {}).get("analysis") or {})
+    try:
+        return normalize_analysis_mode(analysis.get("mode", STANDARD_ANALYSIS_MODE))
+    except ValueError:
+        # Keep read compatibility for old stored jobs. New runs are checked by
+        # config validation before this resolver is called.
+        return STANDARD_ANALYSIS_MODE

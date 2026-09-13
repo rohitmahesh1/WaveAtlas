@@ -1,18 +1,26 @@
 from __future__ import annotations
 
-import copy
 import csv
 from dataclasses import dataclass
 import io
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from uuid import UUID
 
 import numpy as np
 
 from .cancel import CancellationRequested
-from .extract_core import load_track_frame_position
+from .extract_core import detect_peak_sets
+from .features import bulge_from_props, json_sanitize
 from .large_wave_fit import LargeWaveFit, fit_large_wave
-from .signal.detrend import detrend_residual
+from .sampling import resolve_sampling_rate
+from .signal.detrend import detrend_with_fit
+from .signal.period import estimate_dominant_frequency, resolve_positive_frequency
+from .track_coordinates import (
+    coordinate_origin,
+    image_row_from_frame,
+    load_track_coordinates,
+)
 
 
 CancelCallback = Optional[Callable[[], bool]]
@@ -21,6 +29,8 @@ ProgressCallback = Optional[Callable[[str, int, int], None]]
 
 @dataclass(frozen=True)
 class LargeWaveAnalysisResult:
+    track_rows: List[Dict[str, Any]]
+    overlay_events: List[Dict[str, Any]]
     wave_rows: List[Dict[str, Any]]
     measurements: List[Dict[str, Any]]
     events: List[Dict[str, Any]]
@@ -28,6 +38,18 @@ class LargeWaveAnalysisResult:
     tracks_csv: bytes
     measurements_csv: bytes
     events_csv: bytes
+
+
+@dataclass(frozen=True)
+class LargeWavePreparedTrack:
+    track_index: int
+    track_path: Path
+    frame: np.ndarray
+    position: np.ndarray
+    residual: np.ndarray
+    candidate_rows: List[Dict[str, Any]]
+    track_row: Dict[str, Any]
+    overlay_event: Dict[str, Any]
 
 
 LARGE_WAVE_TRACK_FIELDS = [
@@ -57,6 +79,10 @@ LARGE_WAVE_TRACK_FIELDS = [
     "mean_apex_curvature_px_per_frame2",
     "large_wave_frequency_hz",
     "large_wave_recurrence_frequency_hz",
+    "detrend_method",
+    "detrend_fallback_used",
+    "detrend_fallback_reason",
+    "detrend_inlier_fraction",
 ]
 
 STANDARD_WAVE_FIELDS = [
@@ -130,6 +156,10 @@ STANDARD_WAVE_FIELDS = [
     "Recurrence Frequency (Hz)",
     "Wave Type",
     "Type Score",
+    "Detrend Method",
+    "Detrend Fallback Used",
+    "Detrend Fallback Reason",
+    "Detrend Inlier Fraction",
 ]
 
 LARGE_WAVE_MEASUREMENT_FIELDS = [
@@ -240,46 +270,255 @@ LARGE_WAVE_EVENT_FIELDS = [
 ]
 
 
-def build_large_wave_track_config(config: Dict[str, Any]) -> Dict[str, Any]:
-    resolved = copy.deepcopy(config)
-    large_cfg = (((resolved.get("analysis") or {}).get("large_wave") or {}))
-    peak_overrides = large_cfg.get("peaks") or {}
-    resolved["peaks"] = {**(resolved.get("peaks") or {}), **peak_overrides}
-    return resolved
+def prepare_large_wave_track(
+    *,
+    job_id: UUID,
+    track_index: int,
+    track_path: Path,
+    config: Dict[str, Any],
+    heatmap_meta: Optional[Dict[str, Any]] = None,
+) -> LargeWavePreparedTrack:
+    """Load a track and create only the seeds needed by the large-wave fitter."""
+
+    coordinates = load_track_coordinates(
+        track_path,
+        heatmap_meta=heatmap_meta,
+    )
+    frame = coordinates.frame
+    image_row = coordinates.image_row
+    position = coordinates.position
+    sampling_rate = resolve_sampling_rate(config)
+    detrended = detrend_with_fit(frame, position, **(config.get("detrend") or {}))
+    residual = detrended.residual
+    detrend_meta = detrended.fit.metadata()
+    large_cfg = (((config.get("analysis") or {}).get("large_wave") or {}))
+    peaks_cfg = {**(config.get("peaks") or {}), **(large_cfg.get("peaks") or {})}
+    frames_per_period = _candidate_frames_per_period(
+        residual,
+        frame=frame,
+        sampling_rate=sampling_rate,
+        peaks_cfg=peaks_cfg,
+        period_cfg=config.get("period") or {},
+    )
+    peak_sets = detect_peak_sets(residual, peaks_cfg, frames_per_period)
+
+    candidate_rows: List[Dict[str, Any]] = []
+    for peak_set in peak_sets:
+        peaks_idx = np.asarray(peak_set.get("peaks_idx", []), dtype=int)
+        peak_props = peak_set.get("peak_props") or {}
+        fallback_flags = np.asarray(peak_props.get("fallback_peak", []), dtype=bool)
+        for peak_pos, peak_i_raw in enumerate(peaks_idx):
+            peak_i = int(peak_i_raw)
+            if peak_i < 0 or peak_i >= len(frame):
+                continue
+            bulge = bulge_from_props(peak_i, peaks_idx, peak_props, sampling_rate)
+            metrics = json_sanitize({
+                "analysis_mode": "large_wave",
+                "track_index": int(track_index),
+                "event_kind": str(peak_set["event_kind"]),
+                "event_polarity": str(peak_set["event_polarity"]),
+                "peak_i": peak_i,
+                "fallback_peak": bool(fallback_flags[peak_pos])
+                if peak_pos < fallback_flags.size
+                else False,
+                "peak_frame_raw": float(image_row[peak_i]),
+                "peak_image_row": float(image_row[peak_i]),
+                "peak_frame_y_axis": float(frame[peak_i]),
+                "peak_position_raw": float(position[peak_i]),
+                "peak_position_x_axis": float(position[peak_i]),
+                "coordinate_meta": _coordinate_meta(heatmap_meta),
+                "detrend_method": detrend_meta["method"],
+                "detrend_fallback_used": detrend_meta["fallback_used"],
+                "detrend_fallback_reason": detrend_meta["fallback_reason"],
+                "detrend_inlier_fraction": detrend_meta["inlier_fraction"],
+                **bulge,
+            })
+            candidate_rows.append({
+                "wave_index": None,
+                "event_polarity": str(peak_set["event_polarity"]),
+                "event_kind": str(peak_set["event_kind"]),
+                "fit_target": "large_wave_local_chord",
+                "metrics": metrics,
+            })
+
+    candidate_rows.sort(
+        key=lambda row: (
+            int((row.get("metrics") or {}).get("peak_i", 0)),
+            1 if row.get("event_kind") == "min" else 0,
+        )
+    )
+    for wave_index, row in enumerate(candidate_rows, start=1):
+        row["wave_index"] = wave_index
+
+    track_stem = track_path.stem
+    sample = _sample_name(track_path)
+    event_kinds = [str(row.get("event_kind", "max")) for row in candidate_rows]
+    track_row: Dict[str, Any] = {
+        "track_index": int(track_index),
+        "amplitude": None,
+        "frequency": None,
+        "error": None,
+        "x0": int(round(position[0])) if position.size else None,
+        "y0": int(round(frame[0])) if frame.size else None,
+        "metrics": {
+            "analysis_mode": "large_wave",
+            "num_peaks": len(candidate_rows),
+            "num_events": len(candidate_rows),
+            "num_maxima": sum(kind == "max" for kind in event_kinds),
+            "num_minima": sum(kind == "min" for kind in event_kinds),
+            "event_polarity": str(peaks_cfg.get("event_polarity", peaks_cfg.get("polarity", "both"))),
+            "sampling_rate": sampling_rate,
+            "track_stem": track_stem,
+            "sample": sample,
+            "coord_origin": coordinate_origin(heatmap_meta),
+            "pixel_mapping": (heatmap_meta or {}).get("pixel_mapping"),
+            "coordinate_space": "bottom_left_frame_position",
+            "detrend": detrend_meta,
+        },
+        "overlay": {},
+    }
+    overlay_event = _overlay_event(
+        job_id=job_id,
+        track_index=track_index,
+        track_stem=track_stem,
+        sample=sample,
+        image_row=image_row,
+        position=position,
+        candidate_rows=candidate_rows,
+        max_points=int((config.get("overlay") or {}).get("max_points", 300)),
+    )
+    return LargeWavePreparedTrack(
+        track_index=track_index,
+        track_path=track_path,
+        frame=frame,
+        position=position,
+        residual=residual,
+        candidate_rows=candidate_rows,
+        track_row=track_row,
+        overlay_event=overlay_event,
+    )
+
+
+def _candidate_frames_per_period(
+    residual: np.ndarray,
+    *,
+    frame: np.ndarray,
+    sampling_rate: float,
+    peaks_cfg: Dict[str, Any],
+    period_cfg: Dict[str, Any],
+) -> Optional[float]:
+    if not bool(peaks_cfg.get("adaptive", False)):
+        return None
+    resolved_period_cfg = dict(period_cfg)
+    resolved_period_cfg.pop("sampling_rate", None)
+    try:
+        estimated_frequency = float(
+            estimate_dominant_frequency(
+                residual,
+                sampling_rate=sampling_rate,
+                **resolved_period_cfg,
+            )
+        )
+    except Exception:
+        estimated_frequency = float("nan")
+    frequency = resolve_positive_frequency(
+        estimated_frequency,
+        frame=frame,
+        sampling_rate=sampling_rate,
+        min_freq=resolved_period_cfg.get("min_freq"),
+        max_freq=resolved_period_cfg.get("max_freq"),
+    )
+    if not np.isfinite(frequency) or frequency <= 0 or sampling_rate <= 0:
+        return None
+    return float(sampling_rate / frequency)
+
+
+def _coordinate_meta(heatmap_meta: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    source = heatmap_meta or {}
+    meta = {
+        key: source[key]
+        for key in (
+            "output_height",
+            "source_rows",
+            "nrows",
+            "origin",
+            "render_origin",
+            "source_origin",
+        )
+        if key in source
+    }
+    meta["coord_origin"] = coordinate_origin(source)
+    return meta
+
+
+def _sample_name(track_path: Path) -> str:
+    base = track_path.parent.parent.name
+    return base[:-8] if base.endswith("_heatmap") else base
+
+
+def _overlay_event(
+    *,
+    job_id: UUID,
+    track_index: int,
+    track_stem: str,
+    sample: str,
+    image_row: np.ndarray,
+    position: np.ndarray,
+    candidate_rows: Sequence[Dict[str, Any]],
+    max_points: int,
+) -> Dict[str, Any]:
+    size = int(min(len(image_row), len(position)))
+    if size > max_points > 0:
+        indices = np.linspace(0, size - 1, num=max_points, dtype=int)
+    else:
+        indices = np.arange(size, dtype=int)
+    return {
+        "job_id": str(job_id),
+        "sample": sample,
+        "track_index": int(track_index),
+        "track_stem": track_stem,
+        "poly": [
+            {"x": float(position[index]), "y": float(image_row[index])}
+            for index in indices
+        ],
+        "peaks": [
+            {
+                "i": int((row.get("metrics") or {}).get("peak_i", 0)),
+                "kind": str(row.get("event_kind", "max")),
+                "event_polarity": str(row.get("event_polarity", "maxima")),
+            }
+            for row in candidate_rows
+        ],
+        "freq_hz": None,
+        "period": None,
+    }
 
 
 def analyze_large_wave_events(
     *,
-    track_paths: Sequence[Path],
-    track_rows: List[Dict[str, Any]],
-    wave_rows: List[Dict[str, Any]],
+    prepared_tracks: Sequence[LargeWavePreparedTrack],
     config: Dict[str, Any],
     cancel_cb: CancelCallback = None,
     progress_cb: ProgressCallback = None,
 ) -> LargeWaveAnalysisResult:
     large_cfg = (((config.get("analysis") or {}).get("large_wave") or {}))
     event_cfg = large_cfg.get("events") or {}
-    sampling_rate = float((config.get("io") or {}).get("sampling_rate", 1.0))
-    track_order = _track_order(config)
-    by_track: Dict[int, List[Dict[str, Any]]] = {}
-    for row in wave_rows:
-        metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
-        try:
-            track_index = int(metrics.get("track_index"))
-        except Exception:
-            continue
-        by_track.setdefault(track_index, []).append(row)
+    sampling_rate = resolve_sampling_rate(config)
+    track_paths = [prepared.track_path for prepared in prepared_tracks]
+    track_rows = [prepared.track_row for prepared in prepared_tracks]
+    overlay_events = [prepared.overlay_event for prepared in prepared_tracks]
 
     measurements: List[Dict[str, Any]] = []
     kept_wave_rows: List[Dict[str, Any]] = []
-    total_tracks = len(track_paths)
-    for track_index, track_path in enumerate(track_paths):
+    total_tracks = len(prepared_tracks)
+    for prepared in prepared_tracks:
         _check_cancel(cancel_cb)
-        rows = by_track.get(track_index, [])
+        track_index = prepared.track_index
+        rows = prepared.candidate_rows
         if rows:
-            frame, position = load_track_frame_position(track_path, order=track_order)
-            residual = detrend_residual(frame, position, **(config.get("detrend") or {}))
-            global_baseline = np.asarray(position, dtype=float) - residual
+            frame = prepared.frame
+            position = prepared.position
+            global_baseline = np.asarray(position, dtype=float) - prepared.residual
             track_candidates: List[Dict[str, Any]] = []
             for row in rows:
                 metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
@@ -388,20 +627,30 @@ def analyze_large_wave_events(
 
     for track_index in range(len(track_paths)):
         track_summaries.setdefault(track_index, _empty_track_summary(track_index, track_paths))
+    measurements_by_track: Dict[int, List[Dict[str, Any]]] = {}
+    for measurement in measurements:
+        measurements_by_track.setdefault(int(measurement["track_index"]), []).append(measurement)
     for track_row in track_rows:
         track_index = int(track_row.get("track_index", -1))
         summary = track_summaries.get(track_index, _empty_track_summary(track_index, track_paths))
+        track_measurements = measurements_by_track.get(track_index, [])
         metrics = track_row.get("metrics") if isinstance(track_row.get("metrics"), dict) else {}
         metrics.update({
             "analysis_mode": "large_wave",
             "num_peaks": summary.get("large_wave_measurement_count", 0),
+            "num_events": summary.get("large_wave_measurement_count", 0),
+            "num_maxima": sum(row.get("event_kind") == "max" for row in track_measurements),
+            "num_minima": sum(row.get("event_kind") == "min" for row in track_measurements),
             **summary,
         })
         track_row["metrics"] = metrics
         track_row["amplitude"] = summary.get("mean_large_wave_amplitude_px")
         track_row["frequency"] = summary.get("large_wave_frequency_hz")
+        track_row["error"] = summary.get("track_fit_error_median")
 
     return LargeWaveAnalysisResult(
+        track_rows=track_rows,
+        overlay_events=overlay_events,
         wave_rows=kept_wave_rows,
         measurements=measurements,
         events=events,
@@ -474,6 +723,10 @@ def _measure_fit(
         ),
         "grouped_event": False,
         "fallback_peak": fallback_peak,
+        "detrend_method": source_metrics.get("detrend_method"),
+        "detrend_fallback_used": source_metrics.get("detrend_fallback_used"),
+        "detrend_fallback_reason": source_metrics.get("detrend_fallback_reason"),
+        "detrend_inlier_fraction": source_metrics.get("detrend_inlier_fraction"),
         **fit_metrics,
     }
     return measurement
@@ -612,35 +865,38 @@ def _assign_recurrence_periods(
 def _apply_measurement_to_wave_row(row: Dict[str, Any], measurement: Dict[str, Any]) -> None:
     source = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
     metrics = dict(source)
-    map_frame = _coordinate_mapper(
-        source,
-        (("peak_frame_raw", "peak_frame_y_axis"), ("frame1_raw", "frame1"), ("frame2_raw", "frame2")),
-    )
-    map_position = _coordinate_mapper(
-        source,
-        (("peak_position_raw", "peak_position_x_axis"),),
-    )
+    coordinate_meta = source.get("coordinate_meta")
+    if not isinstance(coordinate_meta, dict):
+        coordinate_meta = {}
 
-    frame1_raw = _optional_float(measurement.get("equivalent_cycle_frame1"))
-    frame2_raw = _optional_float(measurement.get("equivalent_cycle_frame2"))
-    peak_frame_raw = float(measurement["peak_frame"])
+    frame1 = _optional_float(measurement.get("equivalent_cycle_frame1"))
+    frame2 = _optional_float(measurement.get("equivalent_cycle_frame2"))
+    peak_frame = float(measurement["peak_frame"])
     cycle_position1 = _optional_float(measurement.get("equivalent_cycle_position1_px"))
     cycle_position2 = _optional_float(measurement.get("equivalent_cycle_position2_px"))
-    pos1 = map_position(cycle_position1) if cycle_position1 is not None else None
-    pos2 = map_position(cycle_position2) if cycle_position2 is not None else None
-    peak_position = map_position(float(measurement["peak_position_px"]))
-    frame1 = map_frame(frame1_raw) if frame1_raw is not None else None
-    frame2 = map_frame(frame2_raw) if frame2_raw is not None else None
-    peak_frame = map_frame(peak_frame_raw)
+    pos1 = cycle_position1
+    pos2 = cycle_position2
+    peak_position = float(measurement["peak_position_px"])
+    frame1_image_row = (
+        float(image_row_from_frame(frame1, coordinate_meta)) if frame1 is not None else None
+    )
+    frame2_image_row = (
+        float(image_row_from_frame(frame2, coordinate_meta)) if frame2 is not None else None
+    )
+    peak_image_row = float(image_row_from_frame(peak_frame, coordinate_meta))
 
     measurement.update({
         "frame1": frame1,
         "frame2": frame2,
-        "frame1_raw": frame1_raw,
-        "frame2_raw": frame2_raw,
+        "frame1_raw": frame1_image_row,
+        "frame2_raw": frame2_image_row,
+        "frame1_image_row": frame1_image_row,
+        "frame2_image_row": frame2_image_row,
         "pos1_px": pos1,
         "pos2_px": pos2,
         "peak_frame_y_axis": peak_frame,
+        "peak_frame_raw": peak_image_row,
+        "peak_image_row": peak_image_row,
         "peak_position_x_axis": peak_position,
     })
 
@@ -658,13 +914,16 @@ def _apply_measurement_to_wave_row(row: Dict[str, Any], measurement: Dict[str, A
         "large_wave_apex_curvature_px_per_frame2": measurement.get(
             "apex_curvature_px_per_frame2"
         ),
-        "frame1_raw": frame1_raw,
-        "frame2_raw": frame2_raw,
+        "frame1_raw": frame1_image_row,
+        "frame2_raw": frame2_image_row,
+        "frame1_image_row": frame1_image_row,
+        "frame2_image_row": frame2_image_row,
         "frame1": frame1,
         "frame2": frame2,
         "pos1_px": pos1,
         "pos2_px": pos2,
-        "peak_frame_raw": peak_frame_raw,
+        "peak_frame_raw": peak_image_row,
+        "peak_image_row": peak_image_row,
         "peak_position_raw": float(measurement["peak_position_px"]),
         "peak_frame_y_axis": peak_frame,
         "peak_position_x_axis": peak_position,
@@ -687,27 +946,6 @@ def _apply_measurement_to_wave_row(row: Dict[str, Any], measurement: Dict[str, A
     row["t_end"] = measurement.get("frame2_time_s")
     row["x"] = int(round(peak_position)) if np.isfinite(peak_position) else None
     row["y"] = int(round(peak_frame)) if np.isfinite(peak_frame) else None
-
-
-def _coordinate_mapper(
-    metrics: Dict[str, Any],
-    pairs: Sequence[Tuple[str, str]],
-) -> Callable[[float], float]:
-    raw_values: List[float] = []
-    mapped_values: List[float] = []
-    for raw_key, mapped_key in pairs:
-        raw = _optional_float(metrics.get(raw_key))
-        mapped = _optional_float(metrics.get(mapped_key))
-        if raw is not None and mapped is not None:
-            raw_values.append(raw)
-            mapped_values.append(mapped)
-    if len(raw_values) >= 2 and float(np.ptp(raw_values)) > 1e-9:
-        slope, intercept = np.polyfit(np.asarray(raw_values), np.asarray(mapped_values), 1)
-        return lambda value: float(slope * value + intercept)
-    if raw_values:
-        offset = mapped_values[0] - raw_values[0]
-        return lambda value: float(value + offset)
-    return lambda value: float(value)
 
 
 def _group_measurements(
@@ -883,14 +1121,6 @@ def _empty_track_summary(
     }
 
 
-def _track_order(config: Dict[str, Any]) -> str:
-    kymo_cfg = config.get("kymo") or {}
-    order = str(kymo_cfg.get("track_xy_order", "auto")).lower()
-    if order == "auto":
-        order = "yx" if str(kymo_cfg.get("backend", "onnx")).lower() == "onnx" else "xy"
-    return order
-
-
 def _point_count(track_paths: Sequence[Path], track_index: int) -> int:
     if track_index < 0 or track_index >= len(track_paths):
         return 0
@@ -903,7 +1133,17 @@ def _point_count(track_paths: Sequence[Path], track_index: int) -> int:
 def _track_csv_row(track_row: Dict[str, Any], summary: Dict[str, Any]) -> Dict[str, Any]:
     track_index = int(track_row.get("track_index", -1))
     event_ids = summary.get("large_wave_event_ids") or []
-    raw = {"track_index": track_index, **summary, "large_wave_event_ids": ";".join(event_ids)}
+    metrics = dict(track_row.get("metrics") or {})
+    detrend = dict(metrics.get("detrend") or {})
+    raw = {
+        "track_index": track_index,
+        **summary,
+        "large_wave_event_ids": ";".join(event_ids),
+        "detrend_method": detrend.get("method"),
+        "detrend_fallback_used": detrend.get("fallback_used"),
+        "detrend_fallback_reason": detrend.get("fallback_reason"),
+        "detrend_inlier_fraction": detrend.get("inlier_fraction"),
+    }
     return {
         "Track ID": track_index,
         "Points": summary.get("point_count"),
@@ -958,7 +1198,7 @@ def _measurement_csv_row(row: Dict[str, Any]) -> Dict[str, Any]:
         "Peak Value Original": row.get("signed_amplitude_px"),
         "Fit Target": "large_wave_local_chord",
         "Compare Fit Targets": False,
-        "Peak Frame Raw": row.get("peak_frame"),
+        "Peak Frame Raw": row.get("peak_frame_raw"),
         "Peak Position Raw": row.get("peak_position_px"),
         "Frame 1 Raw": row.get("frame1_raw"),
         "Frame 2 Raw": row.get("frame2_raw"),
@@ -978,6 +1218,10 @@ def _measurement_csv_row(row: Dict[str, Any]) -> Dict[str, Any]:
         "Frequency Agreement Error": row.get("frequency_agreement_error"),
         "Config Event Polarity": "both",
         "Wave Type": "large_wave",
+        "Detrend Method": row.get("detrend_method"),
+        "Detrend Fallback Used": row.get("detrend_fallback_used"),
+        "Detrend Fallback Reason": row.get("detrend_fallback_reason"),
+        "Detrend Inlier Fraction": row.get("detrend_inlier_fraction"),
     }
     friendly = {
         "Measurement ID": row.get("measurement_id"),

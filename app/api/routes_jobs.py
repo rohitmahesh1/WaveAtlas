@@ -55,9 +55,17 @@ from ..large_wave_fit import (
     fit_large_wave,
     large_wave_basin_window,
 )
-from ..signal.detrend import fit_baseline_ransac
+from ..signal.detrend import fit_baseline
 from ..signal.peaks import detect_peaks, detect_peaks_adaptive, ensure_minimum_peaks
 from ..signal.period import estimate_dominant_frequency, frequency_to_period, resolve_positive_frequency
+from ..config_validation import normalize_and_validate_config
+from ..sampling import resolve_sampling_rate
+from ..track_coordinates import (
+    coordinate_origin,
+    index_base_from_artifact,
+    point_order_from_artifact,
+    track_coordinates_from_points,
+)
 
 from .deps import get_artifact_store, get_db_session, get_owner_session_id
 
@@ -197,7 +205,12 @@ def _effective_pipeline_config(job: Job) -> Dict[str, Any]:
     execution, routes persist this merged snapshot back to job.config so detail
     views and resumed work use the same settings the pipeline used.
     """
-    return _deep_merge(_pipeline_config_from_env(), dict(job.config or {}))
+    try:
+        overrides = normalize_and_validate_config(dict(job.config or {}))
+        merged = _deep_merge(_pipeline_config_from_env(), overrides)
+        return normalize_and_validate_config(merged)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid pipeline config: {exc}") from exc
 
 
 def _artifact_prefix() -> str:
@@ -246,31 +259,6 @@ def _parse_providers(value: Any) -> Optional[Iterable[str]]:
             return None
         return [p.strip() for p in s.split(",") if p.strip()]
     return [str(value)]
-
-
-def _track_xy_order_from_config(config: Dict[str, Any]) -> str:
-    kymo_cfg = (config.get("kymo") or {})
-    backend = str(kymo_cfg.get("backend", "onnx")).lower()
-    order = str(kymo_cfg.get("track_xy_order", "auto")).lower()
-    if order == "auto":
-        return "yx" if backend == "onnx" else "xy"
-    return order
-
-
-def _load_track_frame_position_from_bytes(data: bytes, *, order: str) -> tuple[np.ndarray, np.ndarray]:
-    arr = np.load(io.BytesIO(data), allow_pickle=False)
-    if arr.ndim == 2 and arr.shape[1] >= 2:
-        if order == "yx":
-            frame = arr[:, 0].astype(float, copy=False)
-            position = arr[:, 1].astype(float, copy=False)
-        else:
-            position = arr[:, 0].astype(float, copy=False)
-            frame = arr[:, 1].astype(float, copy=False)
-        order_idx = np.argsort(frame, kind="stable")
-        return frame[order_idx], position[order_idx]
-    if arr.ndim == 1:
-        return np.arange(arr.shape[0], dtype=float), arr.astype(float, copy=False)
-    raise HTTPException(status_code=500, detail="Unsupported track array shape")
 
 
 def _parse_index_range(value: str, n: int) -> tuple[int, int]:
@@ -623,7 +611,13 @@ def create_job(
     session: Session = Depends(get_db_session),
 ) -> JobRead:
     store = JobStore(session=session)
-    config_value = _parse_config_value(payload.config)
+    try:
+        config_value = normalize_and_validate_config(_parse_config_value(payload.config))
+        normalize_and_validate_config(
+            _deep_merge(_pipeline_config_from_env(), config_value)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     job = store.create_job(owner_session_id=owner_session_id, run_name=payload.run_name, config=config_value)
     return _job_read_with_filename(session, job)
 
@@ -699,7 +693,11 @@ def get_config_docs() -> Response:
 
 @router.post("/config/validate")
 def validate_config(payload: ConfigValidatePayload) -> Dict[str, Any]:
-    _ = _parse_config_value(payload.config)
+    try:
+        overrides = normalize_and_validate_config(_parse_config_value(payload.config))
+        normalize_and_validate_config(_deep_merge(_pipeline_config_from_env(), overrides))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"ok": True}
 
 
@@ -1010,8 +1008,27 @@ def get_track_detail(
 
     job = store.get_job(job_id)
     config = _effective_pipeline_config(job)
-    order = _track_xy_order_from_config(config)
-    frame, position = _load_track_frame_position_from_bytes(track_bytes, order=order)
+    track_meta = dict(arts[0].meta or {})
+    heatmap_artifacts = store.list_artifacts(
+        job_id,
+        kind=ArtifactKind.base_heatmap,
+        label="base_heatmap",
+        limit=1,
+    )
+    heatmap_meta = dict(heatmap_artifacts[0].meta or {}) if heatmap_artifacts else {}
+    coordinate_meta = {**heatmap_meta, **track_meta}
+    try:
+        coordinates = track_coordinates_from_points(
+            np.load(io.BytesIO(track_bytes), allow_pickle=False),
+            order=point_order_from_artifact(track_meta, config=config),
+            heatmap_meta=coordinate_meta,
+            index_base=index_base_from_artifact(track_meta),
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail=f"Invalid track coordinate artifact: {exc}") from exc
+    frame = coordinates.frame
+    image_row = coordinates.image_row
+    position = coordinates.position
     analysis_mode = resolve_analysis_mode(config)
     track_model = session.exec(
         select(Track).where(Track.job_id == job_id, Track.track_index == int(track_index))
@@ -1029,8 +1046,16 @@ def get_track_detail(
         return {
             "track_index": int(track_index),
             "analysis_mode": RIPPLE_ANALYSIS_MODE,
-            "coords": {"poly_format": "[x, y]", "x_name": "time_index", "y_name": "position_px"},
+            "coords": {
+                "poly_format": "[position_px, image_row]",
+                "x_name": "position_px",
+                "y_name": "image_row",
+                "scientific_frame_name": "frame",
+                "origin": coordinate_origin(coordinate_meta),
+            },
             "time_index": frame[lo : hi + 1].tolist(),
+            "frame": frame[lo : hi + 1].tolist(),
+            "image_row": image_row[lo : hi + 1].tolist(),
             "position": position[lo : hi + 1].tolist(),
             "baseline": baseline[lo : hi + 1].tolist(),
             "residual": residual[lo : hi + 1].tolist() if include_residual else None,
@@ -1046,18 +1071,19 @@ def get_track_detail(
 
     detrend_cfg = (config.get("detrend") or {}).copy()
     degree = int(detrend_cfg.pop("degree", 1))
-    model = fit_baseline_ransac(frame, position, degree=degree, **detrend_cfg)
-    baseline = model.predict(frame.reshape(-1, 1)).astype(float)
+    baseline_fit = fit_baseline(frame, position, degree=degree, **detrend_cfg)
+    baseline = baseline_fit.model.predict(frame.reshape(-1, 1)).astype(float)
     residual = (position - baseline).astype(float)
 
     peaks_cfg = (config.get("peaks") or {})
     period_cfg = dict(config.get("period") or {})
-    io_cfg = (config.get("io") or {})
-    sampling_rate = float(io_cfg.get("sampling_rate", period_cfg.get("sampling_rate", 1.0)))
-    period_cfg.setdefault("sampling_rate", sampling_rate)
+    period_cfg.pop("sampling_rate", None)
+    sampling_rate = resolve_sampling_rate(config)
 
     try:
-        freq = float(estimate_dominant_frequency(residual, **period_cfg))
+        freq = float(
+            estimate_dominant_frequency(residual, sampling_rate=sampling_rate, **period_cfg)
+        )
     except Exception:
         freq = float("nan")
     freq = resolve_positive_frequency(
@@ -1143,6 +1169,7 @@ def get_track_detail(
             "peak_index": int(ordinal),
             "peak_i": int(peak_i),
             "frame": float(frame[peak_i]),
+            "image_row": float(image_row[peak_i]),
             "position": float(position[peak_i]),
             "amplitude": float(residual[peak_i]),
             "event_amplitude": float(event["event_amplitude"]),
@@ -1239,6 +1266,7 @@ def get_track_detail(
             peak_regressions.append(regression)
 
     frame_view = frame[lo : hi + 1]
+    image_row_view = image_row[lo : hi + 1]
     baseline_view = baseline[lo : hi + 1]
     residual_view = residual[lo : hi + 1] if include_residual else None
     sine_view = sine_fit[lo : hi + 1] if sine_fit is not None else None
@@ -1254,13 +1282,25 @@ def get_track_detail(
     return {
         "track_index": int(track_index),
         "analysis_mode": analysis_mode,
-        "coords": {"poly_format": "[x, y]", "x_name": "time_index", "y_name": "position_px"},
+        "coords": {
+            "poly_format": "[position_px, image_row]",
+            "x_name": "position_px",
+            "y_name": "image_row",
+            "scientific_frame_name": "frame",
+            "origin": coordinate_origin(coordinate_meta),
+        },
         "time_index": frame_view.tolist(),
+        "frame": frame_view.tolist(),
+        "image_row": image_row_view.tolist(),
         "position": position[lo : hi + 1].tolist(),
         "baseline": baseline_view.tolist(),
         "residual": (residual_view.tolist() if residual_view is not None else None),
         "sine_fit": (sine_view.tolist() if sine_view is not None else None),
-        "regression": {"method": "ransac_poly", "degree": degree, "params": detrend_cfg},
+        "regression": {
+            **baseline_fit.metadata(),
+            "degree": degree,
+            "params": detrend_cfg,
+        },
         "peaks": [int(i) for i in peaks_idx.tolist()],
         "peaks_in_slice": peaks_in_slice,
         "peak_points": peak_points,
@@ -1299,7 +1339,8 @@ def download_artifact(
     data = artifact_store.get_bytes(art.blob_path)
 
     media = art.content_type or "application/octet-stream"
-    filename = (art.label or art.kind.value or "artifact").replace(":", "_")
+    meta_filename = (art.meta or {}).get("filename") if isinstance(art.meta, dict) else None
+    filename = str(meta_filename or art.label or art.kind.value or "artifact").replace(":", "_")
     headers = {
         "Content-Disposition": f'inline; filename="{filename}"',
     }
@@ -1434,6 +1475,10 @@ def export_waves_csv(
         "Recurrence Frequency (Hz)",
         "Wave Type",
         "Type Score",
+        "Detrend Method",
+        "Detrend Fallback Used",
+        "Detrend Fallback Reason",
+        "Detrend Inlier Fraction",
     ]
 
     def metric(row: Wave, key: str, default=None):
@@ -1544,6 +1589,10 @@ def export_waves_csv(
                 metric(r, "recurrence_frequency_hz"),
                 metric(r, "wave_type"),
                 metric(r, "type_score"),
+                metric(r, "detrend_method"),
+                metric(r, "detrend_fallback_used"),
+                metric(r, "detrend_fallback_reason"),
+                metric(r, "detrend_inlier_fraction"),
             ])
             yield buf.getvalue()
             buf.seek(0)

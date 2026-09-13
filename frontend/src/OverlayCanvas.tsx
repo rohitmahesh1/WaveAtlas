@@ -299,8 +299,7 @@ export function OverlayCanvas(props: {
       const gridH = Math.max(1, Math.round(coordInfo.outputHeight || coordInfo.sourceRows || h));
       const col = Math.max(0, Math.min(gridW - 1, Math.floor(rawX)));
       const topRow = Math.max(0, Math.min(gridH - 1, Math.floor(rawY)));
-      const row =
-        String(coordInfo.coordOrigin || "").toLowerCase() === "lower" ? gridH - 1 - topRow : topRow;
+      const row = gridH - 1 - topRow;
       return {
         x: col,
         y: row,
@@ -316,7 +315,8 @@ export function OverlayCanvas(props: {
     }
 
     const col = Math.max(0, Math.floor(rawX));
-    const row = Math.max(0, Math.floor(rawY));
+    const topRow = Math.max(0, Math.floor(rawY));
+    const row = Math.floor(maxY) - topRow;
     return {
       x: col,
       y: row,
@@ -325,7 +325,7 @@ export function OverlayCanvas(props: {
       xLabel,
       yLabel,
       valueCol: col,
-      valueRow: row,
+      valueRow: topRow,
       z: null,
       zLabel: coordInfo?.zLabel || heatmapValues?.label || "z",
     };

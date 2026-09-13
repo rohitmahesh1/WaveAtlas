@@ -9,10 +9,17 @@ from uuid import UUID
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
 
-from .signal.detrend import detrend_residual
+from .signal.detrend import detrend_with_fit
 from .signal.peaks import detect_peaks, detect_peaks_adaptive, ensure_minimum_peaks
 from .signal.period import estimate_dominant_frequency, frequency_to_period, resolve_positive_frequency
-from .features import build_wave_rows, build_peak_rows, map_heatmap_x, map_heatmap_y
+from .features import build_wave_rows, build_peak_rows
+from .sampling import resolve_sampling_rate
+from .track_coordinates import (
+    coordinate_origin,
+    image_row_from_frame,
+    load_track_coordinates,
+    track_coordinates_from_points,
+)
 
 
 PEAK_POLARITY_ALIASES = {
@@ -431,21 +438,18 @@ def process_track(
     config: Dict[str, Any],
     heatmap_meta: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
-    kymo_cfg = (config.get("kymo") or {})
-    backend = str(kymo_cfg.get("backend", "onnx")).lower()
-    track_xy_order = str(kymo_cfg.get("track_xy_order", "auto")).lower()
-    if track_xy_order == "auto":
-        # ONNX kymobutler saves (y, x) points; Wolfram typically outputs (x, y).
-        track_xy_order = "yx" if backend == "onnx" else "xy"
-
-    frame, position = load_track_frame_position(track_path, order=track_xy_order)
+    coordinates = load_track_coordinates(
+        track_path,
+        heatmap_meta=heatmap_meta,
+    )
     return process_track_arrays(
         job_id=job_id,
         track_index=track_index,
         track_stem=track_path.stem,
         sample=_infer_sample(track_path),
-        frame=frame,
-        position=position,
+        frame=coordinates.frame,
+        image_row=coordinates.image_row,
+        position=coordinates.position,
         config=config,
         heatmap_meta=heatmap_meta,
     )
@@ -459,40 +463,51 @@ def process_track_arrays(
     sample: str,
     frame: np.ndarray,
     position: np.ndarray,
+    image_row: Optional[np.ndarray] = None,
     config: Dict[str, Any],
     heatmap_meta: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
     frame = np.asarray(frame, dtype=float)
     position = np.asarray(position, dtype=float)
+    image_rows = (
+        np.asarray(image_row, dtype=float)
+        if image_row is not None
+        else image_row_from_frame(frame, heatmap_meta)
+    )
+    if not (frame.size == position.size == image_rows.size):
+        raise ValueError("frame, position, and image_row must have the same length")
 
-    io_cfg = (config.get("io") or {})
-    sampling_rate = float(io_cfg.get("sampling_rate", 1.0))
+    sampling_rate = resolve_sampling_rate(config)
 
     detrend_cfg = (config.get("detrend") or {})
     peaks_cfg = (config.get("peaks") or {})
     period_cfg = dict(config.get("period") or {})
-    period_cfg.setdefault("sampling_rate", sampling_rate)
+    period_cfg.pop("sampling_rate", None)
 
     features_cfg = (config.get("features") or {})
     overlay_cfg = (config.get("overlay") or {})
 
-    residual = detrend_residual(frame, position, **detrend_cfg)
+    detrended = detrend_with_fit(frame, position, **detrend_cfg)
+    residual = detrended.residual
+    detrend_meta = detrended.fit.metadata()
 
     try:
-        estimated_freq_hz = float(estimate_dominant_frequency(residual, **period_cfg))
+        estimated_freq_hz = float(
+            estimate_dominant_frequency(residual, sampling_rate=sampling_rate, **period_cfg)
+        )
     except Exception:
         estimated_freq_hz = float("nan")
     freq_hz = resolve_positive_frequency(
         estimated_freq_hz,
         frame=frame,
-        sampling_rate=float(period_cfg.get("sampling_rate", 1.0)),
+        sampling_rate=sampling_rate,
         min_freq=period_cfg.get("min_freq"),
         max_freq=period_cfg.get("max_freq"),
     )
     period_s = float(frequency_to_period(freq_hz))
     frames_per_period = (sampling_rate / freq_hz) if (np.isfinite(freq_hz) and freq_hz > 0) else None
 
-    peak_sets = _detect_peak_sets(residual, peaks_cfg, frames_per_period)
+    peak_sets = detect_peak_sets(residual, peaks_cfg, frames_per_period)
 
     wave_rows: List[Dict[str, Any]] = []
     peak_rows: List[Dict[str, Any]] = []
@@ -500,6 +515,7 @@ def process_track_arrays(
         wave_rows.extend(build_wave_rows(
             frame=frame,
             position=position,
+            image_row=image_rows,
             residual=residual,
             fit_residual=peak_set["signal"],
             peaks_idx=peak_set["peaks_idx"],
@@ -519,6 +535,7 @@ def process_track_arrays(
         peak_rows.extend(build_peak_rows(
             frame=frame,
             position=position,
+            image_row=image_rows,
             residual=residual,
             fit_residual=peak_set["signal"],
             peaks_idx=peak_set["peaks_idx"],
@@ -537,6 +554,15 @@ def process_track_arrays(
 
     wave_rows = _sort_and_renumber_event_rows(wave_rows, index_key="wave_index")
     peak_rows = _sort_and_renumber_event_rows(peak_rows)
+    for row in [*wave_rows, *peak_rows]:
+        metrics = dict(row.get("metrics") or {})
+        metrics.update({
+            "detrend_method": detrend_meta["method"],
+            "detrend_fallback_used": detrend_meta["fallback_used"],
+            "detrend_fallback_reason": detrend_meta["fallback_reason"],
+            "detrend_inlier_fraction": detrend_meta["inlier_fraction"],
+        })
+        row["metrics"] = metrics
     peak_props = _combine_peak_props([peak_set["peak_props"] for peak_set in peak_sets])
     event_indices = _event_indices_from_rows(peak_rows)
     event_kinds = _event_kinds_from_rows(peak_rows)
@@ -562,8 +588,8 @@ def process_track_arrays(
         "amplitude": float(np.nanmean(amps)) if amps.size else None,
         "frequency": float(freq_hz) if np.isfinite(freq_hz) else None,
         "error": _quality_cell_value(track_quality.get("track_fit_error_median")),
-        "x0": int(round(map_heatmap_x(position[0], heatmap_meta))) if position.size else None,
-        "y0": int(round(map_heatmap_y(frame[0], heatmap_meta))) if frame.size else None,
+        "x0": int(round(position[0])) if position.size else None,
+        "y0": int(round(frame[0])) if frame.size else None,
         "metrics": {
             "num_peaks": int(len(event_indices)),
             "num_events": int(len(event_indices)),
@@ -574,8 +600,10 @@ def process_track_arrays(
             "sampling_rate": sampling_rate,
             "track_stem": track_stem,
             "sample": sample,
-            "coord_origin": (heatmap_meta or {}).get("coord_origin"),
+            "coord_origin": coordinate_origin(heatmap_meta),
             "pixel_mapping": (heatmap_meta or {}).get("pixel_mapping"),
+            "coordinate_space": "bottom_left_frame_position",
+            "detrend": detrend_meta,
             **track_quality,
         },
         "overlay": {},
@@ -586,6 +614,7 @@ def process_track_arrays(
         job_id=job_id,
         track_index=track_index,
         frame=frame,
+        image_row=image_rows,
         position=position,
         residual=residual,
         peaks_idx=event_indices,
@@ -600,27 +629,17 @@ def process_track_arrays(
     return track_row, wave_rows, peak_rows, overlay_track_event
 
 
-def load_track_frame_position(track_path: Path, *, order: str = "xy") -> Tuple[np.ndarray, np.ndarray]:
-    return track_frame_position_from_points(np.load(track_path), order=order)
+def load_track_frame_position(track_path: Path, *, order: str = "yx") -> Tuple[np.ndarray, np.ndarray]:
+    coordinates = load_track_coordinates(track_path, order=order)
+    return coordinates.frame, coordinates.position
 
 
-def track_frame_position_from_points(data: np.ndarray, *, order: str = "xy") -> Tuple[np.ndarray, np.ndarray]:
-    arr = np.asarray(data)
-    if arr.ndim == 2 and arr.shape[1] >= 2:
-        if order == "yx":
-            frame = arr[:, 0].astype(float, copy=False)
-            position = arr[:, 1].astype(float, copy=False)
-        else:
-            position = arr[:, 0].astype(float, copy=False)
-            frame = arr[:, 1].astype(float, copy=False)
-        order_idx = np.argsort(frame, kind="stable")
-        return frame[order_idx], position[order_idx]
-    if arr.ndim == 1:
-        return np.arange(arr.shape[0], dtype=float), arr.astype(float, copy=False)
-    raise ValueError(f"Unsupported track array shape: {arr.shape}")
+def track_frame_position_from_points(data: np.ndarray, *, order: str = "yx") -> Tuple[np.ndarray, np.ndarray]:
+    coordinates = track_coordinates_from_points(data, order=order)
+    return coordinates.frame, coordinates.position
 
 
-def _load_track_frame_position(track_path: Path, *, order: str = "xy") -> Tuple[np.ndarray, np.ndarray]:
+def _load_track_frame_position(track_path: Path, *, order: str = "yx") -> Tuple[np.ndarray, np.ndarray]:
     return load_track_frame_position(track_path, order=order)
 
 
@@ -860,7 +879,7 @@ def _peak_polarity_specs(value: Any) -> List[Dict[str, Any]]:
     return specs
 
 
-def _detect_peak_sets(
+def detect_peak_sets(
     residual: np.ndarray,
     peaks_cfg: Dict[str, Any],
     frames_per_period: Optional[float],
@@ -1143,6 +1162,7 @@ def _build_overlay_track_event(
     job_id: UUID,
     track_index: int,
     frame: np.ndarray,
+    image_row: np.ndarray,
     position: np.ndarray,
     residual: np.ndarray,
     peaks_idx: np.ndarray,
@@ -1154,7 +1174,7 @@ def _build_overlay_track_event(
     peak_kinds: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     max_points = int(cfg.get("max_points", 300))
-    xs, ys = _decimate_polyline(position, frame, max_points=max_points)
+    xs, ys = _decimate_polyline(position, image_row, max_points=max_points)
 
     peak_pts: List[Dict[str, Any]] = []
     kinds = peak_kinds or []
@@ -1166,8 +1186,9 @@ def _build_overlay_track_event(
                 "kind": kind,
                 "event_polarity": "minima" if kind == "min" else "maxima",
                 "x": float(position[i]),
-                "y": float(frame[i]),
+                "y": float(image_row[i]),
                 "frame": float(frame[i]),
+                "image_row": float(image_row[i]),
                 "position": float(position[i]),
                 "amp": float(residual[i]),
             })
