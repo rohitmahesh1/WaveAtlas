@@ -95,6 +95,11 @@ def image_to_heatmap_bytes(
     alpha_background = str(image_cfg.get("alpha_background", "#000000"))
     low_hex = image_cfg.get("low_hex")
     high_hex = image_cfg.get("high_hex")
+    origin = str(
+        image_cfg.get("origin", (cfg.get("heatmap") or {}).get("origin", "lower"))
+    ).strip().lower()
+    if origin not in {"lower", "upper"}:
+        raise ValueError("image coordinate origin must be 'lower' or 'upper'")
 
     _check_cancel(cancel_cb)
     with Image.open(io.BytesIO(image_bytes)) as img:
@@ -146,6 +151,15 @@ def image_to_heatmap_bytes(
         "original_height": int(original_height),
         "output_width": int(output_width),
         "output_height": int(output_height),
+        "source_kind": "image",
+        "source_rows": int(original_height),
+        "source_cols": int(original_width),
+        "pixel_mapping": "processed_pixel",
+        "coord_origin": "lower",
+        "source_origin": origin,
+        "render_origin": "upper",
+        "coord_x_label": "position",
+        "coord_y_label": "frame",
         "grayscale": grayscale,
         "binary_grayscale": binary_grayscale,
         "binary_threshold": binary_threshold if binary_grayscale else None,

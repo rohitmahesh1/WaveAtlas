@@ -8,7 +8,6 @@ This page explains the settings in `configs/default.yaml`, what they do, and how
 3. Use the **Advanced** page in the frontend to paste YAML/JSON and submit overrides at run time.
 
 Notes:
-- YAML anchors are used in the default config. For example `io.sampling_rate` is anchored as `&sr` and re-used by `period.sampling_rate`.
 - Some sections are currently used by the legacy pipeline or reserved for future use. Those are called out below.
 
 ## logging
@@ -16,20 +15,22 @@ Notes:
 - `logging.jsonl_events` (bool): Reserved for JSONL event logging. Not currently used by the new pipeline. Change when: you enable legacy JSONL event logging.
 
 ## io
-- `io.sampling_rate` (number): Frames per second (or samples per second) used by frequency/period estimation. This value is also referenced by `period.sampling_rate`. Change when: the true sampling rate of your data differs.
+- `io.sampling_rate` (positive number): The single frames-per-second (or samples-per-second) value used throughout extraction, frequency estimation, and derived timing. Change when: the true sampling rate of your data differs.
 - `io.image_globs` (list of strings): File patterns for image inputs in legacy/CLI workflows. Not used by the API pipeline. Change when: you use the legacy CLI with nonstandard image extensions.
 - `io.track_glob` (string): File pattern for track `.npy` files in legacy/CLI workflows. Not used by the API pipeline. Change when: your legacy track files use a different naming pattern.
 - `io.table_globs` (list of strings): File patterns for table uploads in legacy/CLI workflows. Not used by the API pipeline. Change when: your legacy table inputs use different extensions.
 
 ## heatmap
 These settings control how tabular data is converted into a heatmap image.
-- `heatmap.table_mode` (string): Table rendering mode. `auto` keeps the original intensity-style extreme mask for most tables, but switches files with `Area` in the filename to continuous area rendering.
+- `heatmap.table_mode` (string): Table rendering mode. `auto` uses continuous rendering for every analysis mode. Select `binary` explicitly to reproduce the legacy intensity-style extreme mask.
+- `heatmap.non_finite_policy` (string): Handling for NaN and infinite table cells. `reject` stops the run with cell counts; `zero` explicitly imputes them as zero and records the counts in heatmap metadata. The default is `reject`.
 - `heatmap.lower` (number): Lower bound for “mid-range” intensity values that get zeroed out. Values outside `[lower, upper]` are kept before optional binarization.
 - `heatmap.upper` (number): Upper bound for “mid-range” intensity values that get zeroed out.
-- `heatmap.binarize` (bool): When true, converts the filtered intensity heatmap into a 0/1 mask. The default is `true`, matching the original intensity behavior.
+- `heatmap.binarize` (bool): When true, converts the filtered intensity heatmap into a 0/1 mask. This applies to explicitly selected binary rendering.
 - `heatmap.origin` (string): Image origin for rendering. Typical values: `lower` or `upper`. Change when: the heatmap appears vertically flipped.
-- `heatmap.cmap` (string): Matplotlib colormap name used when rendering the default intensity path. The default is `hot`.
-- `heatmap.area` (object): Overrides used for auto-detected area tables. By default, area tables are rendered continuously with no extreme filtering or binarization.
+- `heatmap.cmap` (string): Matplotlib colormap name used by the legacy binary path when it has no mode-specific override. The default is `plasma`.
+- `heatmap.continuous` (object): Overrides used for Auto and explicit continuous rendering. The default uses unbinarized values with the `plasma` colormap.
+- `heatmap.area` (object): Overrides used when area rendering is explicitly selected.
 - `heatmap.area.cmap` (string): Matplotlib colormap for area tables. The default is `plasma`, which is close to the Plotly-exported HTML behavior.
 - `heatmap.area.vmin` / `heatmap.area.vmax` (number or null): Color scale bounds for area tables. `null` means use the table's own min/max.
 Optional (not in the default file):
@@ -77,7 +78,7 @@ Notes:
 - Ripple runs publish separate track, interval, and family CSV artifacts. The interval/waves CSV includes period, frequency, signed velocity, absolute speed, and line angle derived from the neighboring ripple tracks.
 
 ## detrend
-Used when removing baseline trends from track signals (RANSAC + polynomial fit).
+Used when removing baseline trends from track signals. The pipeline attempts a polynomial RANSAC fit and records the actual estimator, inlier fraction, and any least-squares fallback in each affected track and wave result.
 - `detrend.degree` (int): Polynomial degree for baseline fit. Change when: baselines are curved and a higher-degree fit is needed (or overfitting requires lowering).
 - `detrend.min_samples` (float): RANSAC min_samples parameter (fraction or absolute count). Change when: the baseline fit is too sensitive to noise (increase) or missing true trend (decrease).
 - `detrend.residual_threshold` (number or null): RANSAC residual threshold. `null` lets RANSAC choose. Change when: the baseline fit rejects too many points or includes too many outliers.
@@ -96,7 +97,6 @@ Notes:
 
 ## period
 Used for dominant frequency estimation and period calculation.
-- `period.sampling_rate` (number): Sampling rate for frequency estimation. In the default config this reuses `io.sampling_rate`. Change when: the actual sampling rate differs from default.
 - `period.min_freq` (number): Lower bound on estimated frequency (Hz). Change when: you want to ignore very slow trends or low-frequency noise.
 - `period.max_freq` (number): Upper bound on estimated frequency (Hz). Change when: you want to ignore high-frequency noise or constrain expected oscillations.
 

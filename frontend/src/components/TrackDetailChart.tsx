@@ -188,9 +188,13 @@ export function TrackDetailChart({
 }) {
   const rippleMode = detail.analysis_mode === "ripple_family";
   const largeWaveMode = detail.analysis_mode === "large_wave";
-  const frames = detail.time_index ?? [];
+  const scientificFrames = detail.frame ?? detail.time_index ?? [];
+  const imageRows = detail.image_row ?? detail.time_index ?? [];
   const positions = detail.position ?? [];
-  const hasUsableTrack = frames.length >= 2 && positions.length >= 2 && frames.length === positions.length;
+  const hasUsableTrack =
+    imageRows.length >= 2
+    && scientificFrames.length === imageRows.length
+    && positions.length === imageRows.length;
   const regressions = detail.peak_regressions ?? [];
 
   const [showAxes, setShowAxes] = useState<boolean>(true);
@@ -248,16 +252,16 @@ export function TrackDetailChart({
 
   const series: ChartSeries[] = [];
   if (showRaw) {
-    series.push({ name: "Raw", xs: positions, ys: frames, color: overlayColor, strokeWidth: 2.4 });
+    series.push({ name: "Raw", xs: positions, ys: imageRows, color: overlayColor, strokeWidth: 2.4 });
   }
   if (showFit && regressionWindowedBaseline?.length === positions.length) {
-    series.push({ name: "Baseline", xs: regressionWindowedBaseline, ys: frames, color: "#2dd4bf", strokeWidth: 2 });
+    series.push({ name: "Baseline", xs: regressionWindowedBaseline, ys: imageRows, color: "#2dd4bf", strokeWidth: 2 });
   }
   if (showSine && hasUsableTrack && displaySineFit && displaySineFit.length === positions.length) {
     series.push({
       name: "Regression",
       xs: displaySineFit,
-      ys: frames,
+      ys: imageRows,
       color: "#ffad33",
       dash: largeWaveMode ? undefined : "7 4",
       strokeWidth: largeWaveMode ? 3.2 : 2.8,
@@ -273,7 +277,7 @@ export function TrackDetailChart({
         maxX = Math.max(maxX, x);
       }
     }
-    for (const y of frames) {
+    for (const y of imageRows) {
       if (!Number.isFinite(y)) continue;
       minY = Math.min(minY, y);
       maxY = Math.max(maxY, y);
@@ -293,7 +297,7 @@ export function TrackDetailChart({
   const mainViewerScaleRatio = viewerProjection && viewerProjection.xScale > 0 && viewerProjection.yScale > 0
     ? viewerProjection.xScale / viewerProjection.yScale
     : 1;
-  const toDisplayFrame = (sourceFrame: number) => coordinateMaxY - sourceFrame;
+  const toDisplayFrame = (imageRow: number) => coordinateMaxY - imageRow;
   const toSourceFrame = (displayFrame: number) => coordinateMaxY - displayFrame;
   const viewKey = `${detail.track_index}:${safeMinX}:${safeMaxX}:${safeMinY}:${safeMaxY}`;
   const [viewDomain, setViewDomain] = useState<{
@@ -420,9 +424,12 @@ export function TrackDetailChart({
     for (const peak of detail.peak_points) {
       if (peak.in_slice === false) continue;
       if (!Number.isFinite(peak.position) || !Number.isFinite(peak.frame)) continue;
+      const imageRow = Number.isFinite(peak.image_row)
+        ? Number(peak.image_row)
+        : toSourceFrame(peak.frame);
       peakPoints.push({
         x: peak.position,
-        y: peak.frame,
+        y: imageRow,
         peakI: peak.peak_i,
         peakIndex: peak.peak_index,
         frame: peak.frame,
@@ -435,15 +442,22 @@ export function TrackDetailChart({
       const i = Number(idx);
       if (!Number.isFinite(i) || i < 0 || i >= positions.length) continue;
       const x = positions[i];
-      const y = frames[i];
-      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-      peakPoints.push({ x, y, peakI: i, frame: y, position: x });
+      const y = imageRows[i];
+      const frame = scientificFrames[i];
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(frame)) continue;
+      peakPoints.push({ x, y, peakI: i, frame, position: x });
     }
   }
 
   const selectedWindow = (() => {
-    const lo = Number(selectedRegression?.fit_window_lo);
-    const hi = Number(selectedRegression?.fit_window_hi);
+    const loIndex = Number(selectedRegression?.fit_window_lo);
+    const hiIndex = Number(selectedRegression?.fit_window_hi);
+    if (!Number.isFinite(loIndex) || !Number.isFinite(hiIndex) || imageRows.length === 0) return null;
+    const sliceStart = selectedRegression?.slice_index != null
+      ? selectedRegression.peak_i - selectedRegression.slice_index
+      : 0;
+    const lo = imageRows[clamp(Math.round(loIndex - sliceStart), 0, imageRows.length - 1)];
+    const hi = imageRows[clamp(Math.round(hiIndex - sliceStart), 0, imageRows.length - 1)];
     if (!Number.isFinite(lo) || !Number.isFinite(hi)) return null;
     const visibleLo = clamp(Math.min(lo, hi), scale.minY, scale.maxY);
     const visibleHi = clamp(Math.max(lo, hi), scale.minY, scale.maxY);
@@ -476,8 +490,8 @@ export function TrackDetailChart({
     ? `${largeWaveMode ? "Wave" : "Peak"} ${selectedRegression.peak_index}`
     : `Track ${detail.track_index}`;
   const selectedMeta = selectedRegression
-    ? `Frame ${formatTick(toDisplayFrame(selectedRegression.frame))} | Position ${formatTick(selectedRegression.position)} px`
-    : `${frames.length} points`;
+    ? `Frame ${formatTick(selectedRegression.frame)} | Position ${formatTick(selectedRegression.position)} px`
+    : `${imageRows.length} points`;
 
   return (
     <div className="mini-chart">
@@ -527,7 +541,7 @@ export function TrackDetailChart({
           >
             {regressions.map((regression) => (
               <option key={regression.peak_i} value={regression.peak_i}>
-                {largeWaveMode ? "Wave" : "Peak"} {regression.peak_index} | frame {formatTick(toDisplayFrame(regression.frame))} | x {formatTick(regression.position)}
+                {largeWaveMode ? "Wave" : "Peak"} {regression.peak_index} | frame {formatTick(regression.frame)} | x {formatTick(regression.position)}
               </option>
             ))}
           </select>
@@ -838,7 +852,7 @@ export function TrackDetailChart({
                     clipPath={`url(#${clipId})`}
                     role="button"
                     tabIndex={0}
-                    aria-label={`Select peak ${p.peakIndex ?? i + 1} at frame ${formatTick(toDisplayFrame(p.frame))}`}
+                    aria-label={`Select peak ${p.peakIndex ?? i + 1} at frame ${formatTick(p.frame)}`}
                     aria-pressed={selected}
                     onMouseDown={(event) => event.stopPropagation()}
                     onClick={(event) => {
@@ -859,7 +873,7 @@ export function TrackDetailChart({
                       r={selected ? 5.5 : 4}
                       className={selected ? "mini-peak selected" : "mini-peak"}
                     />
-                    <title>{`Peak ${p.peakIndex ?? i + 1}: frame ${formatTick(toDisplayFrame(p.frame))}, position ${formatTick(p.position)} px`}</title>
+                    <title>{`Peak ${p.peakIndex ?? i + 1}: frame ${formatTick(p.frame)}, position ${formatTick(p.position)} px`}</title>
                   </g>
                 );
               })
@@ -877,7 +891,7 @@ export function TrackDetailChart({
             {hover.peak ? (
               <>
                 <strong>{`Peak ${hover.peak.peakIndex ?? ""}`}</strong>
-                <span>{`Frame ${formatTick(toDisplayFrame(hover.peak.frame))} | ${formatTick(hover.peak.position)} px`}</span>
+                <span>{`Frame ${formatTick(hover.peak.frame)} | ${formatTick(hover.peak.position)} px`}</span>
               </>
             ) : (
               <span>{`${hover.x.toFixed(1)} px | frame ${hover.y.toFixed(1)}`}</span>

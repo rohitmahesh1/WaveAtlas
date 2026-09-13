@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError, NoResultFound
-from sqlalchemy import func, update
+from sqlalchemy import delete, func, update
 from sqlmodel import Session, select
 
 from .models import (
@@ -53,6 +53,13 @@ _PEAK_MODEL_KEYS = {
     "fit_target",
     "metrics",
 }
+_LARGE_WAVE_ARTIFACT_LABELS = frozenset(
+    {
+        "large_wave_tracks",
+        "large_wave_measurements",
+        "large_wave_events",
+    }
+)
 
 
 def _json_safe(value: Any) -> Any:
@@ -527,6 +534,126 @@ class JobStore:
         self.session.commit()
         return len(objs)
 
+    def replace_large_wave_results(
+        self,
+        job_id: UUID,
+        *,
+        track_rows: Sequence[Dict[str, Any]],
+        wave_rows: Sequence[Dict[str, Any]],
+        artifacts: Sequence[Dict[str, Any]],
+    ) -> tuple[List[Artifact], List[str]]:
+        """Atomically replace all globally coupled Large-wave results for a job."""
+
+        labels = [str(row["label"]) for row in artifacts]
+        if len(labels) != len(set(labels)):
+            raise ValueError("Large-wave artifact labels must be unique")
+        if set(labels) != _LARGE_WAVE_ARTIFACT_LABELS:
+            raise ValueError("Large-wave replacement requires all three canonical exports")
+
+        indices = [int(row["track_index"]) for row in track_rows]
+        if len(indices) != len(set(indices)):
+            raise ValueError("Large-wave track indices must be unique")
+
+        try:
+            existing_artifacts = list(
+                self.session.exec(
+                    select(Artifact).where(
+                        Artifact.job_id == job_id,
+                        Artifact.kind == ArtifactKind.other,
+                        Artifact.label.in_(labels),
+                    )
+                ).all()
+            )
+            old_blob_paths = [artifact.blob_path for artifact in existing_artifacts]
+
+            if existing_artifacts:
+                old_ids = [artifact.id for artifact in existing_artifacts]
+                self.session.execute(delete(Artifact).where(Artifact.id.in_(old_ids)))
+
+            # Waves are coupled across tracks by event grouping, so none of the
+            # prior rows can be retained during a replacement.
+            self.session.execute(delete(Peak).where(Peak.job_id == job_id))
+            self.session.execute(delete(Wave).where(Wave.job_id == job_id))
+
+            existing_tracks = {
+                int(track.track_index): track
+                for track in self.session.exec(select(Track).where(Track.job_id == job_id)).all()
+            }
+            tracks_by_index: Dict[int, Track] = {}
+            processed_at = utc_now()
+            for row in track_rows:
+                track_index = int(row["track_index"])
+                track = existing_tracks.get(track_index)
+                if track is None:
+                    track = Track(job_id=job_id, track_index=track_index)
+                track.processed_at = processed_at
+                track.amplitude = row.get("amplitude")
+                track.frequency = row.get("frequency")
+                track.error = row.get("error")
+                track.x0 = row.get("x0")
+                track.y0 = row.get("y0")
+                track.metrics = _json_safe(row.get("metrics") or {})
+                track.overlay = _json_safe(row.get("overlay") or {})
+                self.session.add(track)
+                tracks_by_index[track_index] = track
+
+            stale_tracks = [
+                track
+                for track_index, track in existing_tracks.items()
+                if track_index not in tracks_by_index
+            ]
+            for track in stale_tracks:
+                self.session.delete(track)
+
+            self.session.flush()
+
+            waves: List[Wave] = []
+            for source_row in wave_rows:
+                row = dict(source_row)
+                metrics = dict(row.get("metrics") or {})
+                track_index_raw = row.pop("track_index", metrics.get("track_index"))
+                if track_index_raw is None:
+                    raise ValueError("Large-wave row is missing its track_index")
+                track_index = int(track_index_raw)
+                track = tracks_by_index.get(track_index)
+                if track is None:
+                    raise ValueError(f"Large-wave row refers to unknown track {track_index}")
+                row["track_id"] = track.id
+                row["metrics"] = metrics
+                waves.append(
+                    Wave(job_id=job_id, **_row_for_metric_model(row, model_keys=_WAVE_MODEL_KEYS))
+                )
+            self.session.add_all(waves)
+
+            created_artifacts: List[Artifact] = []
+            for row in artifacts:
+                artifact = Artifact(
+                    job_id=job_id,
+                    kind=ArtifactKind.other,
+                    label=str(row["label"]),
+                    blob_path=str(row["blob_path"]),
+                    content_type=row.get("content_type"),
+                    byte_size=row.get("byte_size"),
+                    meta=_json_safe(row.get("meta") or {}),
+                    created_at=utc_now(),
+                )
+                self.session.add(artifact)
+                created_artifacts.append(artifact)
+
+            job = self.get_job(job_id)
+            job.tracks_total = len(track_rows)
+            job.tracks_done = len(track_rows)
+            job.waves_done = len(waves)
+            job.peaks_done = 0
+            job.updated_at = utc_now()
+            self.session.add(job)
+
+            self.session.commit()
+            return created_artifacts, old_blob_paths
+        except Exception:
+            self.session.rollback()
+            raise
+
     def bump_counts(
         self,
         job_id: UUID,
@@ -597,6 +724,51 @@ class JobStore:
         self.session.commit()
         self.session.refresh(art)
         return art
+
+    def replace_artifact(
+        self,
+        *,
+        job_id: UUID,
+        kind: ArtifactKind,
+        label: str,
+        blob_path: str,
+        content_type: Optional[str] = None,
+        byte_size: Optional[int] = None,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> tuple[Artifact, List[str]]:
+        """Atomically point one canonical artifact label at a staged blob."""
+
+        try:
+            existing = list(
+                self.session.exec(
+                    select(Artifact).where(
+                        Artifact.job_id == job_id,
+                        Artifact.kind == kind,
+                        Artifact.label == label,
+                    )
+                ).all()
+            )
+            old_blob_paths = [artifact.blob_path for artifact in existing]
+            if existing:
+                self.session.execute(
+                    delete(Artifact).where(Artifact.id.in_([artifact.id for artifact in existing]))
+                )
+            artifact = Artifact(
+                job_id=job_id,
+                kind=kind,
+                label=label,
+                blob_path=blob_path,
+                content_type=content_type,
+                byte_size=byte_size,
+                meta=_json_safe(meta or {}),
+                created_at=utc_now(),
+            )
+            self.session.add(artifact)
+            self.session.commit()
+            return artifact, old_blob_paths
+        except Exception:
+            self.session.rollback()
+            raise
 
     def list_artifacts(
         self,

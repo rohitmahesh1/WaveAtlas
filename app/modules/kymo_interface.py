@@ -8,6 +8,15 @@ import numpy as np
 SCRIPT_DIR = Path(__file__).resolve().parent.parent.parent / "kymobutler_scripts"
 
 
+def _canonicalize_wolfram_track(points: np.ndarray) -> np.ndarray:
+    """Convert Wolfram's 1-based (image row, column) points to canonical 0-based points."""
+
+    arr = np.asarray(points, dtype=float)
+    if arr.ndim != 2 or arr.shape[1] != 2:
+        raise ValueError(f"Unsupported Wolfram track shape: {arr.shape}")
+    return arr - 1.0
+
+
 def _extract_wolfram_list_block(s: str) -> Optional[str]:
     """
     Return the substring containing the first full Wolfram list that starts at the
@@ -151,7 +160,7 @@ def run_kymobutler(
         # Filter out very short traces right here, if desired
         if arr.shape[0] < min_length:
             continue
-        np.save(out_dir / f"{i}.npy", arr)
+        np.save(out_dir / f"{i}.npy", _canonicalize_wolfram_track(arr))
         saved += 1
 
     _progress("wolfram_done", parsed_tracks=len(arrays), saved_tracks=saved, output_dir=str(out_dir))

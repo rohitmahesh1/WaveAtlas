@@ -15,6 +15,7 @@ os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "waveatl
 
 import numpy as np
 import yaml
+from fastapi import HTTPException
 from PIL import Image
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, Session, create_engine, select
@@ -23,13 +24,16 @@ from app import pipeline as pipeline_module
 from app.artifact_store import LocalArtifactStore
 from app.cancel import CancellationRequested
 from app.analysis_mode import RIPPLE_ANALYSIS_MODE, STANDARD_ANALYSIS_MODE, resolve_analysis_mode
-from app.extract_core import _detect_peak_sets, _flatten_onnx_cfg_for_runner, process_track
+from app.config_validation import normalize_and_validate_config
+from app.extract_core import detect_peak_sets, _flatten_onnx_cfg_for_runner, process_track
 from app.api.routes_jobs import (
+    ConfigValidatePayload,
     _detect_peak_sets_for_detail,
     _detail_fit_meta_for_original_polarity,
     _fit_anchored_sine,
     _fit_anchored_wave_basin,
     _large_wave_peak_events_for_detail,
+    validate_config,
 )
 from app.io.image_to_heatmap import image_to_heatmap_bytes
 from app.io.table_to_heatmap import table_to_heatmap_bytes, table_to_heatmap_payload
@@ -42,22 +46,34 @@ from app.large_wave_extraction import (
     run_large_wave_extraction,
 )
 from app.large_wave_analysis import (
+    LargeWavePreparedTrack,
     STANDARD_WAVE_FIELDS,
     _assign_recurrence_periods,
     _dedupe_track_measurements,
     analyze_large_wave_events,
-    build_large_wave_track_config,
+    prepare_large_wave_track,
 )
 from app.large_wave_fit import fit_large_wave
 from app.modules.kb_adapter import link_track_endpoints
+from app.modules.kymo_interface import _canonicalize_wolfram_track
 from app.modules.kymobutler_pt import KymoButlerPT
 from app.modules.tracker import CrossingTracker, Track
-from app.models import ArtifactKind, Artifact, JobRead, JobStatus, Track as TrackModel
+from app.models import ArtifactKind, Artifact, JobRead, JobStatus, Track as TrackModel, Wave
 from app.pipeline import PipelineSettings
 from app.ripple_analysis import analyze_ripple_tracks
 from app.ripple_extraction import _Trace, _dedupe_and_extend
 from app.signal.peaks import ensure_minimum_peaks
+from app.signal import detrend as detrend_module
+from app.signal.detrend import fit_baseline
+from app.sampling import normalize_sampling_rate_config, resolve_sampling_rate
+from app.run_manifest import sha256_bytes
 from app.time_utils import utc_isoformat
+from app.track_coordinates import (
+    point_order_from_artifact,
+    point_order_from_config,
+    track_artifact_metadata,
+    track_coordinates_from_points,
+)
 
 
 def _synthetic_track_path(tmp: str, position: np.ndarray) -> Path:
@@ -119,12 +135,229 @@ def _base_config(*, fit_target: str | None = None, event_polarity: str = "both")
             "width": 1,
             "distance": 6,
         },
-        "period": {"sampling_rate": 10.0, "min_freq": 0.2, "max_freq": 2.0},
+        "period": {"min_freq": 0.2, "max_freq": 2.0},
         "features": features,
     }
 
 
 class BackendCoreTests(unittest.TestCase):
+    def test_sampling_rate_config_has_one_canonical_authority(self) -> None:
+        canonical = normalize_sampling_rate_config(
+            {"io": {"sampling_rate": 5}, "period": {"sampling_rate": 5, "min_freq": 0.1}}
+        )
+
+        self.assertEqual(canonical["io"]["sampling_rate"], 5.0)
+        self.assertNotIn("sampling_rate", canonical["period"])
+        self.assertEqual(resolve_sampling_rate(canonical), 5.0)
+
+    def test_legacy_period_sampling_rate_is_migrated(self) -> None:
+        canonical = normalize_sampling_rate_config({"period": {"sampling_rate": 7.5}})
+
+        self.assertEqual(canonical["io"]["sampling_rate"], 7.5)
+        self.assertNotIn("sampling_rate", canonical["period"])
+
+    def test_conflicting_sampling_rates_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Conflicting sampling rates"):
+            normalize_sampling_rate_config(
+                {"io": {"sampling_rate": 5}, "period": {"sampling_rate": 10}}
+            )
+
+    def test_sampling_rate_must_be_finite_and_positive(self) -> None:
+        for value in (0, -1, float("nan"), float("inf"), "not-a-number"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "finite positive"):
+                    resolve_sampling_rate({"io": {"sampling_rate": value}})
+
+    def test_critical_config_fields_are_normalized_and_validated(self) -> None:
+        normalized = normalize_and_validate_config({"analysis": {"mode": "ripple"}})
+        self.assertEqual(normalized["analysis"]["mode"], "ripple_family")
+
+        invalid_configs = (
+            ({"analysis": {"mode": "typo"}}, "analysis.mode"),
+            ({"period": {"min_freq": 2, "max_freq": 1}}, "must not exceed"),
+            ({"heatmap": {"vmin": 2, "vmax": 1}}, "must not exceed"),
+            ({"heatmap": {"continuous": {"origin": "sideways"}}}, "origin"),
+            ({"kymo": {"track_xy_order": "row-first-ish"}}, "track_xy_order"),
+            ({"heatmap": {"non_finite_policy": "ignore"}}, "non_finite_policy"),
+            ({"detrend": {"min_samples": 1.5}}, "must not exceed 1"),
+            ({"features": {"fit_target": "mystery-fit"}}, "fit_target"),
+        )
+        for config, message in invalid_configs:
+            with self.subTest(config=config):
+                with self.assertRaisesRegex(ValueError, message):
+                    normalize_and_validate_config(config)
+
+    def test_config_endpoint_validates_overrides_against_defaults(self) -> None:
+        with self.assertRaises(HTTPException) as caught:
+            validate_config(ConfigValidatePayload(config={"period": {"min_freq": 3.0}}))
+
+        self.assertEqual(caught.exception.status_code, 400)
+        self.assertIn("must not exceed", str(caught.exception.detail))
+
+    def test_detrend_fallback_reports_the_actual_estimator_and_reason(self) -> None:
+        original = detrend_module._fit_ransac_baseline
+
+        def fail_ransac(*_args, **_kwargs):
+            raise ValueError("no consensus set")
+
+        try:
+            detrend_module._fit_ransac_baseline = fail_ransac
+            result = fit_baseline(
+                np.arange(10, dtype=float),
+                np.linspace(2.0, 5.0, 10),
+            )
+        finally:
+            detrend_module._fit_ransac_baseline = original
+
+        meta = result.metadata()
+        self.assertEqual(meta["method"], "least_squares_polynomial")
+        self.assertTrue(meta["fallback_used"])
+        self.assertIn("no consensus set", meta["fallback_reason"])
+        self.assertIsNone(meta["inlier_fraction"])
+
+    def test_non_finite_table_values_require_an_explicit_policy(self) -> None:
+        table = b"1,nan\ninf,-inf\n"
+        with self.assertRaisesRegex(ValueError, "3 non-finite numeric cell"):
+            table_to_heatmap_payload(table)
+
+        _, meta, value_bytes, value_meta = table_to_heatmap_payload(
+            table,
+            config={
+                "heatmap": {
+                    "table_mode": "continuous",
+                    "non_finite_policy": "zero",
+                    "vmin": 0,
+                    "vmax": 1,
+                }
+            },
+        )
+        values = np.frombuffer(value_bytes, dtype="<f4")
+        np.testing.assert_array_equal(values, np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
+        self.assertEqual(meta["non_finite_count"], 3)
+        self.assertEqual(meta["nan_count"], 1)
+        self.assertEqual(meta["positive_infinity_count"], 1)
+        self.assertEqual(meta["negative_infinity_count"], 1)
+        self.assertEqual(meta["non_finite_disposition"], "zero_imputed")
+        self.assertEqual(value_meta["non_finite_count"], 3)
+
+    def test_large_wave_result_replacement_rolls_back_as_one_snapshot(self) -> None:
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        SQLModel.metadata.create_all(engine)
+
+        with Session(engine) as session:
+            store = JobStore(session)
+            job = store.create_job(owner_session_id=uuid4(), run_name="atomic replacement")
+            track_rows = [{
+                "track_index": 0,
+                "amplitude": 4.0,
+                "frequency": 0.5,
+                "metrics": {"analysis_mode": "large_wave", "version": "original"},
+                "overlay": {"points": [[1, 2]]},
+            }]
+            wave_rows = [{
+                "wave_index": 1,
+                "amplitude": 4.0,
+                "metrics": {"track_index": 0, "measurement": "original"},
+            }]
+            artifacts = [
+                {
+                    "label": label,
+                    "blob_path": f"/staged/original-{label}.csv",
+                    "content_type": "text/csv",
+                    "byte_size": 12,
+                    "meta": {"publication_id": "original"},
+                }
+                for label in (
+                    "large_wave_tracks",
+                    "large_wave_measurements",
+                    "large_wave_events",
+                )
+            ]
+            store.replace_large_wave_results(
+                job.id,
+                track_rows=track_rows,
+                wave_rows=wave_rows,
+                artifacts=artifacts,
+            )
+
+            with self.assertRaisesRegex(ValueError, "unknown track 99"):
+                store.replace_large_wave_results(
+                    job.id,
+                    track_rows=[{**track_rows[0], "metrics": {"version": "replacement"}}],
+                    wave_rows=[{"wave_index": 2, "metrics": {"track_index": 99}}],
+                    artifacts=[
+                        {**artifact, "blob_path": artifact["blob_path"].replace("original", "replacement")}
+                        for artifact in artifacts
+                    ],
+                )
+
+            tracks = list(session.exec(select(TrackModel).where(TrackModel.job_id == job.id)).all())
+            waves = list(session.exec(select(Wave).where(Wave.job_id == job.id)).all())
+            stored_artifacts = store.list_artifacts(
+                job.id,
+                kind=ArtifactKind.other,
+                label="large_wave_measurements",
+            )
+            refreshed_job = store.get_job(job.id)
+
+        self.assertEqual(len(tracks), 1)
+        self.assertEqual(tracks[0].metrics["version"], "original")
+        self.assertEqual(len(waves), 1)
+        self.assertEqual(waves[0].metrics["measurement"], "original")
+        self.assertEqual(
+            [artifact.blob_path for artifact in stored_artifacts],
+            ["/staged/original-large_wave_measurements.csv"],
+        )
+        self.assertEqual(refreshed_job.tracks_done, 1)
+        self.assertEqual(refreshed_job.waves_done, 1)
+
+    def test_scientific_track_coordinates_are_bottom_left_for_every_render_origin(self) -> None:
+        points = np.array([[0.0, 10.0], [1.0, 11.0], [3.0, 13.0]])
+
+        for render_origin in ("lower", "upper"):
+            coordinates = track_coordinates_from_points(
+                points,
+                heatmap_meta={
+                    "output_height": 4,
+                    "coord_origin": render_origin,
+                    "render_origin": render_origin,
+                },
+            )
+
+            np.testing.assert_array_equal(coordinates.frame, np.array([0.0, 2.0, 3.0]))
+            np.testing.assert_array_equal(coordinates.image_row, np.array([3.0, 1.0, 0.0]))
+            np.testing.assert_array_equal(coordinates.position, np.array([13.0, 11.0, 10.0]))
+
+    def test_all_current_extractor_backends_default_to_row_column_points(self) -> None:
+        self.assertEqual(point_order_from_config({"kymo": {"backend": "onnx"}}), "yx")
+        self.assertEqual(point_order_from_config({"kymo": {"backend": "wolfram"}}), "yx")
+
+    def test_wolfram_tracks_are_canonicalized_from_one_based_row_column_points(self) -> None:
+        canonical = _canonicalize_wolfram_track(np.array([[1.0, 1.0], [4.0, 7.0]]))
+        np.testing.assert_array_equal(canonical, np.array([[0.0, 0.0], [3.0, 6.0]]))
+
+    def test_track_artifact_metadata_records_coordinate_contract(self) -> None:
+        meta = track_artifact_metadata(
+            7,
+            {"output_height": 120, "coord_origin": "upper", "render_origin": "upper"},
+        )
+
+        self.assertEqual(meta["track_schema_version"], 1)
+        self.assertEqual(meta["coordinate_order"], "image_row_position")
+        self.assertEqual(meta["coordinate_index_base"], 0)
+        self.assertEqual(meta["coord_origin"], "lower")
+        self.assertEqual(meta["image_height"], 120.0)
+
+        with self.assertRaisesRegex(ValueError, "Unsupported track schema version"):
+            point_order_from_artifact(
+                {**meta, "track_schema_version": 2},
+                config={},
+            )
+
     def test_image_io_supports_unicode_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "Workspace ü with spaces" / "heatmap.png"
@@ -134,6 +367,23 @@ class BackendCoreTests(unittest.TestCase):
             actual = read_cv_image(path, 0)
             self.assertIsNotNone(actual)
             np.testing.assert_array_equal(actual, expected)
+
+    def test_image_ingestion_declares_bottom_left_coordinates_by_default(self) -> None:
+        image = Image.fromarray(np.zeros((4, 6), dtype=np.uint8))
+        payload = io.BytesIO()
+        image.save(payload, format="PNG")
+
+        _png, meta = image_to_heatmap_bytes(
+            payload.getvalue(),
+            config={"image_input": {"origin": "upper"}},
+        )
+
+        self.assertEqual(meta["source_kind"], "image")
+        self.assertEqual(meta["pixel_mapping"], "processed_pixel")
+        self.assertEqual(meta["coord_origin"], "lower")
+        self.assertEqual(meta["source_origin"], "upper")
+        self.assertEqual(meta["coord_x_label"], "position")
+        self.assertEqual(meta["coord_y_label"], "frame")
 
     def test_analysis_mode_defaults_to_standard_and_accepts_ripple_aliases(self) -> None:
         self.assertEqual(resolve_analysis_mode({}), STANDARD_ANALYSIS_MODE)
@@ -149,6 +399,7 @@ class BackendCoreTests(unittest.TestCase):
         self.assertEqual(config["heatmap"]["table_mode"], "auto")
         self.assertTrue(config["heatmap"]["binarize"])
         self.assertEqual(config["heatmap"]["cmap"], "plasma")
+        self.assertEqual(config["heatmap"]["continuous"]["cmap"], "plasma")
         self.assertEqual(config["heatmap"]["area"]["cmap"], "plasma")
         self.assertFalse(config["heatmap"]["area"]["binarize"])
         self.assertEqual(config["analysis"]["mode"], "standard")
@@ -248,7 +499,7 @@ class BackendCoreTests(unittest.TestCase):
         self.assertFalse(large_runner_cfg["endpoint_link_prefer_long_linear"])
         self.assertTrue(large_runner_cfg["endpoint_link_prefer_smooth_curves"])
 
-    def test_area_named_table_uses_continuous_area_heatmap_by_default(self) -> None:
+    def test_auto_table_uses_continuous_heatmap_regardless_of_filename(self) -> None:
         csv = b"0,0.5,1\n0.25,0.75,1\n"
 
         png, meta = table_to_heatmap_bytes(
@@ -257,7 +508,8 @@ class BackendCoreTests(unittest.TestCase):
                 "heatmap": {
                     "table_mode": "auto",
                     "origin": "upper",
-                    "area": {"cmap": "gray", "vmin": 0, "vmax": 1},
+                    "continuous": {"cmap": "gray", "vmin": 0, "vmax": 1},
+                    "area": {"cmap": "hot", "vmin": 0, "vmax": 1},
                 }
             },
             filename_hint="DCPM2-DIES-CD1-CON-1-BH_Area_Vertical_Edge.csv",
@@ -267,16 +519,25 @@ class BackendCoreTests(unittest.TestCase):
         row = [image.getpixel((x, 0))[0] for x in range(3)]
 
         self.assertEqual(image.size, (3, 2))
-        self.assertEqual(meta["resolved_table_mode"], "area")
+        self.assertEqual(meta["resolved_table_mode"], "continuous")
         self.assertFalse(meta["binarize"])
         self.assertEqual(meta["cmap"], "gray")
+        self.assertEqual(meta["coord_origin"], "lower")
+        self.assertEqual(meta["render_origin"], "upper")
         self.assertLess(row[0], row[1])
         self.assertLess(row[1], row[2])
 
     def test_continuous_intensity_heatmap_defaults_to_plotly_plasma(self) -> None:
         png, meta = table_to_heatmap_bytes(
             b"0,1\n",
-            config={"heatmap": {"table_mode": "continuous", "origin": "upper"}},
+            config={
+                "heatmap": {
+                    "table_mode": "continuous",
+                    "origin": "upper",
+                    "cmap": "hot",
+                    "continuous": {"cmap": "plasma"},
+                }
+            },
             filename_hint="intensity.csv",
         )
 
@@ -306,6 +567,7 @@ class BackendCoreTests(unittest.TestCase):
         self.assertEqual(meta["table_mode"], "auto")
         self.assertEqual(meta["resolved_table_mode"], "continuous")
         self.assertFalse(meta["binarize"])
+        self.assertEqual(meta["cmap"], "plasma")
         self.assertEqual(value_meta["resolved_table_mode"], "continuous")
         np.testing.assert_allclose(values, np.array([[-20, 0, 20], [5, 11, -11]], dtype=np.float32))
 
@@ -329,6 +591,7 @@ class BackendCoreTests(unittest.TestCase):
         self.assertEqual(meta["table_mode"], "auto")
         self.assertEqual(meta["resolved_table_mode"], "continuous")
         self.assertFalse(meta["binarize"])
+        self.assertEqual(meta["cmap"], "plasma")
         self.assertEqual(value_meta["resolved_table_mode"], "continuous")
         np.testing.assert_allclose(values, np.array([[-20, 0, 20]], dtype=np.float32))
 
@@ -375,14 +638,14 @@ class BackendCoreTests(unittest.TestCase):
         self.assertEqual(value_meta["value_count"], 6)
         np.testing.assert_allclose(values, np.array([[0, 0.5, 1], [0.25, 0.75, 1]], dtype=np.float32))
 
-    def test_non_area_table_uses_original_binarized_intensity_mode(self) -> None:
+    def test_explicit_binary_uses_legacy_binarized_intensity_mode(self) -> None:
         csv = b"-20,0,20\n5,11,-11\n"
 
         png, meta, value_bytes, value_meta = table_to_heatmap_payload(
             csv,
             config={
                 "heatmap": {
-                    "table_mode": "auto",
+                    "table_mode": "binary",
                     "lower": -10,
                     "upper": 10,
                     "origin": "upper",
@@ -403,6 +666,25 @@ class BackendCoreTests(unittest.TestCase):
         self.assertEqual(second_row, [0, 255, 255])
         self.assertEqual(value_meta["resolved_table_mode"], "extreme_mask")
         np.testing.assert_allclose(values, np.array([[1, 0, 1], [0, 1, 1]], dtype=np.float32))
+
+    def test_standard_auto_uses_plasma_continuous_default(self) -> None:
+        config = yaml.safe_load(Path("configs/default.yaml").read_text(encoding="utf-8"))
+
+        png, meta, value_bytes, value_meta = table_to_heatmap_payload(
+            b"0,0.5,1\n",
+            config=config,
+            filename_hint="mean_intensities.csv",
+        )
+        image = Image.open(io.BytesIO(png)).convert("RGBA")
+        values = np.frombuffer(value_bytes, dtype="<f4")
+
+        self.assertEqual(meta["resolved_table_mode"], "continuous")
+        self.assertFalse(meta["binarize"])
+        self.assertEqual(meta["cmap"], "plasma")
+        self.assertEqual(value_meta["resolved_table_mode"], "continuous")
+        np.testing.assert_allclose(values, np.array([0.0, 0.5, 1.0], dtype=np.float32))
+        np.testing.assert_allclose(image.getpixel((0, 0)), (13, 8, 135, 255), atol=1)
+        np.testing.assert_allclose(image.getpixel((2, 0)), (240, 249, 33, 255), atol=1)
 
     def test_api_timestamp_serialization_marks_utc_explicitly(self) -> None:
         naive_utc = datetime(2026, 8, 6, 20, 8, 21)
@@ -529,6 +811,42 @@ class BackendCoreTests(unittest.TestCase):
         self.assertTrue(all(abs(float(row["Speed (pixels/sec)"]) - 5.0) < 1e-6 for row in interval_csv_rows))
         self.assertIn("Median Velocity (pixels/sec)", family_csv_rows[0])
         self.assertIn("Median Angle from Time Axis (degrees)", family_csv_rows[0])
+
+    def test_ripple_direction_uses_bottom_left_frame_axis_while_overlay_uses_image_rows(self) -> None:
+        height = 121
+        image_row = np.arange(height, dtype=float)
+        scientific_frame = (height - 1.0) - image_row
+        position = 20.0 + 0.5 * scientific_frame
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "ripple_sample" / "kymobutler_output"
+            base.mkdir(parents=True)
+            track_path = base / "track_0.npy"
+            np.save(track_path, np.column_stack([image_row, position]))
+            result = analyze_ripple_tracks(
+                job_id=uuid4(),
+                track_paths=[track_path],
+                config={
+                    "io": {"sampling_rate": 5.0},
+                    "kymo": {"backend": "wolfram"},
+                    "analysis": {
+                        "mode": "ripple_family",
+                        "ripple": {
+                            "min_track_rows": 30,
+                            "min_abs_slope": 0.05,
+                            "max_line_rmse_px": 2.0,
+                        },
+                    },
+                },
+                heatmap_meta={"output_height": height, "coord_origin": "lower"},
+            )
+
+        metrics = result.track_rows[0]["metrics"]
+        self.assertEqual(metrics["direction"], "positive")
+        self.assertAlmostEqual(metrics["slope_px_per_frame"], 0.5, places=6)
+        self.assertAlmostEqual(metrics["velocity_px_per_s"], 2.5, places=6)
+        self.assertEqual(result.overlay_events[0]["poly"][0]["y"], height - 1)
+        self.assertEqual(result.overlay_events[0]["poly"][-1]["y"], 0.0)
 
     def test_ripple_analysis_honors_cancellation(self) -> None:
         with self.assertRaises(CancellationRequested):
@@ -823,6 +1141,236 @@ class BackendCoreTests(unittest.TestCase):
         finally:
             pipeline_module.run_ripple_extraction = old_extractor
 
+    def test_large_wave_pipeline_skips_standard_track_analysis(self) -> None:
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        SQLModel.metadata.create_all(engine)
+
+        old_extractor = pipeline_module.run_large_wave_extraction
+        old_process_track = pipeline_module.process_track
+        old_prepare_track = pipeline_module.prepare_large_wave_track
+        prepared_calls = 0
+
+        def fake_large_wave_extraction(**kwargs):
+            frame = np.arange(0, 201, dtype=float)
+            shape = 12.0 * np.exp(-0.5 * ((frame - 100.0) / 22.0) ** 2)
+            output_dir = Path(kwargs["scratch_dir"]) / "large_wave" / "kymobutler_output"
+            output_dir.mkdir(parents=True)
+            track_path = output_dir / "track_0000.npy"
+            np.save(track_path, np.column_stack([frame, 30.0 + 0.05 * frame + shape]))
+            return SimpleNamespace(
+                image_id="large_wave",
+                base_dir=output_dir.parent,
+                track_paths=[track_path],
+                track_metadata={},
+            )
+
+        def fail_standard_analysis(**_kwargs):
+            raise AssertionError("large-wave mode invoked standard process_track")
+
+        def counting_prepare_track(**kwargs):
+            nonlocal prepared_calls
+            prepared_calls += 1
+            return old_prepare_track(**kwargs)
+
+        class InterruptibleArtifactStore(LocalArtifactStore):
+            interrupt_store: JobStore | None = None
+            interrupt_job_id = None
+            interrupt_next_publication = False
+
+            def put_bytes(self, **kwargs):
+                result = super().put_bytes(**kwargs)
+                label = str(kwargs.get("label") or "")
+                if self.interrupt_next_publication and "-staging-" in label:
+                    self.interrupt_next_publication = False
+                    assert self.interrupt_store is not None
+                    assert self.interrupt_job_id is not None
+                    self.interrupt_store.request_cancel(self.interrupt_job_id, emit_event=False)
+                return result
+
+        try:
+            pipeline_module.run_large_wave_extraction = fake_large_wave_extraction
+            pipeline_module.process_track = fail_standard_analysis
+            pipeline_module.prepare_large_wave_track = counting_prepare_track
+            with tempfile.TemporaryDirectory() as tmp:
+                with Session(engine) as session:
+                    store = JobStore(session)
+                    artifact_store = InterruptibleArtifactStore(str(Path(tmp) / "artifacts"))
+                    config = _base_config(event_polarity="both")
+                    config.update({
+                        "heatmap": {
+                            "table_mode": "area",
+                            "origin": "lower",
+                            "area": {"cmap": "gray", "vmin": 0.0, "vmax": 1.0},
+                        },
+                        "analysis": {
+                            "mode": "large_wave",
+                            "large_wave": {
+                                "peaks": {
+                                    "event_polarity": "both",
+                                    "adaptive": False,
+                                    "minimum_per_track": 1,
+                                    "minimum_scope": "track",
+                                    "prominence": 2.0,
+                                    "width": 5,
+                                    "distance": 30,
+                                },
+                                "events": {
+                                    "min_tracks": 1,
+                                    "min_amplitude_px": 1.0,
+                                    "min_prominence_px": 1.0,
+                                    "min_width_frames": 2.0,
+                                    "fit_boundary_smoothing_sigma_rows": 1.0,
+                                    "endpoint_anchor_rows": 3,
+                                },
+                            },
+                        },
+                        "overlay": {"max_points": 50},
+                        "track_detail": {"store_npy": True},
+                        "service": {"resume": {"enabled": True}},
+                    })
+                    job = store.create_job(owner_session_id=uuid4(), run_name="large wave pipeline", config=config)
+                    table = "\n".join(
+                        ",".join(f"{((x + y) % 17) / 16:.3f}" for x in range(32))
+                        for y in range(32)
+                    ).encode("utf-8")
+                    blob_path, byte_size = artifact_store.put_bytes(
+                        job_id=job.id,
+                        kind=ArtifactKind.upload_csv.value,
+                        filename="area.csv",
+                        data=table,
+                        content_type="text/csv",
+                        label="upload",
+                    )
+                    store.create_artifact(
+                        job_id=job.id,
+                        kind=ArtifactKind.upload_csv,
+                        blob_path=blob_path,
+                        label="upload",
+                        content_type="text/csv",
+                        byte_size=byte_size,
+                        meta={"filename": "area.csv", "input_type": "table"},
+                    )
+
+                    pipeline_module.run_job(
+                        job.id,
+                        job_store=store,
+                        artifact_store=artifact_store,
+                        config=config,
+                        settings=PipelineSettings(scratch_root=Path(tmp) / "scratch"),
+                    )
+
+                    first_measurements = store.list_artifacts(
+                        job.id,
+                        kind=ArtifactKind.other,
+                        label="large_wave_measurements",
+                        limit=2,
+                    )
+                    self.assertEqual(len(first_measurements), 1)
+                    first_blob_path = first_measurements[0].blob_path
+                    first_csv = artifact_store.get_bytes(first_blob_path)
+                    first_wave_count = len(
+                        session.exec(select(Wave).where(Wave.job_id == job.id)).all()
+                    )
+                    files_before_interruption = {
+                        path for path in (Path(tmp) / "artifacts").rglob("*") if path.is_file()
+                    }
+
+                    artifact_store.interrupt_store = store
+                    artifact_store.interrupt_job_id = job.id
+                    artifact_store.interrupt_next_publication = True
+                    pipeline_module.run_job(
+                        job.id,
+                        job_store=store,
+                        artifact_store=artifact_store,
+                        config=config,
+                        settings=PipelineSettings(scratch_root=Path(tmp) / "scratch"),
+                        resume=True,
+                    )
+                    self.assertEqual(store.get_job(job.id).status, JobStatus.cancelled)
+                    self.assertTrue(Path(first_blob_path).exists())
+                    self.assertEqual(
+                        {
+                            path
+                            for path in (Path(tmp) / "artifacts").rglob("*")
+                            if path.is_file()
+                        },
+                        files_before_interruption,
+                    )
+                    self.assertEqual(
+                        len(session.exec(select(Wave).where(Wave.job_id == job.id)).all()),
+                        first_wave_count,
+                    )
+
+                    store.clear_cancel(job.id, emit_event=False)
+
+                    pipeline_module.run_job(
+                        job.id,
+                        job_store=store,
+                        artifact_store=artifact_store,
+                        config=config,
+                        settings=PipelineSettings(scratch_root=Path(tmp) / "scratch"),
+                        resume=True,
+                    )
+
+                    finished = store.get_job(job.id)
+                    artifacts = list(session.exec(select(Artifact).where(Artifact.job_id == job.id)).all())
+                    tracks = list(session.exec(select(TrackModel).where(TrackModel.job_id == job.id)).all())
+                    waves = list(session.exec(select(Wave).where(Wave.job_id == job.id)).all())
+                    second_measurements = [
+                        artifact
+                        for artifact in artifacts
+                        if artifact.label == "large_wave_measurements"
+                    ]
+                    self.assertEqual(len(second_measurements), 1)
+                    second_csv = artifact_store.get_bytes(second_measurements[0].blob_path)
+                    old_blob_was_removed = not Path(first_blob_path).exists()
+                    result_manifests = [
+                        artifact for artifact in artifacts if artifact.label == "result_manifest"
+                    ]
+                    self.assertEqual(len(result_manifests), 1)
+                    result_manifest_bytes = artifact_store.get_bytes(
+                        result_manifests[0].blob_path
+                    )
+                    result_manifest = json.loads(result_manifest_bytes.decode("utf-8"))
+                    result_manifest_sha256 = (result_manifests[0].meta or {}).get("sha256")
+                    expected_input_sha256 = sha256_bytes(table)
+
+            self.assertEqual(finished.status, JobStatus.completed)
+            self.assertGreater(finished.waves_done, 0)
+            self.assertEqual(finished.peaks_done, 0)
+            self.assertEqual(len(tracks), 1)
+            self.assertEqual(len(waves), first_wave_count)
+            self.assertEqual(tracks[0].metrics.get("analysis_mode"), "large_wave")
+            self.assertEqual(prepared_calls, 3)
+            self.assertEqual(second_csv, first_csv)
+            self.assertTrue(old_blob_was_removed)
+            labels = [artifact.label for artifact in artifacts]
+            self.assertEqual(labels.count("large_wave_tracks"), 1)
+            self.assertEqual(labels.count("large_wave_measurements"), 1)
+            self.assertEqual(labels.count("large_wave_events"), 1)
+            self.assertEqual(labels.count("result_manifest"), 1)
+            self.assertEqual(result_manifest["schema_version"], 1)
+            self.assertEqual(result_manifest["analysis_mode"], "large_wave")
+            self.assertEqual(result_manifest["input"]["sha256"], expected_input_sha256)
+            self.assertEqual(result_manifest_sha256, sha256_bytes(result_manifest_bytes))
+            self.assertEqual(result_manifest["outputs"]["database"]["waves"]["count"], len(waves))
+            self.assertTrue(
+                all(len(row["sha256"]) == 64 for row in result_manifest["outputs"]["artifacts"])
+            )
+            self.assertEqual(
+                result_manifest["method"]["config"]["io"]["sampling_rate"],
+                10.0,
+            )
+            self.assertNotIn("sampling_rate", result_manifest["method"]["config"]["period"])
+        finally:
+            pipeline_module.run_large_wave_extraction = old_extractor
+            pipeline_module.process_track = old_process_track
+            pipeline_module.prepare_large_wave_track = old_prepare_track
+
     def test_kymobutler_tiled_inference_honors_cancel_callback(self) -> None:
         class DummyKymo:
             seg_hw = (2, 2)
@@ -938,6 +1486,14 @@ class BackendCoreTests(unittest.TestCase):
         self.assertIn("residual_fit_error_vnmse", metrics)
         self.assertEqual(metrics["fit_error_vnmse"], metrics["raw_fit_error_vnmse"])
         self.assertAlmostEqual(max_wave["error"], metrics["raw_fit_error_vnmse"])
+        self.assertIn(track_row["metrics"]["detrend"]["method"], {
+            "ransac_polynomial",
+            "least_squares_polynomial",
+        })
+        self.assertEqual(
+            metrics["detrend_method"],
+            track_row["metrics"]["detrend"]["method"],
+        )
 
     def test_residual_fit_target_changes_primary_fit_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -992,7 +1548,7 @@ class BackendCoreTests(unittest.TestCase):
             "cross_polarity_policy": "stronger",
         }
 
-        peak_sets = _detect_peak_sets(residual, peaks_cfg, frames_per_period=None)
+        peak_sets = detect_peak_sets(residual, peaks_cfg, frames_per_period=None)
         by_kind = {peak_set["event_kind"]: peak_set for peak_set in peak_sets}
 
         self.assertEqual(by_kind["max"]["peaks_idx"].tolist(), [1])
@@ -1015,7 +1571,7 @@ class BackendCoreTests(unittest.TestCase):
         self.assertEqual(np.asarray(props["fallback_peak"], dtype=bool).tolist(), [True])
 
     def test_large_wave_track_minimum_creates_one_fallback_across_both_polarities(self) -> None:
-        peak_sets = _detect_peak_sets(
+        peak_sets = detect_peak_sets(
             np.zeros(101, dtype=float),
             {
                 "event_polarity": "both",
@@ -1190,7 +1746,8 @@ class BackendCoreTests(unittest.TestCase):
 
     def test_large_wave_fallback_produces_a_measured_peak_for_each_track(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            frame = np.arange(0, 201, dtype=float)
+            image_row = np.arange(0, 201, dtype=float)
+            frame = 200.0 - image_row
             shape = np.exp(-0.5 * ((frame - 100.0) / 22.0) ** 2)
             position = 30.0 + 0.05 * frame + 0.8 * shape
             track_path = _synthetic_track_path(tmp, position)
@@ -1225,26 +1782,83 @@ class BackendCoreTests(unittest.TestCase):
                     },
                 },
             }
-            track_config = build_large_wave_track_config(config)
-            track_row, wave_rows, _peak_rows, _overlay = process_track(
+            prepared = prepare_large_wave_track(
                 job_id=uuid4(),
                 track_index=0,
                 track_path=track_path,
-                config=track_config,
+                config=config,
+                heatmap_meta={"output_height": 500, "coord_origin": "lower"},
             )
-            for row in wave_rows:
-                row["metrics"]["track_index"] = 0
             result = analyze_large_wave_events(
-                track_paths=[track_path],
-                track_rows=[track_row],
-                wave_rows=wave_rows,
+                prepared_tracks=[prepared],
                 config=config,
             )
 
-        self.assertGreaterEqual(len(wave_rows), 1)
-        self.assertTrue(any(bool(row["metrics"].get("fallback_peak")) for row in wave_rows))
+        self.assertGreaterEqual(len(prepared.candidate_rows), 1)
+        self.assertTrue(any(bool(row["metrics"].get("fallback_peak")) for row in prepared.candidate_rows))
         self.assertGreaterEqual(len(result.measurements), 1)
         self.assertTrue(any(bool(row.get("fallback_peak")) for row in result.measurements))
+        measurement = result.measurements[0]
+        self.assertAlmostEqual(
+            measurement["peak_frame_y_axis"],
+            measurement["peak_frame"],
+        )
+        self.assertAlmostEqual(
+            measurement["peak_frame_raw"],
+            499.0 - measurement["peak_frame"],
+        )
+        self.assertGreater(measurement["baseline_slope_px_per_frame"], 0.0)
+
+    def test_large_wave_preparation_preserves_peak_seeds_without_standard_fits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            frame = np.arange(0, 301, dtype=float)
+            position = (
+                30.0
+                + 0.03 * frame
+                + 9.0 * np.exp(-0.5 * ((frame - 90.0) / 15.0) ** 2)
+                - 7.0 * np.exp(-0.5 * ((frame - 220.0) / 18.0) ** 2)
+            )
+            track_path = _synthetic_track_path(tmp, position)
+            config = _base_config(event_polarity="both")
+            large_peaks = {
+                "event_polarity": "both",
+                "adaptive": False,
+                "minimum_per_track": 1,
+                "minimum_scope": "track",
+                "prominence": 2.0,
+                "width": 5,
+                "distance": 30,
+                "smoothing_sigma_rows": 2.0,
+                "cross_polarity_min_distance": 30,
+            }
+            config["analysis"] = {"mode": "large_wave", "large_wave": {"peaks": large_peaks}}
+            standard_config = {**config, "peaks": {**config["peaks"], **large_peaks}}
+
+            _track_row, old_rows, _peak_rows, _overlay = process_track(
+                job_id=uuid4(),
+                track_index=0,
+                track_path=track_path,
+                config=standard_config,
+            )
+            prepared = prepare_large_wave_track(
+                job_id=uuid4(),
+                track_index=0,
+                track_path=track_path,
+                config=config,
+            )
+
+        old_seeds = [
+            (row["metrics"]["peak_i"], row["event_kind"], row["metrics"]["fallback_peak"])
+            for row in old_rows
+        ]
+        new_seeds = [
+            (row["metrics"]["peak_i"], row["event_kind"], row["metrics"]["fallback_peak"])
+            for row in prepared.candidate_rows
+        ]
+        self.assertEqual(new_seeds, old_seeds)
+        self.assertTrue(prepared.candidate_rows)
+        self.assertTrue(all("fit_error_vnmse" not in row["metrics"] for row in prepared.candidate_rows))
+        self.assertTrue(all("raw_fit_error_vnmse" not in row["metrics"] for row in prepared.candidate_rows))
 
     def test_track_detail_minima_fit_metadata_maps_back_to_original_sign(self) -> None:
         fit_meta = {
@@ -1449,10 +2063,18 @@ class BackendCoreTests(unittest.TestCase):
             }
 
             track_rows = [{"track_index": 0, "metrics": {"num_peaks": 2}}]
+            prepared = LargeWavePreparedTrack(
+                track_index=0,
+                track_path=track_path,
+                frame=frame,
+                position=position,
+                residual=position - (40.0 + 0.15 * frame),
+                candidate_rows=[candidate, duplicate],
+                track_row=track_rows[0],
+                overlay_event={},
+            )
             result = analyze_large_wave_events(
-                track_paths=[track_path],
-                track_rows=track_rows,
-                wave_rows=[candidate, duplicate],
+                prepared_tracks=[prepared],
                 config=config,
             )
 
@@ -1549,18 +2171,23 @@ class BackendCoreTests(unittest.TestCase):
             self.assertEqual(measurement["recurrence_period_s"], 4.0)
             self.assertEqual(measurement["recurrence_frequency_hz"], 0.25)
 
-    def test_lower_origin_uses_raw_frames_for_wave_motion_metrics(self) -> None:
+    def test_lower_origin_uses_bottom_left_frames_for_wave_motion_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            frame = np.arange(0, 120, dtype=float)
+            height = 120
+            image_row = np.arange(height, dtype=float)
+            frame = (height - 1.0) - image_row
             position = 100.0 + 0.5 * frame + 5.0 * np.sin(2.0 * np.pi * frame / 12.0)
-            track_path = _synthetic_track_path(tmp, position)
+            base = Path(tmp) / "synthetic_sample" / "kymobutler_output"
+            base.mkdir(parents=True)
+            track_path = base / "0.npy"
+            np.save(track_path, np.column_stack([image_row, position]))
 
-            _track_row, wave_rows, _peak_rows, _overlay = process_track(
+            track_row, wave_rows, _peak_rows, overlay = process_track(
                 job_id=uuid4(),
                 track_index=0,
                 track_path=track_path,
                 config=_base_config(event_polarity="maxima"),
-                heatmap_meta={"output_height": 1500, "coord_origin": "lower", "pixel_mapping": "table_cell"},
+                heatmap_meta={"output_height": height, "coord_origin": "lower", "pixel_mapping": "table_cell"},
             )
 
         interior_rows = [
@@ -1571,10 +2198,15 @@ class BackendCoreTests(unittest.TestCase):
         ]
         self.assertGreater(len(interior_rows), 0)
         metrics = interior_rows[0]["metrics"]
-        self.assertGreater(abs(metrics["delta_pos_px"]), 0.1)
+        self.assertGreater(metrics["delta_pos_px"], 0.1)
+        self.assertGreater(metrics["velocity_px_per_s"], 0.0)
+        self.assertGreater(metrics["orientation_deg"], 0.0)
         self.assertGreater(metrics["wavelength_px"], 0.1)
         self.assertLess(metrics["frame1_raw"], 120.0)
-        self.assertGreater(metrics["frame1"], 1000.0)
+        self.assertGreaterEqual(metrics["frame1"], 0.0)
+        self.assertEqual(track_row["y0"], 0)
+        self.assertEqual(overlay["poly"][0]["y"], height - 1)
+        self.assertEqual(overlay["poly"][-1]["y"], 0.0)
 
     def test_metric_model_rows_keep_event_labels_as_columns_and_fit_scores_as_metrics(self) -> None:
         wave = _row_for_metric_model(

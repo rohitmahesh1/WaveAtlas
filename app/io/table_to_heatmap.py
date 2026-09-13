@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import io
 import os
-import re
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import numpy as np
@@ -15,11 +14,9 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 import matplotlib  # noqa: E402
 matplotlib.use("Agg", force=True)  # noqa: E402
 
-from ..analysis_mode import LARGE_WAVE_ANALYSIS_MODE, RIPPLE_ANALYSIS_MODE, resolve_analysis_mode
 from ..cancel import CancellationRequested
 
 
-_AREA_FILENAME_RE = re.compile(r"(^|[^a-z0-9])area([^a-z0-9]|$)", re.IGNORECASE)
 _EXTREME_TABLE_MODES = {"binary", "extreme", "extremes", "extreme_mask", "intensity", "legacy"}
 _CONTINUOUS_TABLE_MODES = {"area", "continuous", "raw"}
 
@@ -112,23 +109,10 @@ def _keep_extremes_zero_middle(arr: np.ndarray, lower: float, upper: float) -> n
     return out
 
 
-def _looks_like_area_table(filename_hint: Optional[str]) -> bool:
-    if not filename_hint:
-        return False
-    return bool(_AREA_FILENAME_RE.search(os.path.basename(str(filename_hint))))
-
-
-def _resolve_table_mode(
-    heat_cfg: Dict[str, Any],
-    filename_hint: Optional[str],
-    *,
-    continuous_auto: bool = False,
-) -> Tuple[str, str]:
+def _resolve_table_mode(heat_cfg: Dict[str, Any]) -> Tuple[str, str]:
     requested = str(heat_cfg.get("table_mode", "auto")).strip().lower() or "auto"
     if requested == "auto":
-        if continuous_auto:
-            return requested, "continuous"
-        return requested, "area" if _looks_like_area_table(filename_hint) else "extreme_mask"
+        return requested, "continuous"
     if requested in _EXTREME_TABLE_MODES:
         return requested, "extreme_mask"
     if requested in _CONTINUOUS_TABLE_MODES:
@@ -176,7 +160,8 @@ def table_to_heatmap_payload(
       origin: str = "lower"
       cmap: str = "plasma"
       dpi: int = 180
-      area: dict = area-specific overrides for auto-detected area tables
+      continuous: dict = overrides for continuous table rendering
+      area: dict = overrides for explicitly selected area rendering
 
     Returns:
       (png_bytes, meta, value_bytes, value_meta)
@@ -184,14 +169,7 @@ def table_to_heatmap_payload(
     _check_cancel(cancel_cb)
     cfg = config or {}
     heat_cfg = cfg.get("heatmap", cfg)
-    requested_table_mode, resolved_table_mode = _resolve_table_mode(
-        heat_cfg,
-        filename_hint,
-        continuous_auto=resolve_analysis_mode(cfg) in {
-            RIPPLE_ANALYSIS_MODE,
-            LARGE_WAVE_ANALYSIS_MODE,
-        },
-    )
+    requested_table_mode, resolved_table_mode = _resolve_table_mode(heat_cfg)
 
     lower = float(heat_cfg.get("lower", -1e20))
     upper = float(heat_cfg.get("upper", 1e16))
@@ -202,19 +180,35 @@ def table_to_heatmap_payload(
     df, load_meta = _load_table_bytes(table_bytes, filename_hint=filename_hint)
     _check_cancel(cancel_cb)
 
-    # Convert to float and sanitize NaN/Inf
+    # Convert to float, then apply the declared missing/invalid-value policy.
     data = df.to_numpy(dtype=float)
     _check_cancel(cancel_cb)
-    if not np.isfinite(data).all():
+    finite_mask = np.isfinite(data)
+    non_finite_count = int(np.size(data) - np.count_nonzero(finite_mask))
+    nan_count = int(np.count_nonzero(np.isnan(data)))
+    positive_infinity_count = int(np.count_nonzero(np.isposinf(data)))
+    negative_infinity_count = int(np.count_nonzero(np.isneginf(data)))
+    non_finite_policy = str(heat_cfg.get("non_finite_policy", "reject")).strip().lower()
+    if non_finite_policy not in {"reject", "zero"}:
+        raise ValueError("heatmap.non_finite_policy must be 'reject' or 'zero'")
+    if non_finite_count and non_finite_policy == "reject":
+        raise ValueError(
+            "Input table contains "
+            f"{non_finite_count} non-finite numeric cell(s) "
+            f"(NaN={nan_count}, +Infinity={positive_infinity_count}, "
+            f"-Infinity={negative_infinity_count}). Fix the input or explicitly set "
+            "heatmap.non_finite_policy to 'zero'."
+        )
+    if non_finite_count:
         data = np.nan_to_num(data, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
 
     if resolved_table_mode in {"area", "continuous"}:
         mode_cfg = {}
-        if resolved_table_mode == "area" and isinstance(heat_cfg.get("area"), dict):
-            mode_cfg = dict(heat_cfg["area"])
+        if isinstance(heat_cfg.get(resolved_table_mode), dict):
+            mode_cfg = dict(heat_cfg[resolved_table_mode])
         filtered = data
         binarize = bool(mode_cfg.get("binarize", False))
-        origin = str(mode_cfg.get("origin", heat_cfg.get("origin", "lower")))
+        origin = str(mode_cfg.get("origin", heat_cfg.get("origin", "lower"))).strip().lower()
         cmap = str(mode_cfg.get("cmap", heat_cfg.get("cmap", "plasma")))
         vmin = _optional_float(mode_cfg.get("vmin", heat_cfg.get("vmin")))
         vmax = _optional_float(mode_cfg.get("vmax", heat_cfg.get("vmax")))
@@ -222,7 +216,7 @@ def table_to_heatmap_payload(
             filtered = (filtered > 0).astype(int)
     else:
         binarize = bool(heat_cfg.get("binarize", True))
-        origin = str(heat_cfg.get("origin", "lower"))
+        origin = str(heat_cfg.get("origin", "lower")).strip().lower()
         cmap = str(heat_cfg.get("cmap", "plasma"))
         vmin = 0.0
         # Keep extremes and optionally binarize
@@ -231,6 +225,9 @@ def table_to_heatmap_payload(
         if binarize:
             filtered = (filtered > 0).astype(int)
         vmax = float(np.max(filtered)) if filtered.size else 1.0
+
+    if origin not in {"lower", "upper"}:
+        raise ValueError("heatmap.origin must be 'lower' or 'upper'")
 
     _check_cancel(cancel_cb)
     nrows, ncols = filtered.shape
@@ -269,11 +266,18 @@ def table_to_heatmap_payload(
         "output_width": int(ncols),
         "output_height": int(nrows),
         "pixel_mapping": "table_cell",
-        "coord_origin": origin,
+        "coord_origin": "lower",
+        "render_origin": origin,
         "coord_x_label": "col",
         "coord_y_label": "row",
         "table_mode": requested_table_mode,
         "resolved_table_mode": resolved_table_mode,
+        "non_finite_policy": non_finite_policy,
+        "non_finite_count": non_finite_count,
+        "nan_count": nan_count,
+        "positive_infinity_count": positive_infinity_count,
+        "negative_infinity_count": negative_infinity_count,
+        "non_finite_disposition": "zero_imputed" if non_finite_count else "none",
         "lower": lower,
         "upper": upper,
         "binarize": binarize,
@@ -299,11 +303,18 @@ def table_to_heatmap_payload(
         "output_width": int(ncols),
         "output_height": int(nrows),
         "pixel_mapping": "table_cell",
-        "coord_origin": origin,
+        "coord_origin": "lower",
+        "render_origin": origin,
         "coord_x_label": "col",
         "coord_y_label": "row",
         "table_mode": requested_table_mode,
         "resolved_table_mode": resolved_table_mode,
+        "non_finite_policy": non_finite_policy,
+        "non_finite_count": non_finite_count,
+        "nan_count": nan_count,
+        "positive_infinity_count": positive_infinity_count,
+        "negative_infinity_count": negative_infinity_count,
+        "non_finite_disposition": "zero_imputed" if non_finite_count else "none",
         "value_encoding": "float32_le",
         "value_dtype": "float32",
         "value_order": "row_major",
