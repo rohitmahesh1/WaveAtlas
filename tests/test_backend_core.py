@@ -59,6 +59,14 @@ from app.modules.kymo_interface import _canonicalize_wolfram_track
 from app.modules.kymobutler_pt import KymoButlerPT
 from app.modules.tracker import CrossingTracker, Track
 from app.models import ArtifactKind, Artifact, JobRead, JobStatus, Track as TrackModel, Wave
+from app.measurement_schema import (
+    MEASUREMENT_DEFINITIONS,
+    WAVE_EXPORT_FAMILIAR_HEADERS,
+    descriptive_ripple_csv,
+    measurement_schema_identity,
+    profile_csv_columns,
+    wave_export_descriptive_keys,
+)
 from app.pipeline import PipelineSettings
 from app.ripple_analysis import analyze_ripple_tracks
 from app.ripple_extraction import _Trace, _dedupe_and_extend
@@ -1353,8 +1361,9 @@ class BackendCoreTests(unittest.TestCase):
             self.assertEqual(labels.count("large_wave_measurements"), 1)
             self.assertEqual(labels.count("large_wave_events"), 1)
             self.assertEqual(labels.count("result_manifest"), 1)
-            self.assertEqual(result_manifest["schema_version"], 1)
+            self.assertEqual(result_manifest["schema_version"], 2)
             self.assertEqual(result_manifest["analysis_mode"], "large_wave")
+            self.assertEqual(result_manifest["measurement_schema"], measurement_schema_identity())
             self.assertEqual(result_manifest["input"]["sha256"], expected_input_sha256)
             self.assertEqual(result_manifest_sha256, sha256_bytes(result_manifest_bytes))
             self.assertEqual(result_manifest["outputs"]["database"]["waves"]["count"], len(waves))
@@ -2654,6 +2663,89 @@ class BackendCoreTests(unittest.TestCase):
         self.assertEqual([trace.track.id for trace in kept], ["shorter-bright"])
         self.assertEqual(summary["rejected_track_count"], 1)
         self.assertEqual(summary["intensity_selection_weight"], 0.75)
+
+    def test_measurement_schema_has_stable_unique_identity(self) -> None:
+        identity = measurement_schema_identity()
+
+        self.assertEqual(identity["version"], 1)
+        self.assertEqual(identity["default_column_labels"], "familiar")
+        self.assertEqual(identity["available_column_labels"], ["familiar", "descriptive"])
+        self.assertEqual(len(identity["sha256"]), 64)
+        self.assertIn("standard_track_spectral_frequency_hz", MEASUREMENT_DEFINITIONS)
+        self.assertIn("ripple_intertrack_arrival_rate_hz", MEASUREMENT_DEFINITIONS)
+        self.assertIn("large_wave_equivalent_lobe_frequency_hz", MEASUREMENT_DEFINITIONS)
+
+    def test_descriptive_wave_columns_remove_only_legacy_aliases(self) -> None:
+        familiar_values = list(range(len(WAVE_EXPORT_FAMILIAR_HEADERS)))
+        descriptive_keys = wave_export_descriptive_keys("large_wave")
+
+        familiar_headers, familiar_result = profile_csv_columns(
+            WAVE_EXPORT_FAMILIAR_HEADERS,
+            descriptive_keys,
+            familiar_values,
+            "familiar",
+        )
+        descriptive_headers, descriptive_result = profile_csv_columns(
+            WAVE_EXPORT_FAMILIAR_HEADERS,
+            descriptive_keys,
+            familiar_values,
+            "descriptive",
+        )
+
+        self.assertEqual(familiar_headers, list(WAVE_EXPORT_FAMILIAR_HEADERS))
+        self.assertEqual(familiar_result, familiar_values)
+        self.assertEqual(len(descriptive_headers), len(set(descriptive_headers)))
+        self.assertEqual(len(descriptive_result), len(descriptive_headers))
+        self.assertIn("large_wave_equivalent_lobe_frequency_hz", descriptive_headers)
+        self.assertIn("large_wave_local_recurrence_rate_hz", descriptive_headers)
+
+    def test_descriptive_ripple_csv_uses_one_precise_column_per_value(self) -> None:
+        familiar = io.StringIO()
+        writer = csv.DictWriter(
+            familiar,
+            fieldnames=[
+                "Ripple Wave ID", "interval_index", "family_id", "family_label", "direction",
+                "earlier_track_index", "later_track_index", "x_overlap_start_px", "x_overlap_end_px",
+                "sample_count", "slope_px_per_frame", "velocity_px_per_s", "speed_px_per_s",
+                "angle_deg", "angle_from_time_axis_deg", "period_frames", "period_s", "frequency_hz",
+                "gap_mad_frames", "gap_cv", "measurement_method",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow({
+            "Ripple Wave ID": 1,
+            "interval_index": 1,
+            "family_id": "family_1",
+            "family_label": "Family 1",
+            "direction": "right",
+            "earlier_track_index": 4,
+            "later_track_index": 5,
+            "x_overlap_start_px": 10,
+            "x_overlap_end_px": 20,
+            "sample_count": 25,
+            "slope_px_per_frame": 0.5,
+            "velocity_px_per_s": 5.0,
+            "speed_px_per_s": 5.0,
+            "angle_deg": 26.565,
+            "angle_from_time_axis_deg": 26.565,
+            "period_frames": 20,
+            "period_s": 2.0,
+            "frequency_hz": 0.5,
+            "gap_mad_frames": 1.0,
+            "gap_cv": 0.05,
+            "measurement_method": "median_shared_x_frame_gap",
+        })
+
+        result = list(csv.DictReader(io.StringIO(
+            descriptive_ripple_csv(familiar.getvalue().encode("utf-8"), "intervals").decode("utf-8")
+        )))
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["ripple_intertrack_interval_s"], "2.0")
+        self.assertEqual(result[0]["ripple_intertrack_arrival_rate_hz"], "0.5")
+        self.assertEqual(result[0]["ripple_angle_from_time_axis_deg"], "26.565")
+        self.assertNotIn("Frequency (Hertz)", result[0])
+        self.assertNotIn("angle_deg", result[0])
 
 
 if __name__ == "__main__":

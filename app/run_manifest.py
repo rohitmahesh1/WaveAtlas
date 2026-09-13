@@ -16,11 +16,12 @@ from sqlmodel import Session, select
 from .artifact_store import ArtifactStore
 from .cancel import CancellationRequested
 from .job_store import JobStore
+from .measurement_schema import measurement_schema_identity
 from .models import Artifact, ArtifactKind, Peak, Track, Wave
 from .time_utils import utc_now_iso
 
 
-RUN_MANIFEST_SCHEMA_VERSION = 1
+RUN_MANIFEST_SCHEMA_VERSION = 2
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -171,6 +172,7 @@ def build_run_manifest(
         "run_id": str(job_id),
         "generated_at": generated_at,
         "analysis_mode": analysis_mode,
+        "measurement_schema": measurement_schema_identity(),
         "input": _json_safe(input_identity),
         "method": {"config": _json_safe(config)},
         "software": software_identity(config),

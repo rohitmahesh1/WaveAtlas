@@ -29,6 +29,7 @@ export function SelectionPanel(props: {
   onDownloadTrackDetail?: () => void;
   onIsolateFamily?: (familyId: string) => void;
   onClearFamilyIsolation?: () => void;
+  measurementTooltip?: (key: string) => string | undefined;
 }) {
   const {
     selectedTrack,
@@ -47,6 +48,7 @@ export function SelectionPanel(props: {
     onDownloadTrackDetail,
     onIsolateFamily,
     onClearFamilyIsolation,
+    measurementTooltip,
   } = props;
   const detailReady = Boolean(
     selectedTrack && trackDetail && trackDetail.track_index === selectedTrack.track_index
@@ -128,7 +130,7 @@ export function SelectionPanel(props: {
                       {selectedFamilySummary.avgAngle != null ? selectedFamilySummary.avgAngle.toFixed(1) : "—"}
                     </div>
                   </div>
-                  <div>
+                  <div title={measurementTooltip?.("ripple_family_median_arrival_rate_hz")}>
                     Avg frequency
                     <div className="meta-value">
                       {selectedFamilySummary.avgFrequency != null
@@ -170,7 +172,7 @@ export function SelectionPanel(props: {
                         : "—"}
                     </div>
                   </div>
-                  <div>
+                  <div title={measurementTooltip?.("ripple_propagation_velocity_px_per_s")}>
                     Velocity
                     <div className="meta-value">
                       {selectedVelocity != null
@@ -186,7 +188,7 @@ export function SelectionPanel(props: {
                         : "—"}
                     </div>
                   </div>
-                  <div>
+                  <div title={measurementTooltip?.("ripple_angle_from_time_axis_deg")}>
                     Angle
                     <div className="meta-value">
                       {selectedAngle != null
@@ -194,7 +196,7 @@ export function SelectionPanel(props: {
                         : "—"}
                     </div>
                   </div>
-                  <div>
+                  <div title={measurementTooltip?.("ripple_track_median_neighbor_arrival_rate_hz")}>
                     Frequency
                     <div className="meta-value">
                       {selectedTrack.metrics?.dominant_frequency != null
@@ -225,7 +227,11 @@ export function SelectionPanel(props: {
                         : "—"}
                     </div>
                   </div>
-                  <div>
+                  <div title={measurementTooltip?.(
+                    largeWaveMode
+                      ? "large_wave_equivalent_lobe_frequency_hz"
+                      : "standard_track_spectral_frequency_hz"
+                  )}>
                     Frequency
                     <div className="meta-value">
                       {selectedTrack.metrics?.dominant_frequency != null
@@ -233,14 +239,18 @@ export function SelectionPanel(props: {
                         : "—"}
                     </div>
                   </div>
-                  <div>
+                  <div title={measurementTooltip?.(
+                    largeWaveMode
+                      ? "large_wave_equivalent_lobe_period_s"
+                      : "standard_track_spectral_period_s"
+                  )}>
                     Period
                     <div className="meta-value">
                       {selectedTrack.metrics?.period != null ? selectedTrack.metrics.period.toFixed(2) : "—"}
                     </div>
                   </div>
                   {largeWaveMode ? (
-                    <div>
+                    <div title={measurementTooltip?.("large_wave_track_median_recurrence_rate_hz")}>
                       Recurrence freq
                       <div className="meta-value">
                         {selectedTrack.metrics?.large_wave_recurrence_frequency_hz != null

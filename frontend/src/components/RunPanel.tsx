@@ -35,8 +35,10 @@ export function RunPanel(props: {
   onResume?: () => void;
   onNewRun?: () => void;
   onDownloadWaves?: () => void;
+  onDownloadWavesDescriptive?: () => void;
   onDownloadRippleTracks?: () => void;
   onDownloadRippleIntervals?: () => void;
+  onDownloadRippleIntervalsDescriptive?: () => void;
   onDownloadRippleFamilies?: () => void;
   onDownloadHeatmap?: () => void;
   onDownloadOriginalImage?: () => void;
@@ -63,8 +65,10 @@ export function RunPanel(props: {
     onResume,
     onNewRun,
     onDownloadWaves,
+    onDownloadWavesDescriptive,
     onDownloadRippleTracks,
     onDownloadRippleIntervals,
+    onDownloadRippleIntervalsDescriptive,
     onDownloadRippleFamilies,
     onDownloadHeatmap,
     onDownloadOriginalImage,
@@ -219,28 +223,38 @@ export function RunPanel(props: {
             <div className="run-transport-note">
               {canResume ? "Stopped. Resume from saved artifacts." : isPausePending ? "Stop requested..." : "Run outputs"}
             </div>
-            {onDownloadWaves || onDownloadRippleTracks || onDownloadRippleIntervals || onDownloadRippleFamilies || onDownloadHeatmap || onDownloadOriginalImage ? (
+            {onDownloadWaves || onDownloadWavesDescriptive || onDownloadRippleTracks || onDownloadRippleIntervals || onDownloadRippleIntervalsDescriptive || onDownloadRippleFamilies || onDownloadHeatmap || onDownloadOriginalImage ? (
               <details className="run-download-menu">
                 <summary>Downloads</summary>
                 <div className="run-download-popover">
                   {onDownloadWaves ? (
                     <button className="ghost-btn download-btn compact-btn" onClick={onDownloadWaves}>
-                      Waves CSV
+                      Download CSV
                     </button>
                   ) : null}
-                  {onDownloadRippleTracks ? (
-                    <button className="ghost-btn download-btn compact-btn" onClick={onDownloadRippleTracks}>
-                      Tracks CSV
+                  {onDownloadWavesDescriptive ? (
+                    <button className="ghost-btn download-btn compact-btn" onClick={onDownloadWavesDescriptive}>
+                      Download CSV with descriptive columns
                     </button>
                   ) : null}
                   {onDownloadRippleIntervals ? (
                     <button className="ghost-btn download-btn compact-btn" onClick={onDownloadRippleIntervals}>
-                      Waves CSV
+                      Download CSV
+                    </button>
+                  ) : null}
+                  {onDownloadRippleIntervalsDescriptive ? (
+                    <button className="ghost-btn download-btn compact-btn" onClick={onDownloadRippleIntervalsDescriptive}>
+                      Download CSV with descriptive columns
+                    </button>
+                  ) : null}
+                  {onDownloadRippleTracks ? (
+                    <button className="ghost-btn download-btn compact-btn" onClick={onDownloadRippleTracks}>
+                      Track details CSV
                     </button>
                   ) : null}
                   {onDownloadRippleFamilies ? (
                     <button className="ghost-btn download-btn compact-btn" onClick={onDownloadRippleFamilies}>
-                      Families CSV
+                      Family summary CSV
                     </button>
                   ) : null}
                   {onDownloadHeatmap ? (
