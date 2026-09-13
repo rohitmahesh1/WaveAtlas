@@ -11,7 +11,6 @@ from sqlmodel import Session, select
 
 from ..job_store import JobStore
 from ..models import Job, JobStatus
-from . import VERSION
 from .workspace import Workspace
 
 
@@ -21,6 +20,7 @@ class DesktopRuntime:
         self.owner = owner
         self.engine = engine
         self.manifest = manifest
+        self.version = str(manifest.get("version") or "development")
         self.token = secrets.token_urlsafe(32)
         self.launch_token = secrets.token_urlsafe(32)
         self.origin = ""
@@ -97,7 +97,7 @@ class DesktopRuntime:
         onnx = kymo.setdefault("onnx", {})
         onnx["export_dir"] = str(self.workspace.resources / "export")
         onnx["providers"] = ["CPUExecutionProvider"]
-        config["desktop_build"] = {"version": VERSION, **self.manifest}
+        config["desktop_build"] = {"version": self.version, **self.manifest}
         return config
 
     def validate_resume(self, job, store, artifacts) -> None:
@@ -108,7 +108,7 @@ class DesktopRuntime:
 
         previous = (job.config or {}).get("desktop_build", {})
         if previous and (
-            previous.get("version") != VERSION
+            previous.get("version") != self.version
             or previous.get("models") != self.manifest.get("models")
         ):
             raise HTTPException(

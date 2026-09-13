@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "WaveAtlas",
-  "version": "0.1.0",
   "identifier": "net.rohitmahesh.waveatlas",
   "build": { "frontendDist": "../ui" },
   "app": {
@@ -19,6 +18,7 @@
     "icon": ["icons/icon.ico"],
     "resources": { "../payload/": "backend/" },
     "windows": {
+      "allowDowngrades": false,
       "webviewInstallMode": { "type": "offlineInstaller", "silent": true },
       "nsis": { "installMode": "currentUser", "displayLanguageSelector": false }
     }

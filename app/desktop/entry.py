@@ -134,6 +134,11 @@ def main() -> int:
                                     "origin": desktop.origin,
                                     "url": f"{desktop.origin}/desktop/launch?token={desktop.launch_token}",
                                     "token": desktop.token,
+                                    "version": desktop.version,
+                                    "commit": str(manifest.get("commit") or "development"),
+                                    "model_release": str(
+                                        manifest.get("model_release") or "development"
+                                    ),
                                 }
                             ),
                             flush=True,

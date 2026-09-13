@@ -23,8 +23,7 @@ def create_app(*, desktop=None) -> FastAPI:
 
     @app.get("/api/runtime")
     def runtime_info() -> dict:
-        from ..desktop import VERSION
-        return {"mode": "desktop" if desktop else "hosted", "version": VERSION if desktop else None,
+        return {"mode": "desktop" if desktop else "hosted", "version": desktop.version if desktop else None,
                 "upload_transport": "gcs" if desktop is None and os.getenv("ARTIFACT_STORE", "local") == "gcs" else "local",
                 "max_active_jobs": 1 if desktop else None}
 

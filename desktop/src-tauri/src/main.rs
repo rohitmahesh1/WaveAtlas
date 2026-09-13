@@ -19,6 +19,9 @@ struct Ready {
     origin: String,
     url: String,
     token: String,
+    version: String,
+    commit: String,
+    model_release: String,
 }
 
 struct Backend {
@@ -295,9 +298,35 @@ fn main() {
             let logs = MenuItem::with_id(app, "logs", "Open Logs", true, None::<&str>)?;
             let downloads =
                 MenuItem::with_id(app, "downloads", "Open Downloads", true, None::<&str>)?;
-            let help = Submenu::with_items(app, "Help", true, &[&data, &logs, &downloads])?;
+            let about =
+                MenuItem::with_id(app, "about", "About WaveAtlas", true, None::<&str>)?;
+            let help =
+                Submenu::with_items(app, "Help", true, &[&data, &logs, &downloads, &about])?;
             app.set_menu(Menu::with_items(app, &[&help])?)?;
             app.on_menu_event(|app, event| {
+                if event.id().as_ref() == "about" {
+                    let details = app
+                        .state::<Backend>()
+                        .ready
+                        .lock()
+                        .ok()
+                        .and_then(|ready| ready.clone())
+                        .map(|ready| {
+                            let short_commit = ready.commit.get(..7).unwrap_or(&ready.commit);
+                            format!(
+                                "WaveAtlas {}\nBuild {}\nModels {}",
+                                ready.version, short_commit, ready.model_release
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            format!("WaveAtlas {}", env!("CARGO_PKG_VERSION"))
+                        });
+                    app.dialog()
+                        .message(details)
+                        .title("About WaveAtlas")
+                        .show(|_| {});
+                    return;
+                }
                 let root = app.state::<Backend>().workspace.clone();
                 let path = match event.id().as_ref() {
                     "data" => Some(root),

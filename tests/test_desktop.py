@@ -45,7 +45,15 @@ class DesktopTests(unittest.TestCase):
             connect_args={"check_same_thread": False},
         )
         self.desktop = DesktopRuntime(
-            self.workspace, self.owner, self.engine, {"test": True}
+            self.workspace,
+            self.owner,
+            self.engine,
+            {
+                "version": "0.1.0",
+                "commit": "0123456789abcdef0123456789abcdef01234567",
+                "model_release": "test-models",
+                "models": {},
+            },
         )
         self.desktop.origin = "http://127.0.0.1:54321"
         self.desktop.cookie_name = "waveatlas_54321"
@@ -76,7 +84,9 @@ class DesktopTests(unittest.TestCase):
             self.assertEqual(response.status_code, 303)
             self.assertIn("HttpOnly", response.headers["set-cookie"])
             self.assertIn("SameSite=strict", response.headers["set-cookie"])
-            self.assertEqual(client.get("/api/runtime").json()["mode"], "desktop")
+            runtime = client.get("/api/runtime").json()
+            self.assertEqual(runtime["mode"], "desktop")
+            self.assertEqual(runtime["version"], "0.1.0")
             self.assertEqual(
                 client.get(f"/desktop/launch?token={launch}").status_code, 403
             )
@@ -231,6 +241,7 @@ class DesktopTests(unittest.TestCase):
         }
         local = self.desktop.constrain_config(config)
         self.assertEqual(local["kymo"]["onnx"]["providers"], ["CPUExecutionProvider"])
+        self.assertEqual(local["desktop_build"]["version"], "0.1.0")
         self.assertEqual(config["kymo"]["onnx"]["export_dir"], "other")
         with self.assertRaises(HTTPException):
             self.desktop.constrain_config({"kymo": {"backend": "wolfram"}})

@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +38,21 @@ def build_commit() -> str:
     if re.fullmatch(r"[0-9a-fA-F]{40}", commit) is None:
         raise RuntimeError("The source commit must be a 40-character Git object ID.")
     return commit.lower()
+
+
+def app_version() -> str:
+    cargo = tomllib.loads(
+        (ROOT / "desktop/src-tauri/Cargo.toml").read_text(encoding="utf-8")
+    )
+    version = str(cargo["package"]["version"])
+    if re.fullmatch(
+        r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+        r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+        r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?",
+        version,
+    ) is None:
+        raise RuntimeError(f"Cargo package version is not valid SemVer: {version}")
+    return version
 
 
 def main():
@@ -66,19 +82,14 @@ def main():
 
     if not (ROOT / "frontend/dist/index.html").is_file():
         raise RuntimeError("Build the frontend before preparing the desktop bundle.")
-    sys.path.insert(0, str(ROOT))
-    from app.desktop import VERSION
-
-    for file in ("desktop/src-tauri/tauri.conf.json", "desktop/package.json"):
-        if json.loads((ROOT / file).read_text(encoding="utf-8"))["version"] != VERSION:
-            raise RuntimeError(f"Version mismatch in {file}")
+    version = app_version()
     packages = {
         d.metadata["Name"]: d.version
         for d in metadata.distributions()
         if d.metadata["Name"]
     }
     manifest = {
-        "version": VERSION,
+        "version": version,
         "commit": build_commit(),
         "model_release": models["release"],
         "models": models["files"],
@@ -121,7 +132,7 @@ def main():
     icon.save(
         icons / "icon.ico", sizes=[(32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
     )
-    print(f"Desktop inputs ready: {VERSION}, model release {models['release']}")
+    print(f"Desktop inputs ready: {version}, model release {models['release']}")
 
 
 if __name__ == "__main__":
