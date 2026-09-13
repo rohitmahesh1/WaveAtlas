@@ -63,7 +63,7 @@ export function SummaryPanel(props: {
           </>
         )}
         <div title={measurementTooltip?.(frequencyKey)}>
-          Avg frequency
+          {analysisMode === "standard" ? "Avg measured frequency" : "Avg frequency"}
           <div className="meta-value">{stats.avgFrequency != null ? stats.avgFrequency.toFixed(2) : "—"}</div>
         </div>
       </div>

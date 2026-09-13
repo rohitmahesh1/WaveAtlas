@@ -13,6 +13,7 @@ from .signal.detrend import detrend_with_fit
 from .signal.peaks import detect_peaks, detect_peaks_adaptive, ensure_minimum_peaks
 from .signal.period import estimate_valid_dominant_frequency, frequency_to_period
 from .features import build_wave_rows, build_peak_rows
+from .measurement_status import assess_standard_measurement
 from .sampling import resolve_sampling_rate
 from .track_coordinates import (
     coordinate_origin,
@@ -499,6 +500,10 @@ def process_track_arrays(
         max_freq=period_cfg.get("max_freq"),
     )
     freq_hz = float(frequency_estimate.value) if frequency_estimate.value is not None else float("nan")
+    track_measurement = assess_standard_measurement(
+        estimator_valid=frequency_estimate.valid,
+        failure_reason=frequency_estimate.failure_reason,
+    )
     period_s = float(frequency_to_period(freq_hz)) if frequency_estimate.valid else float("nan")
     frames_per_period = (sampling_rate / freq_hz) if (np.isfinite(freq_hz) and freq_hz > 0) else None
 
@@ -507,27 +512,27 @@ def process_track_arrays(
         if frequency_estimate.frame_sampling.valid
         else []
     )
-    accepted_peak_sets = [_peak_set_without_fallbacks(peak_set) for peak_set in peak_sets]
+    measurable_peak_sets = [_peak_set_without_fallbacks(peak_set) for peak_set in peak_sets]
 
     wave_rows: List[Dict[str, Any]] = []
     peak_rows: List[Dict[str, Any]] = []
-    for peak_set, accepted_peak_set in zip(peak_sets, accepted_peak_sets):
+    for peak_set, measurable_peak_set in zip(peak_sets, measurable_peak_sets):
         if frequency_estimate.valid:
             wave_rows.extend(build_wave_rows(
                 frame=frame,
                 position=position,
                 image_row=image_rows,
                 residual=residual,
-                fit_residual=accepted_peak_set["signal"],
-                peaks_idx=accepted_peak_set["peaks_idx"],
-                peak_props=accepted_peak_set["peak_props"],
+                fit_residual=measurable_peak_set["signal"],
+                peaks_idx=measurable_peak_set["peaks_idx"],
+                peak_props=measurable_peak_set["peak_props"],
                 sampling_rate=sampling_rate,
                 sample=sample,
                 track_stem=track_stem,
                 features_cfg=features_cfg,
-                event_polarity=accepted_peak_set["event_polarity"],
-                event_kind=accepted_peak_set["event_kind"],
-                fit_signal_sign=accepted_peak_set["sign"],
+                event_polarity=measurable_peak_set["event_polarity"],
+                event_kind=measurable_peak_set["event_kind"],
+                fit_signal_sign=measurable_peak_set["sign"],
                 freq_hz=freq_hz,
                 period_frac_for_fit=float(features_cfg.get("fit_window_period_frac", 0.5)),
                 coord_meta=heatmap_meta,
@@ -556,25 +561,34 @@ def process_track_arrays(
     for row in wave_rows:
         metrics = dict(row.get("metrics") or {})
         metrics.update({
-            "measurement_valid": True,
+            # Compatibility alias: this means that the numerical estimator is
+            # admissible, not that scientific evidence has been accepted.
+            "measurement_valid": track_measurement.estimator_valid,
             "measurement_invalid_reason": None,
             "review_candidate": False,
+            **track_measurement.metadata(),
             "frequency_estimate": frequency_metadata,
         })
         row["metrics"] = metrics
     for row in peak_rows:
         metrics = dict(row.get("metrics") or {})
         fallback_peak = bool(metrics.get("fallback_peak", False))
-        measurement_valid = bool(frequency_estimate.valid and not fallback_peak)
+        measurement = assess_standard_measurement(
+            estimator_valid=frequency_estimate.valid,
+            failure_reason=frequency_estimate.failure_reason,
+            fallback_candidate=fallback_peak,
+        )
         invalid_reason = (
             frequency_estimate.failure_reason
             if not frequency_estimate.valid
             else "fallback_peak" if fallback_peak else None
         )
         metrics.update({
-            "measurement_valid": measurement_valid,
+            # Kept for older clients; estimator_valid is the canonical name.
+            "measurement_valid": measurement.estimator_valid,
             "measurement_invalid_reason": invalid_reason,
-            "review_candidate": not measurement_valid,
+            "review_candidate": not measurement.estimator_valid,
+            **measurement.metadata(),
             "frequency_estimate": frequency_metadata,
         })
         row["metrics"] = metrics
@@ -590,12 +604,12 @@ def process_track_arrays(
             "detrend_inlier_fraction": detrend_meta["inlier_fraction"],
         })
         row["metrics"] = metrics
-    accepted_peak_rows = [
+    measured_peak_rows = [
         row for row in peak_rows if bool((row.get("metrics") or {}).get("measurement_valid", False))
     ]
-    peak_props = _combine_peak_props([peak_set["peak_props"] for peak_set in accepted_peak_sets])
-    event_indices = _event_indices_from_rows(accepted_peak_rows)
-    event_kinds = _event_kinds_from_rows(accepted_peak_rows)
+    peak_props = _combine_peak_props([peak_set["peak_props"] for peak_set in measurable_peak_sets])
+    event_indices = _event_indices_from_rows(measured_peak_rows)
+    event_kinds = _event_kinds_from_rows(measured_peak_rows)
     candidate_indices = _event_indices_from_rows(peak_rows)
     candidate_kinds = _event_kinds_from_rows(peak_rows)
     fallback_candidate_count = sum(
@@ -613,11 +627,13 @@ def process_track_arrays(
         peak_props=peak_props,
         sampling_rate=sampling_rate,
         dominant_freq_hz=freq_hz,
+        frame_span=frequency_estimate.frame_sampling.frame_span,
         period_cfg=period_cfg,
     )
     if not frequency_estimate.valid:
         track_quality["frequency_agreement_error"] = float("nan")
         track_quality["spectral_snr"] = float("nan")
+        track_quality["spectral_peak_to_median_ratio"] = float("nan")
     _attach_quality_metric_columns(wave_rows, peak_rows, track_quality)
 
     amps = np.abs(residual[event_indices]) if len(event_indices) else np.array([], dtype=float)
@@ -642,6 +658,9 @@ def process_track_arrays(
             "event_polarity": event_polarity,
             "period": float(period_s) if np.isfinite(period_s) else None,
             "frequency_estimate": frequency_metadata,
+            **track_measurement.metadata(),
+            "frequency_estimator_valid": track_measurement.estimator_valid,
+            # Compatibility alias for clients built before measurement schema 2.
             "frequency_valid": frequency_estimate.valid,
             "frequency_method": frequency_estimate.method,
             "frequency_failure_reason": frequency_estimate.failure_reason,
@@ -681,6 +700,14 @@ def process_track_arrays(
             bool((row.get("metrics") or {}).get("fallback_peak", False))
             for row in peak_rows
         ],
+        peak_measurement_statuses=[
+            str((row.get("metrics") or {}).get("measurement_status", "review"))
+            for row in peak_rows
+        ],
+        peak_status_reasons=[
+            list((row.get("metrics") or {}).get("status_reasons") or [])
+            for row in peak_rows
+        ],
     )
     overlay_track_event["metrics"] = {
         "analysis_mode": "standard",
@@ -691,10 +718,14 @@ def process_track_arrays(
         "num_peak_candidates": track_row["metrics"]["num_peak_candidates"],
         "num_fallback_candidates": track_row["metrics"]["num_fallback_candidates"],
         "num_review_candidates": track_row["metrics"]["num_review_candidates"],
+        **track_measurement.metadata(),
+        "frequency_estimator_valid": track_measurement.estimator_valid,
+        # Compatibility alias for clients built before measurement schema 2.
         "frequency_valid": frequency_estimate.valid,
         "frequency_method": frequency_estimate.method,
         "frequency_failure_reason": frequency_estimate.failure_reason,
         "frame_sampling": frequency_estimate.frame_sampling.metadata(),
+        **{key: _quality_cell_value(value) for key, value in track_quality.items()},
     }
 
     return track_row, wave_rows, peak_rows, overlay_track_event
@@ -731,6 +762,9 @@ FIT_QUALITY_KEYS = [
 TRACK_CONTEXT_QUALITY_KEYS = [
     "period_consistency_cv",
     "frequency_agreement_error",
+    "estimated_cycle_count",
+    "spectral_peak_to_median_ratio",
+    # Compatibility alias for measurement schema 1 consumers.
     "spectral_snr",
     "peak_prominence_snr",
 ]
@@ -754,12 +788,19 @@ def _track_quality_metrics(
     peak_props: Dict[str, Any],
     sampling_rate: float,
     dominant_freq_hz: float,
+    frame_span: Optional[float],
     period_cfg: Dict[str, Any],
 ) -> Dict[str, Any]:
     periods = _metric_values(wave_rows, "period_s", positive=True)
     local_freqs = _metric_values(wave_rows, "frequency_hz", positive=True)
     fit_errors = _metric_values(wave_rows, "fit_error_vnmse")
 
+    spectral_peak_to_median_ratio = _spectral_peak_to_median_ratio(
+        residual,
+        sampling_rate=sampling_rate,
+        min_freq=period_cfg.get("min_freq"),
+        max_freq=period_cfg.get("max_freq"),
+    )
     out: Dict[str, Any] = {
         "track_fit_error_median": _nanmedian(fit_errors),
         "track_fit_error_p90": _nanpercentile(fit_errors, 90.0),
@@ -770,12 +811,13 @@ def _track_quality_metrics(
         "track_fit_points_median": _nanmedian(_metric_values(wave_rows, "fit_points", positive=True)),
         "period_consistency_cv": _coefficient_of_variation(periods),
         "frequency_agreement_error": _frequency_agreement_error(local_freqs, dominant_freq_hz),
-        "spectral_snr": _spectral_snr(
-            residual,
+        "estimated_cycle_count": _estimated_cycle_count(
+            frame_span=frame_span,
             sampling_rate=sampling_rate,
-            min_freq=period_cfg.get("min_freq"),
-            max_freq=period_cfg.get("max_freq"),
+            dominant_freq_hz=dominant_freq_hz,
         ),
+        "spectral_peak_to_median_ratio": spectral_peak_to_median_ratio,
+        "spectral_snr": spectral_peak_to_median_ratio,
         "peak_prominence_snr": _peak_prominence_snr(residual, peak_props),
     }
     return out
@@ -864,7 +906,24 @@ def _frequency_agreement_error(local_freqs: np.ndarray, dominant_freq_hz: float)
     return float(abs(np.median(finite) - dominant) / dominant)
 
 
-def _spectral_snr(
+def _estimated_cycle_count(
+    *,
+    frame_span: Optional[float],
+    sampling_rate: float,
+    dominant_freq_hz: float,
+) -> float:
+    try:
+        span = float(frame_span)
+        rate = float(sampling_rate)
+        frequency = float(dominant_freq_hz)
+    except (TypeError, ValueError):
+        return float("nan")
+    if not all(np.isfinite(value) and value > 0 for value in (span, rate, frequency)):
+        return float("nan")
+    return float((span / rate) * frequency)
+
+
+def _spectral_peak_to_median_ratio(
     residual: np.ndarray,
     *,
     sampling_rate: float,
@@ -1264,6 +1323,8 @@ def _build_overlay_track_event(
     peak_kinds: Optional[List[str]] = None,
     peak_review_flags: Optional[List[bool]] = None,
     peak_fallback_flags: Optional[List[bool]] = None,
+    peak_measurement_statuses: Optional[List[str]] = None,
+    peak_status_reasons: Optional[List[List[str]]] = None,
 ) -> Dict[str, Any]:
     max_points = int(cfg.get("max_points", 300))
     xs, ys = _decimate_polyline(position, image_row, max_points=max_points)
@@ -1272,6 +1333,8 @@ def _build_overlay_track_event(
     kinds = peak_kinds or []
     review_flags = peak_review_flags or []
     fallback_flags = peak_fallback_flags or []
+    measurement_statuses = peak_measurement_statuses or []
+    status_reasons = peak_status_reasons or []
     for event_pos, i in enumerate(peaks_idx.tolist()):
         if 0 <= i < len(frame):
             kind = kinds[event_pos] if event_pos < len(kinds) else "max"
@@ -1293,6 +1356,17 @@ def _build_overlay_track_event(
                 ),
                 "review_candidate": review_candidate,
                 "measurement_valid": not review_candidate,
+                "estimator_valid": not review_candidate,
+                "measurement_status": (
+                    measurement_statuses[event_pos]
+                    if event_pos < len(measurement_statuses)
+                    else "review"
+                ),
+                "status_reasons": (
+                    status_reasons[event_pos]
+                    if event_pos < len(status_reasons)
+                    else []
+                ),
             })
 
     return {

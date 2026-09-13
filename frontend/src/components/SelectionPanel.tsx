@@ -61,6 +61,20 @@ export function SelectionPanel(props: {
     selectedVelocity != null ? Math.abs(selectedVelocity) : null
   );
   const selectedAngle = selectedTrack?.metrics?.angle_from_time_axis_deg ?? selectedTrack?.metrics?.angle_deg ?? null;
+  const measurementStatus = selectedTrack?.metrics?.measurement_status ?? null;
+  const measurementStatusReasons = selectedTrack?.metrics?.status_reasons ?? [];
+  const measurementStatusText = measurementStatus === "accepted"
+    ? "Accepted"
+    : measurementStatus === "invalid"
+      ? "Invalid"
+      : measurementStatus === "review"
+        ? measurementStatusReasons.includes("evidence_rule_not_calibrated")
+          ? "Review — acceptance rule pending"
+          : "Review"
+        : "Unknown";
+  const measurementStatusTitle = measurementStatusReasons
+    .map((reason) => reason.replace(/_/g, " "))
+    .join(", ");
 
   return (
     <section className="panel">
@@ -221,16 +235,24 @@ export function SelectionPanel(props: {
                   </div>
                   {!largeWaveMode ? (
                     <div title={selectedTrack.metrics?.frequency_failure_reason?.replace(/_/g, " ")}>
-                      Frequency estimate
+                      Frequency calculation
                       <div className="meta-value">
-                        {selectedTrack.metrics?.frequency_valid === false
-                          ? `Needs review${selectedTrack.metrics?.frequency_failure_reason
+                        {(selectedTrack.metrics?.frequency_estimator_valid
+                          ?? selectedTrack.metrics?.frequency_valid) === false
+                          ? `Invalid${selectedTrack.metrics?.frequency_failure_reason
                             ? `: ${selectedTrack.metrics.frequency_failure_reason.replace(/_/g, " ")}`
                             : ""}`
-                          : selectedTrack.metrics?.frequency_valid === true
-                            ? "Valid"
+                          : (selectedTrack.metrics?.frequency_estimator_valid
+                            ?? selectedTrack.metrics?.frequency_valid) === true
+                            ? "Computable"
                             : "Unknown"}
                       </div>
+                    </div>
+                  ) : null}
+                  {!largeWaveMode ? (
+                    <div title={measurementStatusTitle || undefined}>
+                      Evidence status
+                      <div className="meta-value">{measurementStatusText}</div>
                     </div>
                   ) : null}
                   {!largeWaveMode && (selectedTrack.metrics?.num_review_candidates ?? 0) > 0 ? (

@@ -40,6 +40,7 @@ export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 export type JobProgress = Record<string, JsonValue>;
 export type CsvColumnLabels = "familiar" | "descriptive";
+export type MeasurementStatus = "invalid" | "review" | "accepted";
 
 export type MeasurementDefinition = {
   key: string;
@@ -61,6 +62,14 @@ export type MeasurementSchema = {
   default_column_labels: CsvColumnLabels;
   available_column_labels: CsvColumnLabels[];
   definitions: MeasurementDefinition[];
+  measurement_status: {
+    values: MeasurementStatus[];
+    estimator_valid: string;
+    invalid: string;
+    review: string;
+    accepted: string;
+    accepted_requires_evidence_rule_version: boolean;
+  };
   exports: Record<string, unknown>;
 };
 
@@ -108,6 +117,10 @@ export type TrackPeakPoint = {
   event_polarity?: string;
   fallback_candidate?: boolean;
   measurement_valid?: boolean;
+  estimator_valid?: boolean;
+  measurement_status?: MeasurementStatus | null;
+  status_reasons?: string[];
+  evidence_rule_version?: string | null;
 };
 
 export type TrackPeakRegression = TrackPeakPoint & {
@@ -156,6 +169,11 @@ export type TrackDetail = {
     num_minima?: number | null;
     mean_amplitude?: number | null;
     frequency_estimate?: { [key: string]: JsonValue } | null;
+    estimator_valid?: boolean | null;
+    measurement_status?: MeasurementStatus | null;
+    status_reasons?: string[];
+    evidence_rule_version?: string | null;
+    frequency_estimator_valid?: boolean | null;
     frequency_valid?: boolean | null;
     frequency_failure_reason?: string | null;
     family_id?: string | null;

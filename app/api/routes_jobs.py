@@ -68,6 +68,7 @@ from ..measurement_schema import (
     profile_csv_columns,
     wave_export_descriptive_keys,
 )
+from ..measurement_status import assess_standard_measurement
 from ..signal.detrend import fit_baseline
 from ..signal.peaks import detect_peaks, detect_peaks_adaptive, ensure_minimum_peaks
 from ..signal.period import (
@@ -1104,6 +1105,7 @@ def get_track_detail(
     sampling_rate = resolve_sampling_rate(config)
 
     frequency_metadata: Optional[Dict[str, Any]] = None
+    standard_measurement_metadata: Optional[Dict[str, Any]] = None
     if analysis_mode == LARGE_WAVE_ANALYSIS_MODE:
         try:
             freq = float(
@@ -1127,6 +1129,10 @@ def get_track_detail(
             max_freq=period_cfg.get("max_freq"),
         )
         frequency_metadata = frequency_estimate.metadata()
+        standard_measurement_metadata = assess_standard_measurement(
+            estimator_valid=frequency_estimate.valid,
+            failure_reason=frequency_estimate.failure_reason,
+        ).metadata()
         stored_frequency_metadata = (
             (track_model.metrics or {}).get("frequency_estimate")
             if track_model is not None and isinstance(track_model.metrics, dict)
@@ -1134,6 +1140,23 @@ def get_track_detail(
         )
         if isinstance(stored_frequency_metadata, dict):
             frequency_metadata = stored_frequency_metadata
+        stored_track_metrics = (
+            track_model.metrics
+            if track_model is not None and isinstance(track_model.metrics, dict)
+            else {}
+        )
+        if stored_track_metrics.get("measurement_status") in {"invalid", "review", "accepted"}:
+            standard_measurement_metadata = {
+                "estimator_valid": bool(
+                    stored_track_metrics.get(
+                        "frequency_estimator_valid",
+                        stored_track_metrics.get("frequency_valid", False),
+                    )
+                ),
+                "measurement_status": stored_track_metrics["measurement_status"],
+                "status_reasons": list(stored_track_metrics.get("status_reasons") or []),
+                "evidence_rule_version": stored_track_metrics.get("evidence_rule_version"),
+            }
         try:
             stored_frequency = float((frequency_metadata or {}).get("value"))
         except (TypeError, ValueError):
@@ -1206,6 +1229,15 @@ def get_track_detail(
                     analysis_mode != STANDARD_ANALYSIS_MODE
                     or ((frequency_metadata or {}).get("valid", False) and not fallback_candidate)
                 )
+                measurement_metadata = (
+                    assess_standard_measurement(
+                        estimator_valid=bool((frequency_metadata or {}).get("valid", False)),
+                        failure_reason=(frequency_metadata or {}).get("failure_reason"),
+                        fallback_candidate=fallback_candidate,
+                    ).metadata()
+                    if analysis_mode == STANDARD_ANALYSIS_MODE
+                    else {}
+                )
                 peak_events.append({
                     "peak_i": peak_i,
                     "event_kind": str(peak_set["event_kind"]),
@@ -1214,6 +1246,7 @@ def get_track_detail(
                     "event_amplitude": float(signal[peak_i]),
                     "fallback_candidate": fallback_candidate,
                     "measurement_valid": measurement_valid,
+                    **measurement_metadata,
                 })
     peak_events.sort(key=lambda event: (int(event["peak_i"]), 0 if event["event_kind"] == "max" else 1))
     peaks_idx = np.asarray([int(event["peak_i"]) for event in peak_events], dtype=int)
@@ -1263,6 +1296,12 @@ def get_track_detail(
             "is_strongest": bool(strongest_peak_idx is not None and int(peak_i) == strongest_peak_idx),
             "fallback_candidate": bool(event.get("fallback_candidate", False)),
             "measurement_valid": bool(event.get("measurement_valid", True)),
+            "estimator_valid": bool(
+                event.get("estimator_valid", event.get("measurement_valid", True))
+            ),
+            "measurement_status": event.get("measurement_status"),
+            "status_reasons": list(event.get("status_reasons") or []),
+            "evidence_rule_version": event.get("evidence_rule_version"),
         }
 
     peak_points = [peak_point(i + 1, event) for i, event in enumerate(peak_events)]
@@ -1355,8 +1394,8 @@ def get_track_detail(
     sine_view = sine_fit[lo : hi + 1] if sine_fit is not None else None
     peaks_in_slice = [int(event["peak_i"]) for event in peak_events if lo <= int(event["peak_i"]) <= hi]
 
-    accepted_peak_events = [event for event in peak_events if bool(event.get("measurement_valid", True))]
-    event_amps = np.asarray([float(event["event_amplitude"]) for event in accepted_peak_events], dtype=float)
+    measured_peak_events = [event for event in peak_events if bool(event.get("measurement_valid", True))]
+    event_amps = np.asarray([float(event["event_amplitude"]) for event in measured_peak_events], dtype=float)
     event_amps = event_amps[np.isfinite(event_amps)]
     if event_amps.size > 0:
         mean_amp = float(event_amps.mean())
@@ -1393,12 +1432,12 @@ def get_track_detail(
         "metrics": {
             "dominant_frequency": freq if math.isfinite(freq) else None,
             "period": period if math.isfinite(period) else None,
-            "num_peaks": int(len(accepted_peak_events)),
+            "num_peaks": int(len(measured_peak_events)),
             "num_peak_candidates": int(len(peak_events)),
             "num_fallback_candidates": int(sum(bool(event.get("fallback_candidate", False)) for event in peak_events)),
             "num_review_candidates": int(sum(not bool(event.get("measurement_valid", True)) for event in peak_events)),
-            "num_maxima": int(sum(event["event_kind"] == "max" for event in accepted_peak_events)),
-            "num_minima": int(sum(event["event_kind"] == "min" for event in accepted_peak_events)),
+            "num_maxima": int(sum(event["event_kind"] == "max" for event in measured_peak_events)),
+            "num_minima": int(sum(event["event_kind"] == "min" for event in measured_peak_events)),
             "event_polarity": (
                 "both"
                 if analysis_mode == LARGE_WAVE_ANALYSIS_MODE
@@ -1408,6 +1447,12 @@ def get_track_detail(
             ),
             "mean_amplitude": mean_amp if math.isfinite(mean_amp) else None,
             "frequency_estimate": frequency_metadata,
+            **(standard_measurement_metadata or {}),
+            "frequency_estimator_valid": (
+                bool((standard_measurement_metadata or {}).get("estimator_valid", False))
+                if analysis_mode == STANDARD_ANALYSIS_MODE
+                else True
+            ),
             "frequency_valid": (
                 bool((frequency_metadata or {}).get("valid", False))
                 if analysis_mode == STANDARD_ANALYSIS_MODE
@@ -1535,6 +1580,12 @@ def export_waves_csv(
             return value
         return metric(row, key or attr)
 
+    def metric_reasons(row: Wave) -> str:
+        value = (row.metrics or {}).get("status_reasons")
+        if isinstance(value, (list, tuple)):
+            return ";".join(str(reason) for reason in value if reason)
+        return "" if value is None else str(value)
+
     def gen():
         buf = io.StringIO()
         w = csv.writer(buf)
@@ -1615,8 +1666,17 @@ def export_waves_csv(
                 metric(r, "track_fit_r2_median"),
                 metric(r, "period_consistency_cv"),
                 metric(r, "frequency_agreement_error"),
-                metric(r, "spectral_snr"),
+                metric(r, "estimated_cycle_count"),
+                metric(
+                    r,
+                    "spectral_peak_to_median_ratio",
+                    metric(r, "spectral_snr"),
+                ),
                 metric(r, "peak_prominence_snr"),
+                metric(r, "measurement_status"),
+                metric_reasons(r),
+                metric(r, "estimator_valid", metric(r, "measurement_valid")),
+                metric(r, "evidence_rule_version"),
                 config_event_polarity,
                 endpoint_link_enabled,
                 endpoint_link_level,

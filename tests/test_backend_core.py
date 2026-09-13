@@ -66,12 +66,14 @@ from app.modules.tracker import CrossingTracker, Track
 from app.models import ArtifactKind, Artifact, JobRead, JobStatus, Track as TrackModel, Wave
 from app.measurement_schema import (
     MEASUREMENT_DEFINITIONS,
+    MEASUREMENT_STATUS_CONTRACT,
     WAVE_EXPORT_FAMILIAR_HEADERS,
     descriptive_ripple_csv,
     measurement_schema_identity,
     profile_csv_columns,
     wave_export_descriptive_keys,
 )
+from app.measurement_status import assess_standard_measurement
 from app.pipeline import PipelineSettings
 from app.ripple_analysis import analyze_ripple_tracks
 from app.ripple_extraction import _Trace, _dedupe_and_extend
@@ -172,6 +174,61 @@ class BackendCoreTests(unittest.TestCase):
         self.assertAlmostEqual(float(estimate.value), 1.0)
         self.assertTrue(estimate.frame_sampling.valid)
 
+    def test_standard_measurement_remains_review_until_evidence_rule_is_calibrated(self) -> None:
+        pending = assess_standard_measurement(estimator_valid=True)
+
+        self.assertTrue(pending.estimator_valid)
+        self.assertEqual(pending.measurement_status, "review")
+        self.assertEqual(pending.status_reasons, ("evidence_rule_not_calibrated",))
+        self.assertIsNone(pending.evidence_rule_version)
+
+        with self.assertRaisesRegex(ValueError, "evidence_rule_version"):
+            assess_standard_measurement(estimator_valid=True, evidence_accepted=True)
+
+        accepted = assess_standard_measurement(
+            estimator_valid=True,
+            evidence_accepted=True,
+            evidence_rule_version="standard-evidence-v1",
+        )
+        self.assertEqual(accepted.measurement_status, "accepted")
+        self.assertEqual(accepted.status_reasons, ())
+
+    def test_standard_track_exposes_estimator_and_evidence_states_separately(self) -> None:
+        frame = np.arange(80, dtype=float)
+        position = 40.0 + 0.1 * frame + 5.0 * np.sin(2.0 * np.pi * frame / 10.0)
+
+        track_row, wave_rows, peak_rows, overlay = process_track_arrays(
+            job_id=uuid4(),
+            track_index=0,
+            track_stem="periodic",
+            sample="synthetic",
+            frame=frame,
+            image_row=frame,
+            position=position,
+            config=_base_config(),
+        )
+
+        self.assertTrue(track_row["metrics"]["frequency_estimator_valid"])
+        self.assertTrue(track_row["metrics"]["frequency_valid"])
+        self.assertEqual(track_row["metrics"]["measurement_status"], "review")
+        self.assertEqual(
+            track_row["metrics"]["status_reasons"],
+            ["evidence_rule_not_calibrated"],
+        )
+        self.assertIsNone(track_row["metrics"]["evidence_rule_version"])
+        self.assertAlmostEqual(track_row["metrics"]["estimated_cycle_count"], 7.9)
+        self.assertEqual(
+            track_row["metrics"]["spectral_peak_to_median_ratio"],
+            track_row["metrics"]["spectral_snr"],
+        )
+        self.assertEqual(overlay["metrics"]["measurement_status"], "review")
+        self.assertGreater(len(wave_rows), 0)
+        self.assertTrue(all(row["metrics"]["estimator_valid"] for row in wave_rows))
+        self.assertTrue(all(row["metrics"]["measurement_status"] == "review" for row in wave_rows))
+        measured_peaks = [row for row in peak_rows if row["metrics"]["measurement_valid"]]
+        self.assertGreater(len(measured_peaks), 0)
+        self.assertTrue(all(row["metrics"]["measurement_status"] == "review" for row in measured_peaks))
+
     def test_standard_frequency_rejects_missing_frames(self) -> None:
         frame = np.concatenate([np.arange(40), np.arange(45, 80)]).astype(float)
         residual = np.sin(2.0 * np.pi * frame / 10.0)
@@ -230,6 +287,9 @@ class BackendCoreTests(unittest.TestCase):
 
         self.assertIsNone(track_row["frequency"])
         self.assertFalse(track_row["metrics"]["frequency_valid"])
+        self.assertFalse(track_row["metrics"]["frequency_estimator_valid"])
+        self.assertEqual(track_row["metrics"]["measurement_status"], "invalid")
+        self.assertEqual(track_row["metrics"]["status_reasons"], ["missing_frames"])
         self.assertEqual(track_row["metrics"]["frequency_failure_reason"], "missing_frames")
         self.assertEqual(track_row["metrics"]["frame_sampling"]["missing_frame_count"], 5)
         self.assertEqual(wave_rows, [])
@@ -254,6 +314,9 @@ class BackendCoreTests(unittest.TestCase):
 
         self.assertIsNone(track_row["frequency"])
         self.assertFalse(track_row["metrics"]["frequency_valid"])
+        self.assertFalse(track_row["metrics"]["frequency_estimator_valid"])
+        self.assertEqual(track_row["metrics"]["measurement_status"], "invalid")
+        self.assertEqual(track_row["metrics"]["status_reasons"], ["no_signal_variation"])
         self.assertEqual(track_row["metrics"]["frequency_failure_reason"], "no_signal_variation")
         self.assertEqual(wave_rows, [])
         self.assertEqual(track_row["metrics"]["num_peaks"], 0)
@@ -265,6 +328,7 @@ class BackendCoreTests(unittest.TestCase):
         self.assertTrue(all(row["metrics"]["fallback_peak"] for row in peak_rows))
         self.assertTrue(all(row["metrics"]["review_candidate"] for row in peak_rows))
         self.assertTrue(all(not row["metrics"]["measurement_valid"] for row in peak_rows))
+        self.assertTrue(all(row["metrics"]["measurement_status"] == "invalid" for row in peak_rows))
         self.assertEqual(overlay["metrics"]["num_peaks"], 0)
         self.assertEqual(len(overlay["peaks"]), candidate_count)
         self.assertTrue(all(peak["review_candidate"] for peak in overlay["peaks"]))
@@ -2788,13 +2852,15 @@ class BackendCoreTests(unittest.TestCase):
     def test_measurement_schema_has_stable_unique_identity(self) -> None:
         identity = measurement_schema_identity()
 
-        self.assertEqual(identity["version"], 1)
+        self.assertEqual(identity["version"], 2)
         self.assertEqual(identity["default_column_labels"], "familiar")
         self.assertEqual(identity["available_column_labels"], ["familiar", "descriptive"])
         self.assertEqual(len(identity["sha256"]), 64)
         self.assertIn("standard_track_spectral_frequency_hz", MEASUREMENT_DEFINITIONS)
         self.assertIn("ripple_intertrack_arrival_rate_hz", MEASUREMENT_DEFINITIONS)
         self.assertIn("large_wave_equivalent_lobe_frequency_hz", MEASUREMENT_DEFINITIONS)
+        self.assertEqual(MEASUREMENT_STATUS_CONTRACT["values"], ["invalid", "review", "accepted"])
+        self.assertTrue(MEASUREMENT_STATUS_CONTRACT["accepted_requires_evidence_rule_version"])
 
     def test_descriptive_wave_columns_remove_only_legacy_aliases(self) -> None:
         familiar_values = list(range(len(WAVE_EXPORT_FAMILIAR_HEADERS)))
@@ -2819,6 +2885,10 @@ class BackendCoreTests(unittest.TestCase):
         self.assertEqual(len(descriptive_result), len(descriptive_headers))
         self.assertIn("large_wave_equivalent_lobe_frequency_hz", descriptive_headers)
         self.assertIn("large_wave_local_recurrence_rate_hz", descriptive_headers)
+        self.assertIn("measurement_status", descriptive_headers)
+        self.assertIn("measurement_status_reasons", descriptive_headers)
+        self.assertIn("track_spectral_peak_to_median_ratio", descriptive_headers)
+        self.assertNotIn("track_spectral_snr", descriptive_headers)
 
     def test_descriptive_ripple_csv_uses_one_precise_column_per_value(self) -> None:
         familiar = io.StringIO()

@@ -12,9 +12,18 @@ from .analysis_mode import LARGE_WAVE_ANALYSIS_MODE
 
 ColumnLabelProfile = Literal["familiar", "descriptive"]
 
-MEASUREMENT_SCHEMA_VERSION = 1
+MEASUREMENT_SCHEMA_VERSION = 2
 DEFAULT_COLUMN_LABEL_PROFILE: ColumnLabelProfile = "familiar"
 COLUMN_LABEL_PROFILES: Tuple[ColumnLabelProfile, ...] = ("familiar", "descriptive")
+
+MEASUREMENT_STATUS_CONTRACT = {
+    "values": ["invalid", "review", "accepted"],
+    "estimator_valid": "Whether the numerical calculation is admissible under its stated assumptions.",
+    "invalid": "The numerical calculation is not admissible; status_reasons identifies why.",
+    "review": "The value is available for review but has not passed a calibrated scientific-evidence rule.",
+    "accepted": "The value passed the named evidence_rule_version.",
+    "accepted_requires_evidence_rule_version": True,
+}
 
 
 @dataclass(frozen=True)
@@ -43,8 +52,16 @@ _DEFINITIONS = (
         coordinate_space="time in seconds; position in processed-image pixels",
         aggregation_level="track",
         modes=("standard",),
-        validity="Valid when the spectral estimator returns a finite positive frequency within the configured range.",
-        quality_fields=("spectral_snr", "frequency_agreement_error"),
+        validity=(
+            "Computable when frame samples are finite, strictly increasing, unit-spaced, and the spectral "
+            "estimator returns a finite positive frequency within the configured range. Scientific acceptance "
+            "is recorded separately in measurement_status."
+        ),
+        quality_fields=(
+            "estimated_cycle_count",
+            "spectral_peak_to_median_ratio",
+            "frequency_agreement_error",
+        ),
     ),
     MeasurementDefinition(
         key="standard_track_spectral_period_s",
@@ -56,8 +73,15 @@ _DEFINITIONS = (
         coordinate_space="time in seconds",
         aggregation_level="track",
         modes=("standard",),
-        validity="Valid when the corresponding spectral frequency is finite and positive.",
-        quality_fields=("spectral_snr", "frequency_agreement_error"),
+        validity=(
+            "Computable when the corresponding spectral frequency estimator is valid. Scientific acceptance "
+            "is recorded separately in measurement_status."
+        ),
+        quality_fields=(
+            "estimated_cycle_count",
+            "spectral_peak_to_median_ratio",
+            "frequency_agreement_error",
+        ),
     ),
     MeasurementDefinition(
         key="standard_event_boundary_period_s",
@@ -239,6 +263,7 @@ def _canonical_definition_payload() -> Dict[str, Any]:
     return {
         "version": MEASUREMENT_SCHEMA_VERSION,
         "definitions": [asdict(definition) for definition in _DEFINITIONS],
+        "measurement_status": MEASUREMENT_STATUS_CONTRACT,
         "exports": measurement_export_contract(),
     }
 
@@ -266,6 +291,7 @@ def measurement_schema_payload() -> Dict[str, Any]:
     return {
         **measurement_schema_identity(),
         "definitions": [asdict(definition) for definition in _DEFINITIONS],
+        "measurement_status": MEASUREMENT_STATUS_CONTRACT,
         "exports": measurement_export_contract(),
     }
 
@@ -286,7 +312,9 @@ WAVE_EXPORT_FAMILIAR_HEADERS = (
     "Fit MAE (px)", "Fit Points", "Residual Fit Error (VNMSE)", "Residual Fit R2",
     "Residual Fit RMSE (px)", "Raw Fit Error (VNMSE)", "Raw Fit R2", "Raw Fit RMSE (px)",
     "Track Fit Error Median", "Track Fit R2 Median", "Period Consistency CV",
-    "Frequency Agreement Error", "Spectral SNR", "Peak Prominence SNR",
+    "Frequency Agreement Error", "Estimated Cycle Count", "Spectral Peak/Median Ratio",
+    "Peak Prominence SNR",
+    "Measurement Status", "Status Reasons", "Estimator Valid", "Evidence Rule Version",
     "Config Event Polarity", "Endpoint Linking Enabled", "Endpoint Linking Level",
     "Fit Start Frame Raw", "Fit End Frame Raw", "Fit Duration (frames)",
     "Fit Duration (seconds)", "Period Asymmetry", "Period Boundary Error (fraction)",
@@ -313,7 +341,10 @@ _WAVE_EXPORT_BASE_KEYS = (
     "residual_fit_error_vnmse", "residual_fit_r2", "residual_fit_rmse_px",
     "raw_fit_error_vnmse", "raw_fit_r2", "raw_fit_rmse_px", "track_fit_error_median",
     "track_fit_r2_median", "track_period_consistency_cv", "track_frequency_agreement_error",
-    "track_spectral_snr", "event_peak_prominence_snr", "configured_event_polarity",
+    "track_estimated_cycle_count", "track_spectral_peak_to_median_ratio",
+    "event_peak_prominence_snr",
+    "measurement_status", "measurement_status_reasons", "estimator_valid", "evidence_rule_version",
+    "configured_event_polarity",
     "endpoint_linking_enabled", "endpoint_linking_level", "fit_start_frame",
     "fit_end_frame", "fit_duration_frames", "fit_duration_s", "period_asymmetry",
     "period_boundary_error_fraction", "period_estimate_valid", "event_recurrence_interval_frames",

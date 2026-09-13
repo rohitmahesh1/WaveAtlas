@@ -1,6 +1,7 @@
 // src/OverlayCanvas.tsx
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { MouseEvent, PointerEvent } from "react";
+import type { MeasurementStatus } from "./api";
 
 export const UNASSIGNED_FAMILY_KEY = "__unassigned__";
 
@@ -16,6 +17,9 @@ export type OverlayTrackEvent = {
     fallback_candidate?: boolean;
     review_candidate?: boolean;
     measurement_valid?: boolean;
+    estimator_valid?: boolean;
+    measurement_status?: MeasurementStatus | null;
+    status_reasons?: string[];
   }[];
   metrics?: {
     mean_amplitude?: number | null;
@@ -25,6 +29,11 @@ export type OverlayTrackEvent = {
     num_peak_candidates?: number | null;
     num_fallback_candidates?: number | null;
     num_review_candidates?: number | null;
+    estimator_valid?: boolean | null;
+    measurement_status?: MeasurementStatus | null;
+    status_reasons?: string[];
+    evidence_rule_version?: string | null;
+    frequency_estimator_valid?: boolean | null;
     frequency_valid?: boolean | null;
     frequency_failure_reason?: string | null;
     frame_sampling?: {
@@ -54,6 +63,11 @@ export type OverlayTrackEvent = {
     frequency_hz?: number | null;
     ripple_frequency_hz?: number | null;
     frequency_method?: string | null;
+    estimated_cycle_count?: number | null;
+    spectral_peak_to_median_ratio?: number | null;
+    frequency_agreement_error?: number | null;
+    period_consistency_cv?: number | null;
+    peak_prominence_snr?: number | null;
     large_wave_recurrence_frequency_hz?: number | null;
   };
 };

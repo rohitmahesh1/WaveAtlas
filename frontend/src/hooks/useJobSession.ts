@@ -15,7 +15,7 @@ import {
   apiUrl,
   isApiError,
 } from "../api";
-import type { ArtifactView } from "../api";
+import type { ArtifactView, MeasurementStatus } from "../api";
 import type { HeatmapValues, OverlayTrackEvent } from "../OverlayCanvas";
 import type { LogEntry } from "../types";
 import { formatEta } from "../utils/format";
@@ -67,6 +67,14 @@ function finiteNumber(value: unknown): number | null {
 
 function optionalBoolean(value: unknown): boolean | null {
   return typeof value === "boolean" ? value : null;
+}
+
+function measurementStatus(value: unknown): MeasurementStatus | null {
+  return value === "invalid" || value === "review" || value === "accepted" ? value : null;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
 const SESSION_KEY = "waveatlas:lastSession";
@@ -181,6 +189,9 @@ function normalizeOverlayTrack(payload: unknown): OverlayTrackEvent | null {
         const fallbackCandidate = optionalBoolean(peak.fallback_candidate);
         const reviewCandidate = optionalBoolean(peak.review_candidate);
         const measurementValid = optionalBoolean(peak.measurement_valid);
+        const estimatorValid = optionalBoolean(peak.estimator_valid);
+        const status = measurementStatus(peak.measurement_status);
+        const statusReasons = stringArray(peak.status_reasons);
         return [{
           x,
           y,
@@ -188,6 +199,9 @@ function normalizeOverlayTrack(payload: unknown): OverlayTrackEvent | null {
           ...(fallbackCandidate != null ? { fallback_candidate: fallbackCandidate } : {}),
           ...(reviewCandidate != null ? { review_candidate: reviewCandidate } : {}),
           ...(measurementValid != null ? { measurement_valid: measurementValid } : {}),
+          ...(estimatorValid != null ? { estimator_valid: estimatorValid } : {}),
+          ...(status != null ? { measurement_status: status } : {}),
+          ...(statusReasons.length ? { status_reasons: statusReasons } : {}),
         }];
       })
     : [];
@@ -230,6 +244,13 @@ function normalizeOverlayTrack(payload: unknown): OverlayTrackEvent | null {
       num_peak_candidates: finiteNumber(payloadMetrics?.num_peak_candidates) ?? peaks.length,
       num_fallback_candidates: finiteNumber(payloadMetrics?.num_fallback_candidates),
       num_review_candidates: finiteNumber(payloadMetrics?.num_review_candidates),
+      estimator_valid: optionalBoolean(payloadMetrics?.estimator_valid),
+      measurement_status: measurementStatus(payloadMetrics?.measurement_status),
+      status_reasons: stringArray(payloadMetrics?.status_reasons),
+      evidence_rule_version: typeof payloadMetrics?.evidence_rule_version === "string"
+        ? payloadMetrics.evidence_rule_version
+        : null,
+      frequency_estimator_valid: optionalBoolean(payloadMetrics?.frequency_estimator_valid),
       frequency_valid: optionalBoolean(payloadMetrics?.frequency_valid),
       frequency_failure_reason: typeof payloadMetrics?.frequency_failure_reason === "string"
         ? payloadMetrics.frequency_failure_reason
@@ -237,6 +258,11 @@ function normalizeOverlayTrack(payload: unknown): OverlayTrackEvent | null {
       frequency_method: typeof payloadMetrics?.frequency_method === "string"
         ? payloadMetrics.frequency_method
         : null,
+      estimated_cycle_count: finiteNumber(payloadMetrics?.estimated_cycle_count),
+      spectral_peak_to_median_ratio: finiteNumber(payloadMetrics?.spectral_peak_to_median_ratio),
+      frequency_agreement_error: finiteNumber(payloadMetrics?.frequency_agreement_error),
+      period_consistency_cv: finiteNumber(payloadMetrics?.period_consistency_cv),
+      peak_prominence_snr: finiteNumber(payloadMetrics?.peak_prominence_snr),
       frame_sampling: frameSampling ? {
         valid: optionalBoolean(frameSampling.valid) ?? undefined,
         failure_reason: typeof frameSampling.failure_reason === "string" ? frameSampling.failure_reason : null,
