@@ -15,7 +15,17 @@ import { useFilters } from "../hooks/useFilters";
 import { useTrackDetail } from "../hooks/useTrackDetail";
 import { useJobHistory } from "../hooks/useJobHistory";
 import { PastRunsPanel } from "../components/PastRunsPanel";
-import { cancelJob, deleteJob, jobRippleCsvUrl, jobWavesCsvUrl, resumeJob, updateJobName } from "../api";
+import {
+  cancelJob,
+  deleteJob,
+  getMeasurementSchema,
+  jobRippleCsvUrl,
+  jobWavesCsvUrl,
+  resumeJob,
+  updateJobName,
+  type CsvColumnLabels,
+  type MeasurementDefinition,
+} from "../api";
 import { useImageProcessingPrompt } from "../hooks/useImageProcessingPrompt";
 import { useSharedJobSession } from "../hooks/useSharedJobSession";
 import { downloadCsv, downloadFromUrl, downloadJson } from "../utils/download";
@@ -154,6 +164,13 @@ function familyFilterValue(familyId: string) {
   return familyId === UNASSIGNED_FAMILY_KEY ? "" : familyId;
 }
 
+function measurementTooltip(definition: MeasurementDefinition) {
+  const quality = definition.quality_fields.length
+    ? ` Quality fields: ${definition.quality_fields.join(", ")}.`
+    : "";
+  return `${definition.quantity} (${definition.unit}). ${definition.operational_definition} ${definition.validity}${quality}`;
+}
+
 export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }) {
   const { onViewAllRuns } = props;
   const [file, setFile] = useState<File | null>(null);
@@ -177,6 +194,7 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
   const defaultOverlayColor = "#008c5a";
   const [overlayColor, setOverlayColor] = useState<string>(defaultOverlayColor);
   const [viewerProjection, setViewerProjection] = useState<OverlayProjection | null>(null);
+  const [measurementHelp, setMeasurementHelp] = useState<Record<string, string>>({});
 
   const {
     jobId,
@@ -197,6 +215,28 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
     loadJob,
     clearSession,
   } = useSharedJobSession();
+
+  useEffect(() => {
+    let active = true;
+    getMeasurementSchema()
+      .then((schema) => {
+        if (!active) return;
+        setMeasurementHelp(Object.fromEntries(
+          schema.definitions.map((definition) => [definition.key, measurementTooltip(definition)])
+        ));
+      })
+      .catch(() => {
+        // Measurement labels remain usable if help metadata cannot be loaded.
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const getMeasurementTooltip = useCallback(
+    (key: string) => measurementHelp[key],
+    [measurementHelp]
+  );
 
   const { jobs, loading: jobsLoading, error: jobsError, refresh: refreshJobs } = useJobHistory();
   const {
@@ -382,18 +422,27 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
     return debugOverlays.find((o) => o.label === activeDebugLabel)?.url ?? null;
   }, [debugOverlays, activeDebugLabel]);
 
-  const downloadWaves = async (id: string) => {
+  const downloadWaves = async (id: string, columns: CsvColumnLabels = "familiar") => {
     try {
-      await downloadFromUrl(jobWavesCsvUrl(id), `${runStem(id)}_waves.csv`);
+      const suffix = columns === "descriptive" ? "_descriptive" : "";
+      await downloadFromUrl(jobWavesCsvUrl(id, columns), `${runStem(id)}_waves${suffix}.csv`);
     } catch {
       window.alert("Could not download waves CSV for this run.");
     }
   };
 
-  const downloadRipple = async (id: string, exportName: "tracks" | "intervals" | "families") => {
+  const downloadRipple = async (
+    id: string,
+    exportName: "tracks" | "intervals" | "families",
+    columns: CsvColumnLabels = "familiar"
+  ) => {
     const exportInfo = RIPPLE_EXPORT_NAMES[exportName];
     try {
-      await downloadFromUrl(jobRippleCsvUrl(id, exportName), `${runStem(id)}_${exportInfo.stem}.csv`);
+      const suffix = columns === "descriptive" ? "_descriptive" : "";
+      await downloadFromUrl(
+        jobRippleCsvUrl(id, exportName, columns),
+        `${runStem(id)}_${exportInfo.stem}${suffix}.csv`
+      );
     } catch {
       window.alert(`Could not download ${exportInfo.label} CSV for this run.`);
     }
@@ -653,8 +702,10 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
             onCancel={cancelCurrentJob}
             cancelDisabled={!jobId || ["completed", "failed", "cancelled"].includes(status)}
             onDownloadWaves={jobId && analysisMode !== "ripple_family" ? () => downloadWaves(jobId) : undefined}
+            onDownloadWavesDescriptive={jobId && analysisMode !== "ripple_family" ? () => downloadWaves(jobId, "descriptive") : undefined}
             onDownloadRippleTracks={jobId && analysisMode === "ripple_family" ? () => downloadRipple(jobId, "tracks") : undefined}
             onDownloadRippleIntervals={jobId && analysisMode === "ripple_family" ? () => downloadRipple(jobId, "intervals") : undefined}
+            onDownloadRippleIntervalsDescriptive={jobId && analysisMode === "ripple_family" ? () => downloadRipple(jobId, "intervals", "descriptive") : undefined}
             onDownloadRippleFamilies={jobId && analysisMode === "ripple_family" ? () => downloadRipple(jobId, "families") : undefined}
             onDownloadHeatmap={downloadHeatmap}
             onDownloadOriginalImage={originalImageUrl ? downloadOriginalImage : undefined}
@@ -702,6 +753,7 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
               onDownloadTrackDetail={downloadSelectedTrack}
               onIsolateFamily={isolateFamily}
               onClearFamilyIsolation={clearFamilyIsolation}
+              measurementTooltip={getMeasurementTooltip}
             />
           ) : null}
 
@@ -779,6 +831,7 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
             analysisMode={analysisMode}
             onDownloadTracks={downloadVisibleTracks}
             downloadDisabled={filteredTracks.length === 0}
+            measurementTooltip={getMeasurementTooltip}
           />
 
           <ActivityPanel activity={activity} />

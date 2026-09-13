@@ -113,6 +113,15 @@ export default function AdvancedConfigPage() {
     }
   };
 
+  const downloadWavesDescriptive = async () => {
+    if (!jobId) return;
+    try {
+      await downloadFromUrl(jobWavesCsvUrl(jobId, "descriptive"), `${runStem}_waves_descriptive.csv`);
+    } catch {
+      window.alert("Could not download the descriptive-column CSV for this run.");
+    }
+  };
+
   const downloadHeatmap = async () => {
     if (!baseImageUrl) return;
     try {
@@ -207,6 +216,7 @@ export default function AdvancedConfigPage() {
             onCancel={cancelCurrentJob}
             cancelDisabled={!jobId || ["completed", "failed", "cancelled"].includes(status)}
             onDownloadWaves={jobId ? downloadWaves : undefined}
+            onDownloadWavesDescriptive={jobId ? downloadWavesDescriptive : undefined}
             onDownloadHeatmap={downloadHeatmap}
             onDownloadOriginalImage={originalImageUrl ? downloadOriginalImage : undefined}
             heatmapDownloadDisabled={!baseImageUrl}

@@ -39,6 +39,30 @@ async function throwApiError(response: Response): Promise<never> {
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 export type JobProgress = Record<string, JsonValue>;
+export type CsvColumnLabels = "familiar" | "descriptive";
+
+export type MeasurementDefinition = {
+  key: string;
+  familiar_label: string;
+  quantity: string;
+  operational_definition: string;
+  algorithm: string;
+  unit: string;
+  coordinate_space: string;
+  aggregation_level: string;
+  modes: string[];
+  validity: string;
+  quality_fields: string[];
+};
+
+export type MeasurementSchema = {
+  version: number;
+  sha256: string;
+  default_column_labels: CsvColumnLabels;
+  available_column_labels: CsvColumnLabels[];
+  definitions: MeasurementDefinition[];
+  exports: Record<string, unknown>;
+};
 
 export type Job = { id: string; status: string; progress: JobProgress | null };
 export type JobRead = {
@@ -199,12 +223,27 @@ export async function getJob(jobId: string): Promise<JobRead> {
   return res.json();
 }
 
-export function jobWavesCsvUrl(jobId: string) {
-  return apiUrl(`/api/jobs/${jobId}/waves.csv`);
+export async function getMeasurementSchema(): Promise<MeasurementSchema> {
+  const res = await fetch(`${API_BASE}/api/measurement-schema`, {
+    method: "GET",
+    credentials: "include",
+  });
+  if (!res.ok) await throwApiError(res);
+  return res.json();
 }
 
-export function jobRippleCsvUrl(jobId: string, exportName: "tracks" | "intervals" | "families") {
-  return apiUrl(`/api/jobs/${jobId}/ripple/${exportName}.csv`);
+export function jobWavesCsvUrl(jobId: string, columns: CsvColumnLabels = "familiar") {
+  const suffix = columns === "familiar" ? "" : `?columns=${columns}`;
+  return apiUrl(`/api/jobs/${jobId}/waves.csv${suffix}`);
+}
+
+export function jobRippleCsvUrl(
+  jobId: string,
+  exportName: "tracks" | "intervals" | "families",
+  columns: CsvColumnLabels = "familiar"
+) {
+  const suffix = columns === "familiar" ? "" : `?columns=${columns}`;
+  return apiUrl(`/api/jobs/${jobId}/ripple/${exportName}.csv${suffix}`);
 }
 
 export async function cancelJob(jobId: string): Promise<JobRead> {

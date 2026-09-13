@@ -6,7 +6,7 @@ import math
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Literal, Optional
 from uuid import UUID
 
 import yaml
@@ -55,6 +55,14 @@ from ..large_wave_fit import (
     fit_large_wave,
     large_wave_basin_window,
 )
+from ..measurement_schema import (
+    MEASUREMENT_SCHEMA_VERSION,
+    WAVE_EXPORT_FAMILIAR_HEADERS,
+    descriptive_ripple_csv,
+    measurement_schema_payload,
+    profile_csv_columns,
+    wave_export_descriptive_keys,
+)
 from ..signal.detrend import fit_baseline
 from ..signal.peaks import detect_peaks, detect_peaks_adaptive, ensure_minimum_peaks
 from ..signal.period import estimate_dominant_frequency, frequency_to_period, resolve_positive_frequency
@@ -71,6 +79,11 @@ from .deps import get_artifact_store, get_db_session, get_owner_session_id
 
 
 router = APIRouter(tags=["jobs"])
+
+
+@router.get("/measurement-schema")
+def get_measurement_schema() -> Dict[str, Any]:
+    return measurement_schema_payload()
 
 
 # -----------------------------
@@ -1352,6 +1365,7 @@ def export_ripple_csv(
     job_id: UUID,
     export_name: str,
     response: Response,
+    columns: Literal["familiar", "descriptive"] = Query("familiar"),
     owner_session_id: UUID = Depends(get_owner_session_id),
     session: Session = Depends(get_db_session),
     artifact_store: ArtifactStore = Depends(get_artifact_store),
@@ -1374,12 +1388,24 @@ def export_ripple_csv(
     if artifact is None:
         raise HTTPException(status_code=404, detail=f"Ripple {export_name} export is not available")
     data = artifact_store.get_bytes(artifact.blob_path)
+    if columns == "descriptive":
+        try:
+            data = descriptive_ripple_csv(data, export_name)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     filename = ((artifact.meta or {}).get("filename") if isinstance(artifact.meta, dict) else None) or {
         "tracks": "tracks.csv",
         "intervals": "waves.csv",
         "families": "families.csv",
     }[export_name.strip().lower()]
-    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    if columns == "descriptive":
+        stem, suffix = os.path.splitext(str(filename))
+        filename = f"{stem}_descriptive{suffix or '.csv'}"
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "X-WaveAtlas-Measurement-Schema": str(MEASUREMENT_SCHEMA_VERSION),
+        "X-WaveAtlas-Column-Labels": columns,
+    }
     return Response(content=data, media_type="text/csv", headers=headers)
 
 
@@ -1387,6 +1413,7 @@ def export_ripple_csv(
 def export_waves_csv(
     job_id: UUID,
     response: Response,
+    columns: Literal["familiar", "descriptive"] = Query("familiar"),
     owner_session_id: UUID = Depends(get_owner_session_id),
     session: Session = Depends(get_db_session),
 ) -> StreamingResponse:
@@ -1404,82 +1431,14 @@ def export_waves_csv(
     q = select(Wave).where(Wave.job_id == job_id).order_by(Wave.created_at.asc())
     rows = session.exec(q).all()
 
-    headers = [
-        "wave_id",
-        "track_id",
-        "wave_index",
-        "Frame position 1 (y-axis)",
-        "Frame position 2 (y-axis)",
-        "Period In Frames (Frame 1- Frame 2)",
-        "Period in Seconds",
-        "Frequency (Hertz)",
-        "Period Source",
-        "Pixel Position 1 (x-axis)",
-        "Pixel Position 2 (x-axis)",
-        "Amplitude (Pixels)",
-        "Signed Amplitude (Pixels)",
-        "Position 1 (x-axis)",
-        "Position 2 (x-axis)",
-        "Frame 1 (y-axis)",
-        "Frame 2 (y-axis)",
-        "Frame 1 (seconds)",
-        "Frame 2 (seconds)",
-        "Seconds 2 - Seconds 1",
-        "Position2 -Position 1",
-        "Velocity (pixels/sec)",
-        "Frequency (Hz)",
-        "Wavelength (Pixels)",
-        "Peak Frame (y-axis)",
-        "Peak Position (x-axis)",
-        "Event Kind",
-        "Event Polarity",
-        "Event Value",
-        "Peak Value Original",
-        "Fit Target",
-        "Compare Fit Targets",
-        "Peak Frame Raw",
-        "Peak Position Raw",
-        "Frame 1 Raw",
-        "Frame 2 Raw",
-        "Fit Error (VNMSE)",
-        "Fit Passes Peak",
-        "Fit R2",
-        "Fit RMSE (px)",
-        "Fit NRMSE",
-        "Fit MAE (px)",
-        "Fit Points",
-        "Residual Fit Error (VNMSE)",
-        "Residual Fit R2",
-        "Residual Fit RMSE (px)",
-        "Raw Fit Error (VNMSE)",
-        "Raw Fit R2",
-        "Raw Fit RMSE (px)",
-        "Track Fit Error Median",
-        "Track Fit R2 Median",
-        "Period Consistency CV",
-        "Frequency Agreement Error",
-        "Spectral SNR",
-        "Peak Prominence SNR",
-        "Config Event Polarity",
-        "Endpoint Linking Enabled",
-        "Endpoint Linking Level",
-        "Fit Start Frame Raw",
-        "Fit End Frame Raw",
-        "Fit Duration (frames)",
-        "Fit Duration (seconds)",
-        "Period Asymmetry",
-        "Period Boundary Error (fraction)",
-        "Period Estimate Valid",
-        "Recurrence Period (frames)",
-        "Recurrence Period (seconds)",
-        "Recurrence Frequency (Hz)",
-        "Wave Type",
-        "Type Score",
-        "Detrend Method",
-        "Detrend Fallback Used",
-        "Detrend Fallback Reason",
-        "Detrend Inlier Fraction",
-    ]
+    familiar_headers = WAVE_EXPORT_FAMILIAR_HEADERS
+    descriptive_headers = wave_export_descriptive_keys(analysis_mode)
+    headers, _ = profile_csv_columns(
+        familiar_headers,
+        descriptive_headers,
+        [None] * len(familiar_headers),
+        columns,
+    )
 
     def metric(row: Wave, key: str, default=None):
         metrics = row.metrics or {}
@@ -1518,7 +1477,7 @@ def export_waves_csv(
             period_source = metric(r, "period_source")
             if period_source == "" and analysis_mode != LARGE_WAVE_ANALYSIS_MODE:
                 period_source = "sine_fit"
-            w.writerow([
+            familiar_values = [
                 r.id,
                 r.track_id or "",
                 r.wave_index,
@@ -1593,9 +1552,23 @@ def export_waves_csv(
                 metric(r, "detrend_fallback_used"),
                 metric(r, "detrend_fallback_reason"),
                 metric(r, "detrend_inlier_fraction"),
-            ])
+            ]
+            _, values = profile_csv_columns(
+                familiar_headers,
+                descriptive_headers,
+                familiar_values,
+                columns,
+            )
+            w.writerow(values)
             yield buf.getvalue()
             buf.seek(0)
             buf.truncate(0)
 
-    return StreamingResponse(gen(), media_type="text/csv")
+    return StreamingResponse(
+        gen(),
+        media_type="text/csv",
+        headers={
+            "X-WaveAtlas-Measurement-Schema": str(MEASUREMENT_SCHEMA_VERSION),
+            "X-WaveAtlas-Column-Labels": columns,
+        },
+    )

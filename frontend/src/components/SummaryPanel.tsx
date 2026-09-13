@@ -6,9 +6,15 @@ export function SummaryPanel(props: {
   analysisMode?: AnalysisMode;
   onDownloadTracks?: () => void;
   downloadDisabled?: boolean;
+  measurementTooltip?: (key: string) => string | undefined;
 }) {
-  const { stats, analysisMode = "standard", onDownloadTracks, downloadDisabled } = props;
+  const { stats, analysisMode = "standard", onDownloadTracks, downloadDisabled, measurementTooltip } = props;
   const rippleMode = analysisMode === "ripple_family";
+  const frequencyKey = rippleMode
+    ? "ripple_track_median_neighbor_arrival_rate_hz"
+    : analysisMode === "large_wave"
+      ? "large_wave_equivalent_lobe_frequency_hz"
+      : "standard_track_spectral_frequency_hz";
 
   return (
     <section className="panel">
@@ -56,7 +62,7 @@ export function SummaryPanel(props: {
             </div>
           </>
         )}
-        <div>
+        <div title={measurementTooltip?.(frequencyKey)}>
           Avg frequency
           <div className="meta-value">{stats.avgFrequency != null ? stats.avgFrequency.toFixed(2) : "—"}</div>
         </div>
