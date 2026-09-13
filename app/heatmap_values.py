@@ -7,13 +7,31 @@ import cv2
 import numpy as np
 
 
+def read_cv_image(path: Path, flags: int) -> Optional[np.ndarray]:
+    """Read an image without OpenCV's Windows Unicode-path limitation."""
+    try:
+        encoded = np.frombuffer(Path(path).read_bytes(), dtype=np.uint8)
+    except OSError:
+        return None
+    return cv2.imdecode(encoded, flags)
+
+
+def write_cv_image(path: Path, image: np.ndarray) -> None:
+    """Write an image without OpenCV's Windows Unicode-path limitation."""
+    path = Path(path)
+    success, encoded = cv2.imencode(path.suffix or ".png", image)
+    if not success:
+        raise RuntimeError(f"Unable to encode image: {path}")
+    path.write_bytes(encoded.tobytes())
+
+
 def load_heatmap_values(
     *,
     heatmap_path: Path,
     value_bytes: Optional[bytes],
     value_meta: Dict[str, Any],
 ) -> Tuple[np.ndarray, str]:
-    image = cv2.imread(str(heatmap_path), cv2.IMREAD_GRAYSCALE)
+    image = read_cv_image(heatmap_path, cv2.IMREAD_GRAYSCALE)
     if image is None:
         raise RuntimeError(f"Unable to read heatmap image: {heatmap_path}")
     if value_bytes is None:

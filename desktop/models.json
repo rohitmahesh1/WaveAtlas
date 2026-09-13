@@ -1,0 +1,10 @@
+{
+  "repository": "rohitmahesh1/WaveAtlas",
+  "release": "v1.0.0",
+  "files": {
+    "bi_seg.onnx": "a10627d6029b0003d927f4a99d3f568624a1f1a7cbc79f06c7e8fae95c44f225",
+    "classifier.onnx": "f32da29603ff52a9d987688731b8286d71e5fc1be1a43e22bda310f5716388b9",
+    "decision.onnx": "c0029f6c16b12171de3927e1fc2b2688d65f824bfacf4ec0b4472501edb108e5",
+    "uni_seg.onnx": "c27234c8f52d11eb9ab85d0f7c7b0d208e95e5ba7a85ca0cc7edc6bbb8e27b01"
+  }
+}

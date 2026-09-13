@@ -11,10 +11,26 @@ from fastapi.staticfiles import StaticFiles
 from .router import api_router
 
 
-def create_app() -> FastAPI:
+def create_app(*, desktop=None) -> FastAPI:
     app = FastAPI(title="ML Webapp Backend")
+    app.state.desktop = desktop
 
-    _add_cors(app)
+    if desktop is None:
+        _add_cors(app)
+    else:
+        from ..desktop.security import DesktopAccess
+        app.add_middleware(DesktopAccess, runtime=desktop)
+
+    @app.get("/api/runtime")
+    def runtime_info() -> dict:
+        return {"mode": "desktop" if desktop else "hosted", "version": desktop.version if desktop else None,
+                "upload_transport": "gcs" if desktop is None and os.getenv("ARTIFACT_STORE", "local") == "gcs" else "local",
+                "max_active_jobs": 1 if desktop else None}
+
+    if desktop is not None:
+        @app.get("/api/desktop/status")
+        def desktop_status() -> dict:
+            return desktop.status()
 
     @app.get("/health", tags=["health"])
     def health() -> dict[str, str]:

@@ -42,7 +42,7 @@ from ..models import (
     Track,
     Wave,
 )
-from ..pipeline import PipelineSettings, run_job
+from ..pipeline import PipelineSettings
 from ..analysis_mode import LARGE_WAVE_ANALYSIS_MODE, RIPPLE_ANALYSIS_MODE, resolve_analysis_mode
 from ..time_utils import utc_now_iso
 from ..extract_core import (
@@ -143,7 +143,7 @@ def _pipeline_config_from_env() -> Dict[str, Any]:
     p = _pipeline_config_path()
     if not p.exists():
         raise HTTPException(status_code=500, detail=f"Pipeline config not found: {p}")
-    data = yaml.safe_load(p.read_text())
+    data = yaml.safe_load(p.read_text(encoding="utf-8"))
     if data is None:
         return {}
     if not isinstance(data, dict):
@@ -678,7 +678,7 @@ def get_default_config_text() -> Response:
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"Config not found: {path}")
     try:
-        raw = path.read_text()
+        raw = path.read_text(encoding="utf-8")
         parsed = yaml.safe_load(raw)
         if parsed is not None and not isinstance(parsed, dict):
             raise HTTPException(status_code=500, detail="Default config must be a YAML mapping")
@@ -694,7 +694,7 @@ def get_config_docs() -> Response:
     path = _config_docs_path()
     if not path.exists():
         raise HTTPException(status_code=404, detail="Config docs not found")
-    return Response(content=path.read_text(), media_type="text/markdown")
+    return Response(content=path.read_text(encoding="utf-8"), media_type="text/markdown")
 
 
 @router.post("/config/validate")
@@ -895,6 +895,7 @@ async def upload_table(
 @router.post("/jobs/{job_id}/start", response_model=JobRead)
 def start_job(
     job_id: UUID,
+    request: Request,
     background: BackgroundTasks,
     response: Response,
     owner_session_id: UUID = Depends(get_owner_session_id),
@@ -911,28 +912,17 @@ def start_job(
     settings = _pipeline_settings_from_env()
     config = _effective_pipeline_config(job)
 
-    job, claimed = store.claim_start(job_id, config=config)
-    if not claimed:
-        return _job_read_with_filename(session, job)
-
-    def _run() -> None:
-        with Session(engine) as bg_session:
-            bg_store = JobStore(session=bg_session)
-            run_job(
-                job_id,
-                job_store=bg_store,
-                artifact_store=artifact_store,
-                config=config,
-                settings=settings,
-            )
-
-    background.add_task(_run)
+    from .job_execution import schedule_job
+    job = schedule_job(store=store, job=job, config=config, settings=settings,
+                       artifacts=artifact_store, background=background, engine=engine,
+                       desktop=getattr(request.app.state, "desktop", None))
     return _job_read_with_filename(session, job)
 
 
 @router.post("/jobs/{job_id}/resume", response_model=JobRead)
 def resume_job(
     job_id: UUID,
+    request: Request,
     background: BackgroundTasks,
     response: Response,
     owner_session_id: UUID = Depends(get_owner_session_id),
@@ -949,23 +939,10 @@ def resume_job(
     settings = _pipeline_settings_from_env()
     config = _effective_pipeline_config(job)
 
-    job, claimed = store.claim_resume(job_id, config=config)
-    if not claimed:
-        return _job_read_with_filename(session, job)
-
-    def _run() -> None:
-        with Session(engine) as bg_session:
-            bg_store = JobStore(session=bg_session)
-            run_job(
-                job_id,
-                job_store=bg_store,
-                artifact_store=artifact_store,
-                config=config,
-                settings=settings,
-                resume=True,
-            )
-
-    background.add_task(_run)
+    from .job_execution import schedule_job
+    job = schedule_job(store=store, job=job, config=config, settings=settings,
+                       artifacts=artifact_store, background=background, engine=engine,
+                       desktop=getattr(request.app.state, "desktop", None), resume=True)
     return _job_read_with_filename(session, job)
 
 

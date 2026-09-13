@@ -34,6 +34,9 @@ def get_owner_session_id(request: Request, response: Response) -> UUID:
     """
     Ensures a stable cookie-backed session id exists.
     """
+    desktop = getattr(request.app.state, "desktop", None)
+    if desktop is not None:
+        return desktop.owner
     raw = request.cookies.get(SESSION_COOKIE_NAME)
     sid: UUID
     try:
@@ -51,6 +54,9 @@ def get_owner_session_id_ws(request: Request) -> UUID:
     """
     WebSocket connections don't have a Response to set cookies; require an existing cookie.
     """
+    desktop = getattr(request.app.state, "desktop", None)
+    if desktop is not None:
+        return desktop.owner
     raw = request.cookies.get(SESSION_COOKIE_NAME)
     if not raw:
         raise ValueError("Missing session cookie")
@@ -86,5 +92,8 @@ def _artifact_store_singleton() -> ArtifactStore:
     return LocalArtifactStore(root_dir=root_dir)
 
 
-def get_artifact_store() -> ArtifactStore:
+def get_artifact_store(request: Request) -> ArtifactStore:
+    desktop = getattr(request.app.state, "desktop", None)
+    if desktop is not None:
+        return LocalArtifactStore(str(desktop.workspace.root / "artifacts"), relative_keys=True)
     return _artifact_store_singleton()

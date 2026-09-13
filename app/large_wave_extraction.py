@@ -12,7 +12,12 @@ from scipy.optimize import linear_sum_assignment
 from scipy.signal import find_peaks
 
 from .cancel import CancellationRequested
-from .heatmap_values import load_heatmap_values, normalize_heatmap_values
+from .heatmap_values import (
+    load_heatmap_values,
+    normalize_heatmap_values,
+    read_cv_image,
+    write_cv_image,
+)
 from .modules.kb_adapter import link_track_endpoints
 from .modules.tracker import Track
 
@@ -841,13 +846,13 @@ def _write_debug_artifacts(
     combined = np.maximum(masks["bright"], masks["dark"])
     response_image = np.asarray(np.clip(ridge_response * 255.0, 0, 255), dtype=np.uint8)
     mask_image = combined.astype(np.uint8) * 255
-    cv2.imwrite(str(debug_dir / "prob.png"), response_image)
-    cv2.imwrite(str(debug_dir / "mask_raw.png"), mask_image)
-    cv2.imwrite(str(debug_dir / "mask_clean.png"), mask_image)
-    cv2.imwrite(str(debug_dir / "mask_filtered.png"), mask_image)
-    cv2.imwrite(str(debug_dir / "skeleton.png"), mask_image)
+    write_cv_image(debug_dir / "prob.png", response_image)
+    write_cv_image(debug_dir / "mask_raw.png", mask_image)
+    write_cv_image(debug_dir / "mask_clean.png", mask_image)
+    write_cv_image(debug_dir / "mask_filtered.png", mask_image)
+    write_cv_image(debug_dir / "skeleton.png", mask_image)
 
-    image = cv2.imread(str(heatmap_path), cv2.IMREAD_COLOR)
+    image = read_cv_image(heatmap_path, cv2.IMREAD_COLOR)
     if image is not None:
         overlay = image.copy()
         for trace in traces:
@@ -857,7 +862,7 @@ def _write_debug_artifacts(
             ).reshape((-1, 1, 2))
             if len(points) >= 2:
                 cv2.polylines(overlay, [points], False, (0, 255, 0), 1, cv2.LINE_AA)
-        cv2.imwrite(str(base_dir / "overlay_tracks.png"), overlay)
+        write_cv_image(base_dir / "overlay_tracks.png", overlay)
 
     with open(debug_dir / "stats.txt", "w") as handle:
         handle.write("extractor=large_wave_multiscale_ensemble\n")

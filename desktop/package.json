@@ -1,0 +1,9 @@
+{
+  "name": "waveatlas-desktop",
+  "private": true,
+  "scripts": {
+    "build": "tauri build",
+    "check": "cargo check --manifest-path src-tauri/Cargo.toml"
+  },
+  "devDependencies": { "@tauri-apps/cli": "^2.0.0" }
+}

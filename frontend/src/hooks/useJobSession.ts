@@ -1,3 +1,4 @@
+import { getRuntime } from "../api";
 import { useEffect, useRef, useState } from "react";
 import {
   createJob,
@@ -739,23 +740,30 @@ export function useJobSession(options?: { resumeOnMount?: boolean }) {
     lastSeqRef.current = 0;
     saveSession(job.id, 0);
 
-    try {
-      setStatus("creating upload session…");
-      const sess = await createUploadSession(job.id, file);
-      addActivity("Upload session created");
-
-      setStatus("uploading to storage…");
-      await uploadToResumableUrl(sess.upload_url, file);
-      addActivity("Uploading file to storage");
-
-      setStatus("finalizing upload…");
-      await uploadComplete(job.id, sess.blob_path, file);
-      addActivity("Upload complete");
-    } catch {
-      addActivity("Resumable upload unavailable, using direct upload", "warn");
-      setStatus("uploading via api…");
+    const runtime = await getRuntime();
+    if (runtime.upload_transport === "local") {
+      setStatus(runtime.mode === "desktop" ? "opening file…" : "uploading…");
       await uploadViaApi(job.id, file);
-      addActivity("Direct upload complete");
+      addActivity(runtime.mode === "desktop" ? "Input saved locally" : "Upload complete");
+    } else {
+      try {
+        setStatus("creating upload session…");
+        const sess = await createUploadSession(job.id, file);
+        addActivity("Upload session created");
+
+        setStatus("uploading to storage…");
+        await uploadToResumableUrl(sess.upload_url, file);
+        addActivity("Uploading file to storage");
+
+        setStatus("finalizing upload…");
+        await uploadComplete(job.id, sess.blob_path, file);
+        addActivity("Upload complete");
+      } catch {
+        addActivity("Resumable upload unavailable, using direct upload", "warn");
+        setStatus("uploading via api…");
+        await uploadViaApi(job.id, file);
+        addActivity("Direct upload complete");
+      }
     }
 
     if (isImageFile(file)) {

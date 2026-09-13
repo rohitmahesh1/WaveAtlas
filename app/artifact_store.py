@@ -5,6 +5,8 @@ import logging
 import os
 import pathlib
 import re
+import shutil
+import tempfile
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Optional, Protocol, Tuple
@@ -85,9 +87,39 @@ class LocalArtifactStore:
     blob_path returned is an absolute filesystem path (string).
     """
     root_dir: str
+    relative_keys: bool = False
 
     def __post_init__(self) -> None:
         pathlib.Path(self.root_dir).mkdir(parents=True, exist_ok=True)
+
+    def _key(self, path: pathlib.Path) -> str:
+        if self.relative_keys:
+            return path.resolve().relative_to(pathlib.Path(self.root_dir).resolve()).as_posix()
+        return str(path.resolve())
+
+    def _resolve(self, blob_path: str) -> pathlib.Path:
+        path = pathlib.Path(blob_path)
+        if not path.is_absolute():
+            path = pathlib.Path(self.root_dir) / path
+        if self.relative_keys:
+            # Legacy absolute keys inside this workspace remain readable.
+            path.resolve().relative_to(pathlib.Path(self.root_dir).resolve())
+        return path
+
+    def _write(self, path: pathlib.Path, write) -> Tuple[str, int]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
+                temporary = pathlib.Path(handle.name)
+                write(handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            temporary.replace(path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        return self._key(path), path.stat().st_size
 
     def _target_path(self, *, job_id: UUID, kind: str, filename: str, label: Optional[str]) -> pathlib.Path:
         safe_filename = _safe_name(filename)
@@ -112,9 +144,7 @@ class LocalArtifactStore:
         label: Optional[str] = None,
     ) -> Tuple[str, int]:
         path = self._target_path(job_id=job_id, kind=kind, filename=filename, label=label)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
-        return (str(path.resolve()), len(data))
+        return self._write(path, lambda handle: handle.write(data))
 
     def put_file(
         self,
@@ -126,12 +156,12 @@ class LocalArtifactStore:
         content_type: Optional[str] = None,
         label: Optional[str] = None,
     ) -> Tuple[str, int]:
-        src = pathlib.Path(local_path)
-        data = src.read_bytes()
-        return self.put_bytes(job_id=job_id, kind=kind, filename=filename, data=data, content_type=content_type, label=label)
+        path = self._target_path(job_id=job_id, kind=kind, filename=filename, label=label)
+        with pathlib.Path(local_path).open("rb") as source:
+            return self._write(path, lambda handle: shutil.copyfileobj(source, handle, length=1024 * 1024))
 
     def get_bytes(self, blob_path: str) -> bytes:
-        return pathlib.Path(blob_path).read_bytes()
+        return self._resolve(blob_path).read_bytes()
 
     def signed_url(self, blob_path: str, *, expires_in: int = 3600) -> Optional[str]:
         # Local paths generally aren't publicly accessible; return None so API can stream
@@ -139,7 +169,7 @@ class LocalArtifactStore:
 
     def delete_blob(self, blob_path: str) -> None:
         try:
-            p = pathlib.Path(blob_path)
+            p = self._resolve(blob_path)
             if p.exists():
                 p.unlink()
         except Exception:

@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { getRuntime, type RuntimeInfo } from "./api";
+import { useEffect, useState } from "react";
 import AdvancedViewerPage from "./pages/AdvancedViewerPage";
 import AdvancedConfigPage from "./pages/AdvancedConfigPage";
 import RunsPage from "./pages/RunsPage";
@@ -6,6 +7,9 @@ import ConfigDocsPage from "./pages/ConfigDocsPage";
 import { JobSessionProvider } from "./context/JobSessionProvider";
 
 export default function App() {
+  const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
+  useEffect(() => { void getRuntime().then(setRuntime).catch(() => undefined); }, []);
+
   const [page, setPage] = useState<"viewer" | "advanced" | "runs" | "docs">("viewer");
 
   return (
@@ -43,6 +47,9 @@ export default function App() {
         <ConfigDocsPage />
       </div>
       <footer className="app-footer">
+        {runtime?.mode === "desktop" && (
+          <span>WaveAtlas {runtime.version} · Saved on this computer · Exports go to Downloads</span>
+        )}
         <span>Rohit Mahesh</span>
         <a href="mailto:rm4336@columbia.edu">rm4336@columbia.edu</a>
         <a href="https://github.com/rohitmahesh1/WaveAtlas" target="_blank" rel="noreferrer">
