@@ -31,6 +31,7 @@ type PeakChartPoint = ChartPoint & {
   peakIndex?: number;
   frame: number;
   position: number;
+  reviewCandidate?: boolean;
 };
 type HoverPoint = { x: number; y: number; cx: number; cy: number; peak?: PeakChartPoint };
 
@@ -434,6 +435,7 @@ export function TrackDetailChart({
         peakIndex: peak.peak_index,
         frame: peak.frame,
         position: peak.position,
+        reviewCandidate: peak.measurement_valid === false || peak.fallback_candidate === true,
       });
     }
   } else {
@@ -487,7 +489,7 @@ export function TrackDetailChart({
   };
 
   const selectedTitle = selectedRegression
-    ? `${largeWaveMode ? "Wave" : "Peak"} ${selectedRegression.peak_index}`
+    ? `${selectedRegression.measurement_valid === false ? "Review candidate" : largeWaveMode ? "Wave" : "Peak"} ${selectedRegression.peak_index}`
     : `Track ${detail.track_index}`;
   const selectedMeta = selectedRegression
     ? `Frame ${formatTick(selectedRegression.frame)} | Position ${formatTick(selectedRegression.position)} px`
@@ -541,7 +543,7 @@ export function TrackDetailChart({
           >
             {regressions.map((regression) => (
               <option key={regression.peak_i} value={regression.peak_i}>
-                {largeWaveMode ? "Wave" : "Peak"} {regression.peak_index} | frame {formatTick(regression.frame)} | x {formatTick(regression.position)}
+                {regression.measurement_valid === false ? "Review candidate" : largeWaveMode ? "Wave" : "Peak"} {regression.peak_index} | frame {formatTick(regression.frame)} | x {formatTick(regression.position)}
               </option>
             ))}
           </select>
@@ -575,7 +577,7 @@ export function TrackDetailChart({
               </label>
               <label className={showPeaks ? "mini-layer-chip active" : "mini-layer-chip"}>
                 <input type="checkbox" checked={showPeaks} onChange={(e) => setShowPeaks(e.target.checked)} />
-                Peaks
+                Peaks and review candidates
               </label>
             </>
           ) : null}
@@ -845,6 +847,7 @@ export function TrackDetailChart({
             ? peakPoints.map((p, i) => {
                 const scaled = toCanvas(p, scale);
                 const selected = selectedRegression != null && p.peakI === selectedRegression.peak_i;
+                const label = p.reviewCandidate ? "Review candidate" : "Peak";
                 return (
                   <g
                     key={`peak-${p.peakI ?? i}`}
@@ -852,7 +855,7 @@ export function TrackDetailChart({
                     clipPath={`url(#${clipId})`}
                     role="button"
                     tabIndex={0}
-                    aria-label={`Select peak ${p.peakIndex ?? i + 1} at frame ${formatTick(p.frame)}`}
+                    aria-label={`Select ${label.toLowerCase()} ${p.peakIndex ?? i + 1} at frame ${formatTick(p.frame)}`}
                     aria-pressed={selected}
                     onMouseDown={(event) => event.stopPropagation()}
                     onClick={(event) => {
@@ -871,9 +874,9 @@ export function TrackDetailChart({
                       cx={scaled.x}
                       cy={scaled.y}
                       r={selected ? 5.5 : 4}
-                      className={selected ? "mini-peak selected" : "mini-peak"}
+                      className={`mini-peak${p.reviewCandidate ? " review-candidate" : ""}${selected ? " selected" : ""}`}
                     />
-                    <title>{`Peak ${p.peakIndex ?? i + 1}: frame ${formatTick(p.frame)}, position ${formatTick(p.position)} px`}</title>
+                    <title>{`${label} ${p.peakIndex ?? i + 1}: frame ${formatTick(p.frame)}, position ${formatTick(p.position)} px`}</title>
                   </g>
                 );
               })
@@ -890,7 +893,7 @@ export function TrackDetailChart({
           >
             {hover.peak ? (
               <>
-                <strong>{`Peak ${hover.peak.peakIndex ?? ""}`}</strong>
+                <strong>{`${hover.peak.reviewCandidate ? "Review candidate" : "Peak"} ${hover.peak.peakIndex ?? ""}`}</strong>
                 <span>{`Frame ${formatTick(hover.peak.frame)} | ${formatTick(hover.peak.position)} px`}</span>
               </>
             ) : (
@@ -926,7 +929,7 @@ export function TrackDetailChart({
           {!rippleMode && showPeaks ? (
             <span className="legend-item">
               <span className="legend-swatch swatch-peak" />
-              Peaks
+              Peaks and review candidates
             </span>
           ) : null}
         </div>

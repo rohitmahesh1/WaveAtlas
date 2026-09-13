@@ -9,6 +9,11 @@ type FilterState = {
 
 const EMPTY_FILTERS: FilterRule[] = [];
 
+function numericValue(value: unknown): number {
+  if (value === null || value === undefined || value === "") return Number.NaN;
+  return Number(value);
+}
+
 export function useFilters(tracks: OverlayTrackEvent[], fields: FieldDef[], scopeKey = "default") {
   const [filterState, setFilterState] = useState<FilterState>({ scopeKey, filters: [] });
   const filters = filterState.scopeKey === scopeKey ? filterState.filters : EMPTY_FILTERS;
@@ -50,7 +55,7 @@ export function useFilters(tracks: OverlayTrackEvent[], fields: FieldDef[], scop
       if (!def) return true;
       const raw = def.get(t);
       if (def.type === "number") {
-        const v = Number(raw);
+        const v = numericValue(raw);
         if (!Number.isFinite(v)) return false;
         const hasVal = rule.value !== undefined && rule.value !== "";
         const hasVal2 = rule.value2 !== undefined && rule.value2 !== "";
@@ -123,14 +128,14 @@ export function useFilters(tracks: OverlayTrackEvent[], fields: FieldDef[], scop
     let pts = 0;
     const familyIds = new Set<string>();
     for (const t of filteredTracks) {
-      const a = Number(t.metrics?.mean_amplitude);
-      const f = Number(t.metrics?.dominant_frequency);
-      const slope = Number(t.metrics?.slope_px_per_frame);
+      const a = numericValue(t.metrics?.mean_amplitude);
+      const f = numericValue(t.metrics?.dominant_frequency);
+      const slope = numericValue(t.metrics?.slope_px_per_frame);
       const speedValue = t.metrics?.speed_px_per_s ?? (
         t.metrics?.velocity_px_per_s != null ? Math.abs(t.metrics.velocity_px_per_s) : null
       );
-      const speed = Number(speedValue);
-      const angle = Number(t.metrics?.angle_from_time_axis_deg ?? t.metrics?.angle_deg);
+      const speed = numericValue(speedValue);
+      const angle = numericValue(t.metrics?.angle_from_time_axis_deg ?? t.metrics?.angle_deg);
       if (Number.isFinite(a)) {
         sumAmp += a;
         cntAmp += 1;

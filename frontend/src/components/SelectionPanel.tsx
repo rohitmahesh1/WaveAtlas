@@ -219,6 +219,26 @@ export function SelectionPanel(props: {
                     Peaks
                     <div className="meta-value">{selectedTrack.metrics?.num_peaks ?? 0}</div>
                   </div>
+                  {!largeWaveMode ? (
+                    <div title={selectedTrack.metrics?.frequency_failure_reason?.replace(/_/g, " ")}>
+                      Frequency estimate
+                      <div className="meta-value">
+                        {selectedTrack.metrics?.frequency_valid === false
+                          ? `Needs review${selectedTrack.metrics?.frequency_failure_reason
+                            ? `: ${selectedTrack.metrics.frequency_failure_reason.replace(/_/g, " ")}`
+                            : ""}`
+                          : selectedTrack.metrics?.frequency_valid === true
+                            ? "Valid"
+                            : "Unknown"}
+                      </div>
+                    </div>
+                  ) : null}
+                  {!largeWaveMode && (selectedTrack.metrics?.num_review_candidates ?? 0) > 0 ? (
+                    <div>
+                      Review candidates
+                      <div className="meta-value">{selectedTrack.metrics?.num_review_candidates}</div>
+                    </div>
+                  ) : null}
                   <div>
                     Amplitude
                     <div className="meta-value">

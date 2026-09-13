@@ -9,12 +9,33 @@ export type OverlayTrackEvent = {
   sample?: string;
   track_index: number;
   poly: { x: number; y: number }[];
-  peaks?: { x: number; y: number; amp?: number }[];
+  peaks?: {
+    x: number;
+    y: number;
+    amp?: number;
+    fallback_candidate?: boolean;
+    review_candidate?: boolean;
+    measurement_valid?: boolean;
+  }[];
   metrics?: {
     mean_amplitude?: number | null;
     dominant_frequency?: number | null;
     period?: number | null;
     num_peaks?: number | null;
+    num_peak_candidates?: number | null;
+    num_fallback_candidates?: number | null;
+    num_review_candidates?: number | null;
+    frequency_valid?: boolean | null;
+    frequency_failure_reason?: string | null;
+    frame_sampling?: {
+      valid?: boolean;
+      failure_reason?: string | null;
+      frame_count?: number;
+      frame_span?: number | null;
+      missing_frame_count?: number;
+      max_frame_gap?: number | null;
+      coverage_fraction?: number | null;
+    } | null;
     analysis_mode?: string;
     family_id?: string | null;
     direction?: string | null;

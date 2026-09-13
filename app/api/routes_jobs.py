@@ -43,7 +43,12 @@ from ..models import (
     Wave,
 )
 from ..pipeline import PipelineSettings
-from ..analysis_mode import LARGE_WAVE_ANALYSIS_MODE, RIPPLE_ANALYSIS_MODE, resolve_analysis_mode
+from ..analysis_mode import (
+    LARGE_WAVE_ANALYSIS_MODE,
+    RIPPLE_ANALYSIS_MODE,
+    STANDARD_ANALYSIS_MODE,
+    resolve_analysis_mode,
+)
 from ..time_utils import utc_now_iso
 from ..extract_core import (
     PEAK_POLARITY_ALIASES,
@@ -65,7 +70,12 @@ from ..measurement_schema import (
 )
 from ..signal.detrend import fit_baseline
 from ..signal.peaks import detect_peaks, detect_peaks_adaptive, ensure_minimum_peaks
-from ..signal.period import estimate_dominant_frequency, frequency_to_period, resolve_positive_frequency
+from ..signal.period import (
+    estimate_dominant_frequency,
+    estimate_valid_dominant_frequency,
+    frequency_to_period,
+    resolve_positive_frequency,
+)
 from ..config_validation import normalize_and_validate_config
 from ..sampling import resolve_sampling_rate
 from ..track_coordinates import (
@@ -1093,20 +1103,51 @@ def get_track_detail(
     period_cfg.pop("sampling_rate", None)
     sampling_rate = resolve_sampling_rate(config)
 
-    try:
-        freq = float(
-            estimate_dominant_frequency(residual, sampling_rate=sampling_rate, **period_cfg)
+    frequency_metadata: Optional[Dict[str, Any]] = None
+    if analysis_mode == LARGE_WAVE_ANALYSIS_MODE:
+        try:
+            freq = float(
+                estimate_dominant_frequency(residual, sampling_rate=sampling_rate, **period_cfg)
+            )
+        except Exception:
+            freq = float("nan")
+        freq = resolve_positive_frequency(
+            freq,
+            frame=frame,
+            sampling_rate=sampling_rate,
+            min_freq=period_cfg.get("min_freq"),
+            max_freq=period_cfg.get("max_freq"),
         )
-    except Exception:
-        freq = float("nan")
-    freq = resolve_positive_frequency(
-        freq,
-        frame=frame,
-        sampling_rate=sampling_rate,
-        min_freq=period_cfg.get("min_freq"),
-        max_freq=period_cfg.get("max_freq"),
+    else:
+        frequency_estimate = estimate_valid_dominant_frequency(
+            residual,
+            frame=frame,
+            sampling_rate=sampling_rate,
+            min_freq=period_cfg.get("min_freq"),
+            max_freq=period_cfg.get("max_freq"),
+        )
+        frequency_metadata = frequency_estimate.metadata()
+        stored_frequency_metadata = (
+            (track_model.metrics or {}).get("frequency_estimate")
+            if track_model is not None and isinstance(track_model.metrics, dict)
+            else None
+        )
+        if isinstance(stored_frequency_metadata, dict):
+            frequency_metadata = stored_frequency_metadata
+        try:
+            stored_frequency = float((frequency_metadata or {}).get("value"))
+        except (TypeError, ValueError):
+            stored_frequency = float("nan")
+        freq = (
+            stored_frequency
+            if math.isfinite(stored_frequency) and stored_frequency > 0
+            else float("nan")
+        )
+    period = (
+        float(frequency_to_period(freq))
+        if isinstance(freq, float) and math.isfinite(freq) and freq > 0
+        else float("nan")
     )
-    period = float(frequency_to_period(freq)) if (isinstance(freq, float) and math.isfinite(freq) and freq > 0) else float("nan")
 
     frames_per_period = (sampling_rate / float(freq)) if (sampling_rate and math.isfinite(freq) and freq > 0) else None
     large_wave_event_cfg = (
@@ -1138,20 +1179,41 @@ def get_track_detail(
             freq = stored_frequency
             period = float(frequency_to_period(freq))
     if not peak_events:
-        peak_sets = _detect_peak_sets_for_detail(residual, peaks_cfg, frames_per_period)
+        standard_sampling_valid = bool(
+            analysis_mode != STANDARD_ANALYSIS_MODE
+            or ((frequency_metadata or {}).get("frame_sampling") or {}).get("valid", False)
+        )
+        peak_sets = (
+            _detect_peak_sets_for_detail(residual, peaks_cfg, frames_per_period)
+            if standard_sampling_valid
+            else []
+        )
         for peak_set in peak_sets:
             signal = np.asarray(peak_set["signal"], dtype=float)
             sign = int(peak_set["sign"])
-            for peak_i_raw in np.asarray(peak_set["peaks_idx"], dtype=int).tolist():
+            fallback_flags = np.asarray(
+                (peak_set.get("peak_props") or {}).get("fallback_peak", []),
+                dtype=bool,
+            )
+            for peak_pos, peak_i_raw in enumerate(np.asarray(peak_set["peaks_idx"], dtype=int).tolist()):
                 peak_i = int(peak_i_raw)
                 if peak_i < 0 or peak_i >= len(frame):
                     continue
+                fallback_candidate = bool(
+                    peak_pos < fallback_flags.size and fallback_flags[peak_pos]
+                )
+                measurement_valid = bool(
+                    analysis_mode != STANDARD_ANALYSIS_MODE
+                    or ((frequency_metadata or {}).get("valid", False) and not fallback_candidate)
+                )
                 peak_events.append({
                     "peak_i": peak_i,
                     "event_kind": str(peak_set["event_kind"]),
                     "event_polarity": str(peak_set["event_polarity"]),
                     "fit_signal_sign": sign,
                     "event_amplitude": float(signal[peak_i]),
+                    "fallback_candidate": fallback_candidate,
+                    "measurement_valid": measurement_valid,
                 })
     peak_events.sort(key=lambda event: (int(event["peak_i"]), 0 if event["event_kind"] == "max" else 1))
     peaks_idx = np.asarray([int(event["peak_i"]) for event in peak_events], dtype=int)
@@ -1162,9 +1224,12 @@ def get_track_detail(
 
     strongest_peak_idx: Optional[int] = None
     if peak_events:
+        strongest_candidates = [
+            event for event in peak_events if bool(event.get("measurement_valid", True))
+        ] or peak_events
         try:
             strongest_event = max(
-                peak_events,
+                strongest_candidates,
                 key=lambda event: (
                     float(event["event_amplitude"])
                     if math.isfinite(float(event["event_amplitude"]))
@@ -1173,7 +1238,7 @@ def get_track_detail(
             )
             strongest_peak_idx = int(strongest_event["peak_i"])
         except Exception:
-            strongest_peak_idx = int(peak_events[0]["peak_i"])
+            strongest_peak_idx = int(strongest_candidates[0]["peak_i"])
 
     def peak_point(ordinal: int, event: Dict[str, Any]) -> Dict[str, Any]:
         peak_i = int(event["peak_i"])
@@ -1196,6 +1261,8 @@ def get_track_detail(
             "in_slice": in_slice,
             "slice_index": int(peak_i - lo) if in_slice else None,
             "is_strongest": bool(strongest_peak_idx is not None and int(peak_i) == strongest_peak_idx),
+            "fallback_candidate": bool(event.get("fallback_candidate", False)),
+            "measurement_valid": bool(event.get("measurement_valid", True)),
         }
 
     peak_points = [peak_point(i + 1, event) for i, event in enumerate(peak_events)]
@@ -1205,6 +1272,9 @@ def get_track_detail(
         fit_freq = float(freq) if math.isfinite(freq) else float("nan")
         period_frac = float((config.get("features") or {}).get("fit_window_period_frac", 0.5))
         for point in peak_points:
+            if not bool(point.get("measurement_valid", True)):
+                peak_regressions.append({**point, "sine_fit": None})
+                continue
             peak_i = int(point["peak_i"])
             sign = int(point.get("fit_signal_sign", 1))
             fit_signal = residual.astype(float, copy=False) * float(sign)
@@ -1285,7 +1355,8 @@ def get_track_detail(
     sine_view = sine_fit[lo : hi + 1] if sine_fit is not None else None
     peaks_in_slice = [int(event["peak_i"]) for event in peak_events if lo <= int(event["peak_i"]) <= hi]
 
-    event_amps = np.asarray([float(event["event_amplitude"]) for event in peak_events], dtype=float)
+    accepted_peak_events = [event for event in peak_events if bool(event.get("measurement_valid", True))]
+    event_amps = np.asarray([float(event["event_amplitude"]) for event in accepted_peak_events], dtype=float)
     event_amps = event_amps[np.isfinite(event_amps)]
     if event_amps.size > 0:
         mean_amp = float(event_amps.mean())
@@ -1322,15 +1393,28 @@ def get_track_detail(
         "metrics": {
             "dominant_frequency": freq if math.isfinite(freq) else None,
             "period": period if math.isfinite(period) else None,
-            "num_peaks": int(len(peaks_idx)),
-            "num_maxima": int(sum(1 for event in peak_events if event["event_kind"] == "max")),
-            "num_minima": int(sum(1 for event in peak_events if event["event_kind"] == "min")),
+            "num_peaks": int(len(accepted_peak_events)),
+            "num_peak_candidates": int(len(peak_events)),
+            "num_fallback_candidates": int(sum(bool(event.get("fallback_candidate", False)) for event in peak_events)),
+            "num_review_candidates": int(sum(not bool(event.get("measurement_valid", True)) for event in peak_events)),
+            "num_maxima": int(sum(event["event_kind"] == "max" for event in accepted_peak_events)),
+            "num_minima": int(sum(event["event_kind"] == "min" for event in accepted_peak_events)),
             "event_polarity": (
                 "both"
                 if analysis_mode == LARGE_WAVE_ANALYSIS_MODE
-                else _normalize_detail_event_polarity(peaks_cfg.get("event_polarity", peaks_cfg.get("polarity", "both")))
+                else _normalize_detail_event_polarity(
+                    peaks_cfg.get("event_polarity", peaks_cfg.get("polarity", "both"))
+                )
             ),
             "mean_amplitude": mean_amp if math.isfinite(mean_amp) else None,
+            "frequency_estimate": frequency_metadata,
+            "frequency_valid": (
+                bool((frequency_metadata or {}).get("valid", False))
+                if analysis_mode == STANDARD_ANALYSIS_MODE
+                else True
+            ),
+            "frequency_method": (frequency_metadata or {}).get("method"),
+            "frequency_failure_reason": (frequency_metadata or {}).get("failure_reason"),
         },
     }
 

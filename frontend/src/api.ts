@@ -104,6 +104,10 @@ export type TrackPeakPoint = {
   in_slice?: boolean;
   slice_index?: number | null;
   is_strongest?: boolean;
+  event_kind?: string;
+  event_polarity?: string;
+  fallback_candidate?: boolean;
+  measurement_valid?: boolean;
 };
 
 export type TrackPeakRegression = TrackPeakPoint & {
@@ -145,7 +149,15 @@ export type TrackDetail = {
     dominant_frequency?: number | null;
     period?: number | null;
     num_peaks?: number | null;
+    num_peak_candidates?: number | null;
+    num_fallback_candidates?: number | null;
+    num_review_candidates?: number | null;
+    num_maxima?: number | null;
+    num_minima?: number | null;
     mean_amplitude?: number | null;
+    frequency_estimate?: { [key: string]: JsonValue } | null;
+    frequency_valid?: boolean | null;
+    frequency_failure_reason?: string | null;
     family_id?: string | null;
     direction?: string | null;
     slope_px_per_frame?: number | null;

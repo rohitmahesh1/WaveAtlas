@@ -1015,6 +1015,15 @@ body {
   stroke-width: 2px;
 }
 
+.mini-peak.review-candidate {
+  fill: #64748b;
+  stroke-dasharray: 2 1;
+}
+
+.mini-peak.review-candidate.selected {
+  fill: #94a3b8;
+}
+
 .mini-peak-target:focus-visible {
   outline: none;
 }

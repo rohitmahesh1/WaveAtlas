@@ -262,7 +262,16 @@ def anchored_sine_params(
         "fit_window_lo": np.nan,
         "fit_window_hi": np.nan,
     }
-    if sampling_rate is None or sampling_rate <= 0 or freq is None or freq <= 0 or center_idx < 0 or center_idx >= len(x):
+    if (
+        sampling_rate is None
+        or not np.isfinite(float(sampling_rate))
+        or sampling_rate <= 0
+        or freq is None
+        or not np.isfinite(float(freq))
+        or freq <= 0
+        or center_idx < 0
+        or center_idx >= len(x)
+    ):
         return out
 
     frames_per_period = sampling_rate / float(freq)

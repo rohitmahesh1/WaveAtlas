@@ -60,8 +60,13 @@ function asRecord(value: unknown): UnknownRecord | null {
 }
 
 function finiteNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
+}
+
+function optionalBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
 }
 
 const SESSION_KEY = "waveatlas:lastSession";
@@ -173,7 +178,17 @@ function normalizeOverlayTrack(payload: unknown): OverlayTrackEvent | null {
         const y = finiteNumber(peak.y);
         if (x == null || y == null) return [];
         const amp = finiteNumber(peak.amp);
-        return [{ x, y, ...(amp != null ? { amp } : {}) }];
+        const fallbackCandidate = optionalBoolean(peak.fallback_candidate);
+        const reviewCandidate = optionalBoolean(peak.review_candidate);
+        const measurementValid = optionalBoolean(peak.measurement_valid);
+        return [{
+          x,
+          y,
+          ...(amp != null ? { amp } : {}),
+          ...(fallbackCandidate != null ? { fallback_candidate: fallbackCandidate } : {}),
+          ...(reviewCandidate != null ? { review_candidate: reviewCandidate } : {}),
+          ...(measurementValid != null ? { measurement_valid: measurementValid } : {}),
+        }];
       })
     : [];
   const ampVals = peaks.map((p) => Number(p.amp)).filter((v) => Number.isFinite(v));
@@ -188,6 +203,10 @@ function normalizeOverlayTrack(payload: unknown): OverlayTrackEvent | null {
       })
     : [];
   const payloadMetrics = asRecord(data.metrics);
+  const frameSampling = asRecord(payloadMetrics?.frame_sampling);
+  const hasPayloadMetric = (key: string) => Boolean(
+    payloadMetrics && Object.prototype.hasOwnProperty.call(payloadMetrics, key)
+  );
 
   return {
     id: idx,
@@ -196,10 +215,37 @@ function normalizeOverlayTrack(payload: unknown): OverlayTrackEvent | null {
     poly,
     peaks,
     metrics: {
-      mean_amplitude: finiteNumber(payloadMetrics?.mean_amplitude) ?? meanAmp,
-      dominant_frequency: finiteNumber(payloadMetrics?.dominant_frequency) ?? finiteNumber(data.freq_hz),
-      period: finiteNumber(payloadMetrics?.period) ?? finiteNumber(data.period),
-      num_peaks: finiteNumber(payloadMetrics?.num_peaks) ?? peaks.length,
+      mean_amplitude: hasPayloadMetric("mean_amplitude")
+        ? finiteNumber(payloadMetrics?.mean_amplitude)
+        : meanAmp,
+      dominant_frequency: hasPayloadMetric("dominant_frequency")
+        ? finiteNumber(payloadMetrics?.dominant_frequency)
+        : finiteNumber(data.freq_hz),
+      period: hasPayloadMetric("period")
+        ? finiteNumber(payloadMetrics?.period)
+        : finiteNumber(data.period),
+      num_peaks: hasPayloadMetric("num_peaks")
+        ? finiteNumber(payloadMetrics?.num_peaks)
+        : peaks.length,
+      num_peak_candidates: finiteNumber(payloadMetrics?.num_peak_candidates) ?? peaks.length,
+      num_fallback_candidates: finiteNumber(payloadMetrics?.num_fallback_candidates),
+      num_review_candidates: finiteNumber(payloadMetrics?.num_review_candidates),
+      frequency_valid: optionalBoolean(payloadMetrics?.frequency_valid),
+      frequency_failure_reason: typeof payloadMetrics?.frequency_failure_reason === "string"
+        ? payloadMetrics.frequency_failure_reason
+        : null,
+      frequency_method: typeof payloadMetrics?.frequency_method === "string"
+        ? payloadMetrics.frequency_method
+        : null,
+      frame_sampling: frameSampling ? {
+        valid: optionalBoolean(frameSampling.valid) ?? undefined,
+        failure_reason: typeof frameSampling.failure_reason === "string" ? frameSampling.failure_reason : null,
+        frame_count: finiteNumber(frameSampling.frame_count) ?? undefined,
+        frame_span: finiteNumber(frameSampling.frame_span),
+        missing_frame_count: finiteNumber(frameSampling.missing_frame_count) ?? undefined,
+        max_frame_gap: finiteNumber(frameSampling.max_frame_gap),
+        coverage_fraction: finiteNumber(frameSampling.coverage_fraction),
+      } : null,
       analysis_mode: typeof payloadMetrics?.analysis_mode === "string" ? payloadMetrics.analysis_mode : undefined,
       family_id: typeof payloadMetrics?.family_id === "string" ? payloadMetrics.family_id : null,
       direction: typeof payloadMetrics?.direction === "string" ? payloadMetrics.direction : null,

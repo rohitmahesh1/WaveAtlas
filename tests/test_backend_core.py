@@ -25,7 +25,12 @@ from app.artifact_store import LocalArtifactStore
 from app.cancel import CancellationRequested
 from app.analysis_mode import RIPPLE_ANALYSIS_MODE, STANDARD_ANALYSIS_MODE, resolve_analysis_mode
 from app.config_validation import normalize_and_validate_config
-from app.extract_core import detect_peak_sets, _flatten_onnx_cfg_for_runner, process_track
+from app.extract_core import (
+    _flatten_onnx_cfg_for_runner,
+    detect_peak_sets,
+    process_track,
+    process_track_arrays,
+)
 from app.api.routes_jobs import (
     ConfigValidatePayload,
     _detect_peak_sets_for_detail,
@@ -71,6 +76,7 @@ from app.pipeline import PipelineSettings
 from app.ripple_analysis import analyze_ripple_tracks
 from app.ripple_extraction import _Trace, _dedupe_and_extend
 from app.signal.peaks import ensure_minimum_peaks
+from app.signal.period import assess_frame_sampling, estimate_valid_dominant_frequency
 from app.signal import detrend as detrend_module
 from app.signal.detrend import fit_baseline
 from app.sampling import normalize_sampling_rate_config, resolve_sampling_rate
@@ -149,6 +155,121 @@ def _base_config(*, fit_target: str | None = None, event_polarity: str = "both")
 
 
 class BackendCoreTests(unittest.TestCase):
+    def test_standard_frequency_accepts_contiguous_frames(self) -> None:
+        frame = np.arange(80, dtype=float)
+        residual = np.sin(2.0 * np.pi * frame / 10.0)
+
+        estimate = estimate_valid_dominant_frequency(
+            residual,
+            frame=frame,
+            sampling_rate=10.0,
+            min_freq=0.2,
+            max_freq=2.0,
+        )
+
+        self.assertTrue(estimate.valid)
+        self.assertEqual(estimate.method, "fft_uniform")
+        self.assertAlmostEqual(float(estimate.value), 1.0)
+        self.assertTrue(estimate.frame_sampling.valid)
+
+    def test_standard_frequency_rejects_missing_frames(self) -> None:
+        frame = np.concatenate([np.arange(40), np.arange(45, 80)]).astype(float)
+        residual = np.sin(2.0 * np.pi * frame / 10.0)
+
+        sampling = assess_frame_sampling(frame)
+        estimate = estimate_valid_dominant_frequency(
+            residual,
+            frame=frame,
+            sampling_rate=10.0,
+            min_freq=0.2,
+            max_freq=2.0,
+        )
+
+        self.assertFalse(sampling.valid)
+        self.assertEqual(sampling.failure_reason, "missing_frames")
+        self.assertEqual(sampling.missing_frame_count, 5)
+        self.assertEqual(sampling.max_frame_gap, 6.0)
+        self.assertAlmostEqual(float(sampling.coverage_fraction), 75.0 / 80.0)
+        self.assertFalse(estimate.valid)
+        self.assertIsNone(estimate.value)
+        self.assertEqual(estimate.failure_reason, "missing_frames")
+
+    def test_standard_frequency_rejects_flat_and_short_signals(self) -> None:
+        flat = estimate_valid_dominant_frequency(
+            np.zeros(20, dtype=float),
+            frame=np.arange(20, dtype=float),
+            sampling_rate=10.0,
+        )
+        short = estimate_valid_dominant_frequency(
+            np.asarray([0.0, 1.0, 0.0]),
+            frame=np.arange(3, dtype=float),
+            sampling_rate=10.0,
+        )
+
+        self.assertFalse(flat.valid)
+        self.assertEqual(flat.failure_reason, "no_signal_variation")
+        self.assertIsNone(flat.value)
+        self.assertFalse(short.valid)
+        self.assertEqual(short.failure_reason, "insufficient_signal_samples")
+        self.assertIsNone(short.value)
+
+    def test_standard_gapped_track_emits_no_measurements(self) -> None:
+        frame = np.concatenate([np.arange(40), np.arange(45, 80)]).astype(float)
+        position = 40.0 + 0.1 * frame + 5.0 * np.sin(2.0 * np.pi * frame / 10.0)
+
+        track_row, wave_rows, peak_rows, overlay = process_track_arrays(
+            job_id=uuid4(),
+            track_index=0,
+            track_stem="gapped",
+            sample="synthetic",
+            frame=frame,
+            image_row=frame,
+            position=position,
+            config=_base_config(),
+        )
+
+        self.assertIsNone(track_row["frequency"])
+        self.assertFalse(track_row["metrics"]["frequency_valid"])
+        self.assertEqual(track_row["metrics"]["frequency_failure_reason"], "missing_frames")
+        self.assertEqual(track_row["metrics"]["frame_sampling"]["missing_frame_count"], 5)
+        self.assertEqual(wave_rows, [])
+        self.assertEqual(peak_rows, [])
+        self.assertEqual(track_row["metrics"]["num_peaks"], 0)
+        self.assertEqual(overlay["metrics"]["num_peaks"], 0)
+
+    def test_standard_fallback_peak_is_review_only(self) -> None:
+        frame = np.arange(80, dtype=float)
+        position = np.full(frame.shape, 40.0)
+
+        track_row, wave_rows, peak_rows, overlay = process_track_arrays(
+            job_id=uuid4(),
+            track_index=0,
+            track_stem="flat",
+            sample="synthetic",
+            frame=frame,
+            image_row=frame,
+            position=position,
+            config=_base_config(),
+        )
+
+        self.assertIsNone(track_row["frequency"])
+        self.assertFalse(track_row["metrics"]["frequency_valid"])
+        self.assertEqual(track_row["metrics"]["frequency_failure_reason"], "no_signal_variation")
+        self.assertEqual(wave_rows, [])
+        self.assertEqual(track_row["metrics"]["num_peaks"], 0)
+        candidate_count = track_row["metrics"]["num_peak_candidates"]
+        self.assertGreater(candidate_count, 0)
+        self.assertEqual(track_row["metrics"]["num_fallback_candidates"], candidate_count)
+        self.assertEqual(track_row["metrics"]["num_review_candidates"], candidate_count)
+        self.assertEqual(len(peak_rows), candidate_count)
+        self.assertTrue(all(row["metrics"]["fallback_peak"] for row in peak_rows))
+        self.assertTrue(all(row["metrics"]["review_candidate"] for row in peak_rows))
+        self.assertTrue(all(not row["metrics"]["measurement_valid"] for row in peak_rows))
+        self.assertEqual(overlay["metrics"]["num_peaks"], 0)
+        self.assertEqual(len(overlay["peaks"]), candidate_count)
+        self.assertTrue(all(peak["review_candidate"] for peak in overlay["peaks"]))
+        self.assertTrue(all(not peak["measurement_valid"] for peak in overlay["peaks"]))
+
     def test_sampling_rate_config_has_one_canonical_authority(self) -> None:
         canonical = normalize_sampling_rate_config(
             {"io": {"sampling_rate": 5}, "period": {"sampling_rate": 5, "min_freq": 0.1}}

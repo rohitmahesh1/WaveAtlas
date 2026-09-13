@@ -11,7 +11,7 @@ from scipy.ndimage import gaussian_filter1d
 
 from .signal.detrend import detrend_with_fit
 from .signal.peaks import detect_peaks, detect_peaks_adaptive, ensure_minimum_peaks
-from .signal.period import estimate_dominant_frequency, frequency_to_period, resolve_positive_frequency
+from .signal.period import estimate_valid_dominant_frequency, frequency_to_period
 from .features import build_wave_rows, build_peak_rows
 from .sampling import resolve_sampling_rate
 from .track_coordinates import (
@@ -491,47 +491,47 @@ def process_track_arrays(
     residual = detrended.residual
     detrend_meta = detrended.fit.metadata()
 
-    try:
-        estimated_freq_hz = float(
-            estimate_dominant_frequency(residual, sampling_rate=sampling_rate, **period_cfg)
-        )
-    except Exception:
-        estimated_freq_hz = float("nan")
-    freq_hz = resolve_positive_frequency(
-        estimated_freq_hz,
+    frequency_estimate = estimate_valid_dominant_frequency(
+        residual,
         frame=frame,
         sampling_rate=sampling_rate,
         min_freq=period_cfg.get("min_freq"),
         max_freq=period_cfg.get("max_freq"),
     )
-    period_s = float(frequency_to_period(freq_hz))
+    freq_hz = float(frequency_estimate.value) if frequency_estimate.value is not None else float("nan")
+    period_s = float(frequency_to_period(freq_hz)) if frequency_estimate.valid else float("nan")
     frames_per_period = (sampling_rate / freq_hz) if (np.isfinite(freq_hz) and freq_hz > 0) else None
 
-    peak_sets = detect_peak_sets(residual, peaks_cfg, frames_per_period)
+    peak_sets = (
+        detect_peak_sets(residual, peaks_cfg, frames_per_period)
+        if frequency_estimate.frame_sampling.valid
+        else []
+    )
+    accepted_peak_sets = [_peak_set_without_fallbacks(peak_set) for peak_set in peak_sets]
 
     wave_rows: List[Dict[str, Any]] = []
     peak_rows: List[Dict[str, Any]] = []
-    for peak_set in peak_sets:
-        wave_rows.extend(build_wave_rows(
-            frame=frame,
-            position=position,
-            image_row=image_rows,
-            residual=residual,
-            fit_residual=peak_set["signal"],
-            peaks_idx=peak_set["peaks_idx"],
-            peak_props=peak_set["peak_props"],
-            sampling_rate=sampling_rate,
-            sample=sample,
-            track_stem=track_stem,
-            features_cfg=features_cfg,
-            event_polarity=peak_set["event_polarity"],
-            event_kind=peak_set["event_kind"],
-            fit_signal_sign=peak_set["sign"],
-            freq_hz=freq_hz if np.isfinite(freq_hz) else None,
-            period_frac_for_fit=float(features_cfg.get("fit_window_period_frac", 0.5)),
-            coord_meta=heatmap_meta,
-        ))
-
+    for peak_set, accepted_peak_set in zip(peak_sets, accepted_peak_sets):
+        if frequency_estimate.valid:
+            wave_rows.extend(build_wave_rows(
+                frame=frame,
+                position=position,
+                image_row=image_rows,
+                residual=residual,
+                fit_residual=accepted_peak_set["signal"],
+                peaks_idx=accepted_peak_set["peaks_idx"],
+                peak_props=accepted_peak_set["peak_props"],
+                sampling_rate=sampling_rate,
+                sample=sample,
+                track_stem=track_stem,
+                features_cfg=features_cfg,
+                event_polarity=accepted_peak_set["event_polarity"],
+                event_kind=accepted_peak_set["event_kind"],
+                fit_signal_sign=accepted_peak_set["sign"],
+                freq_hz=freq_hz,
+                period_frac_for_fit=float(features_cfg.get("fit_window_period_frac", 0.5)),
+                coord_meta=heatmap_meta,
+            ))
         peak_rows.extend(build_peak_rows(
             frame=frame,
             position=position,
@@ -552,6 +552,33 @@ def process_track_arrays(
             coord_meta=heatmap_meta,
         ))
 
+    frequency_metadata = frequency_estimate.metadata()
+    for row in wave_rows:
+        metrics = dict(row.get("metrics") or {})
+        metrics.update({
+            "measurement_valid": True,
+            "measurement_invalid_reason": None,
+            "review_candidate": False,
+            "frequency_estimate": frequency_metadata,
+        })
+        row["metrics"] = metrics
+    for row in peak_rows:
+        metrics = dict(row.get("metrics") or {})
+        fallback_peak = bool(metrics.get("fallback_peak", False))
+        measurement_valid = bool(frequency_estimate.valid and not fallback_peak)
+        invalid_reason = (
+            frequency_estimate.failure_reason
+            if not frequency_estimate.valid
+            else "fallback_peak" if fallback_peak else None
+        )
+        metrics.update({
+            "measurement_valid": measurement_valid,
+            "measurement_invalid_reason": invalid_reason,
+            "review_candidate": not measurement_valid,
+            "frequency_estimate": frequency_metadata,
+        })
+        row["metrics"] = metrics
+
     wave_rows = _sort_and_renumber_event_rows(wave_rows, index_key="wave_index")
     peak_rows = _sort_and_renumber_event_rows(peak_rows)
     for row in [*wave_rows, *peak_rows]:
@@ -563,9 +590,20 @@ def process_track_arrays(
             "detrend_inlier_fraction": detrend_meta["inlier_fraction"],
         })
         row["metrics"] = metrics
-    peak_props = _combine_peak_props([peak_set["peak_props"] for peak_set in peak_sets])
-    event_indices = _event_indices_from_rows(peak_rows)
-    event_kinds = _event_kinds_from_rows(peak_rows)
+    accepted_peak_rows = [
+        row for row in peak_rows if bool((row.get("metrics") or {}).get("measurement_valid", False))
+    ]
+    peak_props = _combine_peak_props([peak_set["peak_props"] for peak_set in accepted_peak_sets])
+    event_indices = _event_indices_from_rows(accepted_peak_rows)
+    event_kinds = _event_kinds_from_rows(accepted_peak_rows)
+    candidate_indices = _event_indices_from_rows(peak_rows)
+    candidate_kinds = _event_kinds_from_rows(peak_rows)
+    fallback_candidate_count = sum(
+        1 for row in peak_rows if bool((row.get("metrics") or {}).get("fallback_peak", False))
+    )
+    review_candidate_count = sum(
+        1 for row in peak_rows if bool((row.get("metrics") or {}).get("review_candidate", False))
+    )
     event_polarity = _normalize_event_polarity(peaks_cfg.get("event_polarity", peaks_cfg.get("polarity", "both")))
 
     track_quality = _track_quality_metrics(
@@ -577,6 +615,9 @@ def process_track_arrays(
         dominant_freq_hz=freq_hz,
         period_cfg=period_cfg,
     )
+    if not frequency_estimate.valid:
+        track_quality["frequency_agreement_error"] = float("nan")
+        track_quality["spectral_snr"] = float("nan")
     _attach_quality_metric_columns(wave_rows, peak_rows, track_quality)
 
     amps = np.abs(residual[event_indices]) if len(event_indices) else np.array([], dtype=float)
@@ -593,10 +634,18 @@ def process_track_arrays(
         "metrics": {
             "num_peaks": int(len(event_indices)),
             "num_events": int(len(event_indices)),
+            "num_peak_candidates": int(len(candidate_indices)),
+            "num_fallback_candidates": int(fallback_candidate_count),
+            "num_review_candidates": int(review_candidate_count),
             "num_maxima": int(num_maxima),
             "num_minima": int(num_minima),
             "event_polarity": event_polarity,
             "period": float(period_s) if np.isfinite(period_s) else None,
+            "frequency_estimate": frequency_metadata,
+            "frequency_valid": frequency_estimate.valid,
+            "frequency_method": frequency_estimate.method,
+            "frequency_failure_reason": frequency_estimate.failure_reason,
+            "frame_sampling": frequency_estimate.frame_sampling.metadata(),
             "sampling_rate": sampling_rate,
             "track_stem": track_stem,
             "sample": sample,
@@ -617,14 +666,36 @@ def process_track_arrays(
         image_row=image_rows,
         position=position,
         residual=residual,
-        peaks_idx=event_indices,
-        peak_kinds=event_kinds,
+        peaks_idx=candidate_indices,
+        peak_kinds=candidate_kinds,
         freq_hz=freq_hz,
         period_s=period_s,
         cfg=overlay_cfg,
         track_stem=track_stem,
         sample=sample,
+        peak_review_flags=[
+            bool((row.get("metrics") or {}).get("review_candidate", False))
+            for row in peak_rows
+        ],
+        peak_fallback_flags=[
+            bool((row.get("metrics") or {}).get("fallback_peak", False))
+            for row in peak_rows
+        ],
     )
+    overlay_track_event["metrics"] = {
+        "analysis_mode": "standard",
+        "mean_amplitude": track_row["amplitude"],
+        "dominant_frequency": track_row["frequency"],
+        "period": track_row["metrics"]["period"],
+        "num_peaks": track_row["metrics"]["num_peaks"],
+        "num_peak_candidates": track_row["metrics"]["num_peak_candidates"],
+        "num_fallback_candidates": track_row["metrics"]["num_fallback_candidates"],
+        "num_review_candidates": track_row["metrics"]["num_review_candidates"],
+        "frequency_valid": frequency_estimate.valid,
+        "frequency_method": frequency_estimate.method,
+        "frequency_failure_reason": frequency_estimate.failure_reason,
+        "frame_sampling": frequency_estimate.frame_sampling.metadata(),
+    }
 
     return track_row, wave_rows, peak_rows, overlay_track_event
 
@@ -1042,6 +1113,21 @@ def _ensure_track_minimum_peak_sets(
     return out
 
 
+def _peak_set_without_fallbacks(peak_set: Dict[str, Any]) -> Dict[str, Any]:
+    peaks_idx = np.asarray(peak_set.get("peaks_idx", []), dtype=int)
+    fallback = np.asarray(
+        (peak_set.get("peak_props") or {}).get("fallback_peak", np.zeros(peaks_idx.size, dtype=bool)),
+        dtype=bool,
+    )
+    if fallback.size != peaks_idx.size:
+        fallback = np.zeros(peaks_idx.size, dtype=bool)
+    keep = ~fallback
+    accepted = dict(peak_set)
+    accepted["peaks_idx"] = peaks_idx[keep]
+    accepted["peak_props"] = _filter_peak_props(peak_set.get("peak_props") or {}, keep)
+    return accepted
+
+
 def _event_sort_key(row: Dict[str, Any]) -> Tuple[int, int]:
     metrics = row.get("metrics")
     if not isinstance(metrics, dict):
@@ -1054,7 +1140,11 @@ def _event_sort_key(row: Dict[str, Any]) -> Tuple[int, int]:
     return peak_i, 1 if kind == "min" else 0
 
 
-def _sort_and_renumber_event_rows(rows: List[Dict[str, Any]], *, index_key: Optional[str] = None) -> List[Dict[str, Any]]:
+def _sort_and_renumber_event_rows(
+    rows: List[Dict[str, Any]],
+    *,
+    index_key: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     sorted_rows = sorted(rows, key=_event_sort_key)
     for idx, row in enumerate(sorted_rows, start=1):
         metrics = row.get("metrics")
@@ -1172,15 +1262,22 @@ def _build_overlay_track_event(
     track_stem: str,
     sample: str,
     peak_kinds: Optional[List[str]] = None,
+    peak_review_flags: Optional[List[bool]] = None,
+    peak_fallback_flags: Optional[List[bool]] = None,
 ) -> Dict[str, Any]:
     max_points = int(cfg.get("max_points", 300))
     xs, ys = _decimate_polyline(position, image_row, max_points=max_points)
 
     peak_pts: List[Dict[str, Any]] = []
     kinds = peak_kinds or []
+    review_flags = peak_review_flags or []
+    fallback_flags = peak_fallback_flags or []
     for event_pos, i in enumerate(peaks_idx.tolist()):
         if 0 <= i < len(frame):
             kind = kinds[event_pos] if event_pos < len(kinds) else "max"
+            review_candidate = bool(
+                event_pos < len(review_flags) and review_flags[event_pos]
+            )
             peak_pts.append({
                 "i": int(i),
                 "kind": kind,
@@ -1191,6 +1288,11 @@ def _build_overlay_track_event(
                 "image_row": float(image_row[i]),
                 "position": float(position[i]),
                 "amp": float(residual[i]),
+                "fallback_candidate": bool(
+                    event_pos < len(fallback_flags) and fallback_flags[event_pos]
+                ),
+                "review_candidate": review_candidate,
+                "measurement_valid": not review_candidate,
             })
 
     return {
