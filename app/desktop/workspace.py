@@ -18,7 +18,11 @@ def resource_root() -> Path:
 
 def default_workspace() -> Path:
     if sys.platform == "win32":
-        return Path(os.environ["LOCALAPPDATA"]) / "WaveAtlas"
+        return (
+            Path(os.environ["LOCALAPPDATA"])
+            / "net.rohitmahesh.waveatlas"
+            / "workspace"
+        )
     # Useful for backend development/tests; Windows is the supported desktop target.
     return Path(os.getenv("XDG_DATA_HOME", Path.home() / ".local/share")) / "WaveAtlas"
 

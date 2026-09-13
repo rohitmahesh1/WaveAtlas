@@ -21,7 +21,9 @@ $prepare = @("scripts/prepare-desktop.py")
 if ($FetchModels) { $prepare += "--fetch-models" }
 Run-Checked "python" $prepare
 Run-Checked "python" @("-m", "unittest", "discover", "-s", "tests", "-v")
+Run-Checked "cargo" @("fmt", "--manifest-path", "desktop/src-tauri/Cargo.toml", "--", "--check")
 Run-Checked "python" @("-m", "PyInstaller", "--noconfirm", "--distpath", "desktop", "--workpath", "desktop/build", "desktop/backend.spec")
+Run-Checked "cargo" @("test", "--manifest-path", "desktop/src-tauri/Cargo.toml", "--locked")
 Run-Checked "$root/desktop/payload/waveatlas-backend.exe" @("--workspace", "$root/desktop/build/check-workspace", "--check")
 Run-Checked "python" @("scripts/smoke-desktop.py", "--backend", "$root/desktop/payload/waveatlas-backend.exe")
 $bundleOutput = "$root/desktop/src-tauri/target/release/bundle/nsis"

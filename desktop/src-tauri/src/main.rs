@@ -2,8 +2,8 @@
 
 use serde::Deserialize;
 use std::{
-    io::{BufRead, BufReader, Write},
-    path::PathBuf,
+    io::{self, BufRead, BufReader, Write},
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -29,6 +29,49 @@ struct Backend {
     ready: Mutex<Option<Ready>>,
     closing: AtomicBool,
     workspace: PathBuf,
+}
+
+fn migrate_legacy_workspace(legacy: &Path, workspace: &Path) -> io::Result<()> {
+    // Preview builds stored research data at `%LOCALAPPDATA%\WaveAtlas`, which is
+    // also the default per-user NSIS install directory. Move only workspace
+    // entries so an installed executable and its resources stay in place.
+    if !legacy.join("workspace.json").is_file() || workspace.join("workspace.json").is_file() {
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(workspace)?;
+    // The identity marker moves last. If migration is interrupted, the next
+    // launch sees the legacy marker and safely resumes the remaining entries.
+    for name in [
+        "waveatlas.sqlite",
+        "artifacts",
+        "backups",
+        "logs",
+        "scratch",
+        "cache",
+        "workspace.lock",
+        "workspace.json",
+    ] {
+        let source = legacy.join(name);
+        if !source.exists() {
+            continue;
+        }
+        let destination = workspace.join(name);
+        if destination.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "Cannot migrate {} because {} already exists",
+                    source.display(),
+                    destination.display()
+                ),
+            ));
+        }
+        std::fs::rename(source, destination)?;
+    }
+    // A default installation can leave binaries in the legacy directory.
+    let _ = std::fs::remove_dir(legacy);
+    Ok(())
 }
 
 impl Drop for Backend {
@@ -286,7 +329,9 @@ fn main() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let workspace = app.path().local_data_dir()?.join("WaveAtlas");
+            let workspace = app.path().app_local_data_dir()?.join("workspace");
+            let legacy_workspace = app.path().local_data_dir()?.join("WaveAtlas");
+            migrate_legacy_workspace(&legacy_workspace, &workspace)?;
             app.manage(Backend {
                 child: Mutex::new(None),
                 ready: Mutex::new(None),
@@ -298,10 +343,8 @@ fn main() {
             let logs = MenuItem::with_id(app, "logs", "Open Logs", true, None::<&str>)?;
             let downloads =
                 MenuItem::with_id(app, "downloads", "Open Downloads", true, None::<&str>)?;
-            let about =
-                MenuItem::with_id(app, "about", "About WaveAtlas", true, None::<&str>)?;
-            let help =
-                Submenu::with_items(app, "Help", true, &[&data, &logs, &downloads, &about])?;
+            let about = MenuItem::with_id(app, "about", "About WaveAtlas", true, None::<&str>)?;
+            let help = Submenu::with_items(app, "Help", true, &[&data, &logs, &downloads, &about])?;
             app.set_menu(Menu::with_items(app, &[&help])?)?;
             app.on_menu_event(|app, event| {
                 if event.id().as_ref() == "about" {
@@ -318,9 +361,7 @@ fn main() {
                                 ready.version, short_commit, ready.model_release
                             )
                         })
-                        .unwrap_or_else(|| {
-                            format!("WaveAtlas {}", env!("CARGO_PKG_VERSION"))
-                        });
+                        .unwrap_or_else(|| format!("WaveAtlas {}", env!("CARGO_PKG_VERSION")));
                     app.dialog()
                         .message(details)
                         .title("About WaveAtlas")
@@ -377,4 +418,41 @@ fn main() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::migrate_legacy_workspace;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn legacy_workspace_moves_without_moving_installed_files() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "waveatlas-workspace-migration-{}-{unique}",
+            std::process::id()
+        ));
+        let legacy = root.join("WaveAtlas");
+        let workspace = root.join("net.rohitmahesh.waveatlas/workspace");
+        std::fs::create_dir_all(legacy.join("artifacts")).unwrap();
+        std::fs::write(legacy.join("workspace.json"), "identity").unwrap();
+        std::fs::write(legacy.join("waveatlas.sqlite"), "database").unwrap();
+        std::fs::write(legacy.join("artifacts/result.csv"), "result").unwrap();
+        std::fs::write(legacy.join("waveatlas-desktop.exe"), "installed app").unwrap();
+
+        migrate_legacy_workspace(&legacy, &workspace).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("workspace.json")).unwrap(),
+            "identity"
+        );
+        assert!(workspace.join("waveatlas.sqlite").is_file());
+        assert!(workspace.join("artifacts/result.csv").is_file());
+        assert!(legacy.join("waveatlas-desktop.exe").is_file());
+        assert!(!legacy.join("workspace.json").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
