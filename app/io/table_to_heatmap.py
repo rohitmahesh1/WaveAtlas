@@ -15,6 +15,7 @@ import matplotlib  # noqa: E402
 matplotlib.use("Agg", force=True)  # noqa: E402
 
 from ..cancel import CancellationRequested
+from ..heatmap_values import encode_heatmap_values
 
 
 _EXTREME_TABLE_MODES = {"binary", "extreme", "extremes", "extreme_mask", "intensity", "legacy"}
@@ -135,11 +136,6 @@ def _value_range(values: np.ndarray) -> Tuple[Optional[float], Optional[float]]:
     return float(np.min(values)), float(np.max(values))
 
 
-def _encode_heatmap_values(values: np.ndarray) -> bytes:
-    arr = np.ascontiguousarray(values, dtype="<f4")
-    return arr.tobytes(order="C")
-
-
 def table_to_heatmap_payload(
     table_bytes: bytes,
     *,
@@ -248,7 +244,7 @@ def table_to_heatmap_payload(
 
     cmap_fn = matplotlib.colormaps.get_cmap(cmap)
     rgba = np.asarray(cmap_fn(norm, bytes=True), dtype=np.uint8)
-    out_img = Image.fromarray(rgba, mode="RGBA")
+    out_img = Image.fromarray(rgba)
     _check_cancel(cancel_cb)
 
     buf = io.BytesIO()
@@ -261,8 +257,16 @@ def table_to_heatmap_payload(
         "nrows": int(nrows),
         "ncols": int(ncols),
         "source_kind": "table",
+        "input_representation": "numeric_matrix",
+        "analysis_representation": "scalar_float32",
+        "analysis_value_source": "processed_numeric_matrix",
+        "analysis_image_normalization": "finite_min_max",
+        "quantitative_information": "native_numeric",
+        "lossy_analysis_input": bool(binarize or non_finite_count),
         "source_rows": int(nrows),
         "source_cols": int(ncols),
+        "analysis_rows": int(nrows),
+        "analysis_cols": int(ncols),
         "output_width": int(ncols),
         "output_height": int(nrows),
         "pixel_mapping": "table_cell",
@@ -294,12 +298,20 @@ def table_to_heatmap_payload(
         "png_bytes": len(png_bytes),
     }
     _check_cancel(cancel_cb)
-    value_bytes = _encode_heatmap_values(filtered)
+    value_bytes = encode_heatmap_values(filtered)
     _check_cancel(cancel_cb)
     value_meta: Dict[str, Any] = {
         "source_kind": "table",
+        "input_representation": "numeric_matrix",
+        "analysis_representation": "scalar_float32",
+        "analysis_value_source": "processed_numeric_matrix",
+        "analysis_image_normalization": "finite_min_max",
+        "quantitative_information": "native_numeric",
+        "lossy_analysis_input": bool(binarize or non_finite_count),
         "source_rows": int(nrows),
         "source_cols": int(ncols),
+        "analysis_rows": int(nrows),
+        "analysis_cols": int(ncols),
         "output_width": int(ncols),
         "output_height": int(nrows),
         "pixel_mapping": "table_cell",

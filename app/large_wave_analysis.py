@@ -14,6 +14,12 @@ from .extract_core import detect_peak_sets
 from .features import bulge_from_props, json_sanitize
 from .large_wave_fit import LargeWaveFit, fit_large_wave
 from .sampling import resolve_sampling_rate
+from .spatial_calibration import (
+    apply_spatial_calibration,
+    apply_spatial_calibration_many,
+    resolve_spatial_calibration,
+    spatial_calibration_from_record,
+)
 from .signal.detrend import detrend_with_fit
 from .signal.period import estimate_dominant_frequency, resolve_positive_frequency
 from .track_coordinates import (
@@ -83,6 +89,16 @@ LARGE_WAVE_TRACK_FIELDS = [
     "detrend_fallback_used",
     "detrend_fallback_reason",
     "detrend_inlier_fraction",
+    "Spatial Calibration (µm/pixel)",
+    "Median Amplitude (µm)",
+    "Maximum Amplitude (µm)",
+    "Maximum Speed (µm/sec)",
+    "Median Apex Curvature (µm/frame^2)",
+    "spatial_calibration_um_per_px",
+    "mean_large_wave_amplitude_um",
+    "max_large_wave_amplitude_um",
+    "max_speed_um_per_s",
+    "mean_apex_curvature_um_per_frame2",
 ]
 
 STANDARD_WAVE_FIELDS = [
@@ -160,6 +176,15 @@ STANDARD_WAVE_FIELDS = [
     "Detrend Fallback Used",
     "Detrend Fallback Reason",
     "Detrend Inlier Fraction",
+    "Spatial Calibration (µm/pixel)",
+    "Position 1 (µm)",
+    "Position 2 (µm)",
+    "Amplitude (µm)",
+    "Signed Amplitude (µm)",
+    "Displacement (µm)",
+    "Velocity (µm/sec)",
+    "Wavelength (µm)",
+    "Peak Position (µm)",
 ]
 
 LARGE_WAVE_MEASUREMENT_FIELDS = [
@@ -219,6 +244,30 @@ LARGE_WAVE_MEASUREMENT_FIELDS = [
     "apex_curvature_px_per_frame2",
     "integrated_displacement_px_s",
     "grouped_event",
+    "Peak Prominence (µm)",
+    "Maximum Approach Speed (µm/sec)",
+    "Maximum Recovery Speed (µm/sec)",
+    "Maximum Speed (µm/sec)",
+    "Apex Curvature (µm/frame^2)",
+    "Integrated Displacement (µm-seconds)",
+    "Baseline Start Position (µm)",
+    "Baseline End Position (µm)",
+    "Baseline Slope (µm/frame)",
+    "Baseline Velocity (µm/sec)",
+    "spatial_calibration_um_per_px",
+    "peak_position_um",
+    "signed_amplitude_um",
+    "amplitude_um",
+    "prominence_um",
+    "max_approach_speed_um_per_s",
+    "max_recovery_speed_um_per_s",
+    "max_speed_um_per_s",
+    "apex_curvature_um_per_frame2",
+    "integrated_displacement_um_s",
+    "baseline_start_position_um",
+    "baseline_end_position_um",
+    "baseline_slope_um_per_frame",
+    "baseline_velocity_um_per_s",
 ]
 
 LARGE_WAVE_EVENT_FIELDS = [
@@ -267,6 +316,22 @@ LARGE_WAVE_EVENT_FIELDS = [
     "period_from_previous_frames",
     "period_from_previous_s",
     "frequency_hz",
+    "Spatial Calibration (µm/pixel)",
+    "Median Amplitude (µm)",
+    "Maximum Amplitude (µm)",
+    "Amplitude IQR (µm)",
+    "Median Prominence (µm)",
+    "Maximum Speed (µm/sec)",
+    "Median Apex Curvature (µm/frame^2)",
+    "Spatial Coverage (µm)",
+    "spatial_calibration_um_per_px",
+    "median_amplitude_um",
+    "max_amplitude_um",
+    "amplitude_iqr_um",
+    "median_prominence_um",
+    "max_speed_um_per_s",
+    "median_apex_curvature_um_per_frame2",
+    "spatial_coverage_um",
 ]
 
 
@@ -372,7 +437,7 @@ def prepare_large_wave_track(
             "sample": sample,
             "coord_origin": coordinate_origin(heatmap_meta),
             "pixel_mapping": (heatmap_meta or {}).get("pixel_mapping"),
-            "coordinate_space": "bottom_left_frame_position",
+            "coordinate_space": "bottom_left_source_frame_position",
             "detrend": detrend_meta,
         },
         "overlay": {},
@@ -504,6 +569,7 @@ def analyze_large_wave_events(
     large_cfg = (((config.get("analysis") or {}).get("large_wave") or {}))
     event_cfg = large_cfg.get("events") or {}
     sampling_rate = resolve_sampling_rate(config)
+    spatial_calibration = resolve_spatial_calibration(config)
     track_paths = [prepared.track_path for prepared in prepared_tracks]
     track_rows = [prepared.track_row for prepared in prepared_tracks]
     overlay_events = [prepared.overlay_event for prepared in prepared_tracks]
@@ -647,6 +713,18 @@ def analyze_large_wave_events(
         track_row["amplitude"] = summary.get("mean_large_wave_amplitude_px")
         track_row["frequency"] = summary.get("large_wave_frequency_hz")
         track_row["error"] = summary.get("track_fit_error_median")
+
+    apply_spatial_calibration_many(measurements, spatial_calibration)
+    apply_spatial_calibration_many(events, spatial_calibration)
+    apply_spatial_calibration_many(track_summaries.values(), spatial_calibration)
+    for row in kept_wave_rows:
+        metrics = row.get("metrics")
+        if isinstance(metrics, dict):
+            apply_spatial_calibration(metrics, spatial_calibration)
+    for track_row in track_rows:
+        metrics = track_row.get("metrics")
+        if isinstance(metrics, dict):
+            apply_spatial_calibration(metrics, spatial_calibration)
 
     return LargeWaveAnalysisResult(
         track_rows=track_rows,
@@ -1144,7 +1222,7 @@ def _track_csv_row(track_row: Dict[str, Any], summary: Dict[str, Any]) -> Dict[s
         "detrend_fallback_reason": detrend.get("fallback_reason"),
         "detrend_inlier_fraction": detrend.get("inlier_fraction"),
     }
-    return {
+    output = {
         "Track ID": track_index,
         "Points": summary.get("point_count"),
         "Broad Peaks": summary.get("large_wave_measurement_count"),
@@ -1162,6 +1240,8 @@ def _track_csv_row(track_row: Dict[str, Any], summary: Dict[str, Any]) -> Dict[s
         ),
         **raw,
     }
+    apply_spatial_calibration(output, spatial_calibration_from_record(summary))
+    return output
 
 
 def _measurement_csv_row(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -1272,11 +1352,20 @@ def _measurement_csv_row(row: Dict[str, Any]) -> Dict[str, Any]:
         ),
         "Grouped Event": row.get("grouped_event"),
     }
-    return {**standard, **friendly, **row}
+    output = {**standard, **friendly, **row}
+    apply_spatial_calibration(output, spatial_calibration_from_record(row))
+    output.update({
+        "Position 1 (µm)": row.get("pos1_um"),
+        "Position 2 (µm)": row.get("pos2_um"),
+        "Displacement (µm)": row.get("delta_pos_um"),
+        "Wavelength (µm)": row.get("wavelength_um"),
+        "Peak Position (µm)": row.get("peak_position_um"),
+    })
+    return output
 
 
 def _event_csv_row(row: Dict[str, Any]) -> Dict[str, Any]:
-    return {
+    output = {
         "Large Wave ID": row.get("event_id"),
         "Direction": row.get("direction"),
         "Tracks": row.get("track_count"),
@@ -1301,6 +1390,8 @@ def _event_csv_row(row: Dict[str, Any]) -> Dict[str, Any]:
         "Frequency (Hz)": row.get("frequency_hz"),
         **row,
     }
+    apply_spatial_calibration(output, spatial_calibration_from_record(row))
+    return output
 
 
 def _csv_bytes(rows: List[Dict[str, Any]], fields: List[str]) -> bytes:

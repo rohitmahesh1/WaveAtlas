@@ -12,7 +12,7 @@ from .analysis_mode import LARGE_WAVE_ANALYSIS_MODE
 
 ColumnLabelProfile = Literal["familiar", "descriptive"]
 
-MEASUREMENT_SCHEMA_VERSION = 2
+MEASUREMENT_SCHEMA_VERSION = 3
 DEFAULT_COLUMN_LABEL_PROFILE: ColumnLabelProfile = "familiar"
 COLUMN_LABEL_PROFILES: Tuple[ColumnLabelProfile, ...] = ("familiar", "descriptive")
 
@@ -23,6 +23,16 @@ MEASUREMENT_STATUS_CONTRACT = {
     "review": "The value is available for review but has not passed a calibrated scientific-evidence rule.",
     "accepted": "The value passed the named evidence_rule_version.",
     "accepted_requires_evidence_rule_version": True,
+}
+
+SPATIAL_CALIBRATION_CONTRACT = {
+    "config_field": "io.spatial_calibration.micrometers_per_pixel",
+    "applies_to": "horizontal source-image position axis",
+    "conversion": "physical_value_um = source_pixel_value * micrometers_per_pixel",
+    "source_pixel_values_retained": True,
+    "physical_values_optional": True,
+    "frame_axis_scaled": False,
+    "angle_definition": "arctangent of source pixels per frame; unchanged by spatial calibration",
 }
 
 
@@ -49,7 +59,7 @@ _DEFINITIONS = (
         operational_definition="Frequency of the strongest accepted spectral component in the detrended track position trace.",
         algorithm="Detrend the track, estimate its dominant spectral frequency, and constrain the result to the configured frequency range.",
         unit="Hz",
-        coordinate_space="time in seconds; position in processed-image pixels",
+        coordinate_space="time in seconds; position in source-image pixels",
         aggregation_level="track",
         modes=("standard",),
         validity=(
@@ -116,7 +126,7 @@ _DEFINITIONS = (
         operational_definition="Median time separation between a neighboring pair of fitted ripple tracks over their shared horizontal range.",
         algorithm="Evaluate both fitted track lines at shared horizontal samples and take the median positive frame gap, converted by the sampling rate.",
         unit="s",
-        coordinate_space="time in seconds; horizontal position in processed-image pixels",
+        coordinate_space="time in seconds; horizontal position in source-image pixels",
         aggregation_level="neighboring track pair",
         modes=("ripple_family",),
         validity="Valid when the tracks overlap, the median gap is within configured limits, and gap variability passes its threshold.",
@@ -167,8 +177,8 @@ _DEFINITIONS = (
         quantity="Signed ripple propagation velocity",
         operational_definition="Signed horizontal displacement per second along a fitted ripple track.",
         algorithm="Multiply fitted track slope in pixels per frame by the sampling rate.",
-        unit="processed px/s",
-        coordinate_space="bottom-left frame/processed-image-position coordinates",
+        unit="source px/s",
+        coordinate_space="bottom-left frame/source-image-position coordinates",
         aggregation_level="track or neighboring track pair",
         modes=("ripple_family",),
         validity="Valid when the fitted track slope and sampling rate are finite.",
@@ -181,7 +191,7 @@ _DEFINITIONS = (
         operational_definition="Angle of the fitted ripple track measured from the positive time axis.",
         algorithm="Convert the fitted pixels-per-frame slope to an angle using arctangent.",
         unit="degrees",
-        coordinate_space="bottom-left frame/processed-image-position coordinates",
+        coordinate_space="bottom-left frame/source-image-position coordinates",
         aggregation_level="track or neighboring track pair",
         modes=("ripple_family",),
         validity="Valid when the track line fit is finite.",
@@ -264,6 +274,7 @@ def _canonical_definition_payload() -> Dict[str, Any]:
         "version": MEASUREMENT_SCHEMA_VERSION,
         "definitions": [asdict(definition) for definition in _DEFINITIONS],
         "measurement_status": MEASUREMENT_STATUS_CONTRACT,
+        "spatial_calibration": SPATIAL_CALIBRATION_CONTRACT,
         "exports": measurement_export_contract(),
     }
 
@@ -292,6 +303,7 @@ def measurement_schema_payload() -> Dict[str, Any]:
         **measurement_schema_identity(),
         "definitions": [asdict(definition) for definition in _DEFINITIONS],
         "measurement_status": MEASUREMENT_STATUS_CONTRACT,
+        "spatial_calibration": SPATIAL_CALIBRATION_CONTRACT,
         "exports": measurement_export_contract(),
     }
 
@@ -321,6 +333,9 @@ WAVE_EXPORT_FAMILIAR_HEADERS = (
     "Period Estimate Valid", "Recurrence Period (frames)", "Recurrence Period (seconds)",
     "Recurrence Frequency (Hz)", "Wave Type", "Type Score", "Detrend Method",
     "Detrend Fallback Used", "Detrend Fallback Reason", "Detrend Inlier Fraction",
+    "Spatial Calibration (µm/pixel)", "Position 1 (µm)", "Position 2 (µm)",
+    "Amplitude (µm)", "Signed Amplitude (µm)", "Displacement (µm)",
+    "Velocity (µm/sec)", "Wavelength (µm)", "Peak Position (µm)",
 )
 
 _WAVE_EXPORT_BASE_KEYS = (
@@ -350,6 +365,10 @@ _WAVE_EXPORT_BASE_KEYS = (
     "period_boundary_error_fraction", "period_estimate_valid", "event_recurrence_interval_frames",
     "event_recurrence_interval_s", "event_recurrence_rate_hz", "wave_type", "wave_type_score",
     "detrend_method", "detrend_fallback_used", "detrend_fallback_reason", "detrend_inlier_fraction",
+    "spatial_calibration_um_per_px", "event_boundary_start_position_um",
+    "event_boundary_end_position_um", "event_amplitude_um", "event_signed_amplitude_um",
+    "event_displacement_um", "event_mean_velocity_um_per_s", "event_spatial_span_um",
+    "event_peak_position_um",
 )
 
 if len(WAVE_EXPORT_FAMILIAR_HEADERS) != len(_WAVE_EXPORT_BASE_KEYS):
@@ -372,6 +391,14 @@ def wave_export_descriptive_keys(analysis_mode: str) -> Tuple[str, ...]:
         "event_displacement_px": f"{prefix}_displacement_px",
         "event_mean_velocity_px_per_s": f"{prefix}_mean_velocity_px_per_s",
         "event_spatial_span_px": f"{prefix}_spatial_span_px",
+        "event_boundary_start_position_um": f"{prefix}_start_position_um",
+        "event_boundary_end_position_um": f"{prefix}_end_position_um",
+        "event_amplitude_um": f"{prefix}_amplitude_um",
+        "event_signed_amplitude_um": f"{prefix}_signed_amplitude_um",
+        "event_displacement_um": f"{prefix}_displacement_um",
+        "event_mean_velocity_um_per_s": f"{prefix}_mean_velocity_um_per_s",
+        "event_spatial_span_um": f"{prefix}_spatial_span_um",
+        "event_peak_position_um": f"{prefix}_peak_position_um",
         "event_recurrence_interval_frames": "large_wave_local_recurrence_interval_frames",
         "event_recurrence_interval_s": "large_wave_local_recurrence_interval_s",
         "event_recurrence_rate_hz": "large_wave_local_recurrence_rate_hz",
@@ -410,6 +437,9 @@ _RIPPLE_CANONICAL_FIELDS = {
         "line_r2", "duration_frames", "duration_s", "spatial_span_px", "x_start_px", "x_end_px",
         "y_start_frame", "y_end_frame", "neighbor_interval_count", "period_frames", "period_s",
         "frequency_hz", "frequency_method", "eligible",
+        "spatial_calibration_um_per_px", "slope_um_per_frame", "velocity_um_per_s",
+        "speed_um_per_s", "line_intercept_um", "line_rmse_um", "line_fit_rmse_um",
+        "spatial_span_um", "x_start_um", "x_end_um",
     ),
     "intervals": (
         "interval_index", "family_id", "family_label", "direction", "earlier_track_index",
@@ -417,6 +447,8 @@ _RIPPLE_CANONICAL_FIELDS = {
         "slope_px_per_frame", "velocity_px_per_s", "speed_px_per_s", "angle_deg",
         "angle_from_time_axis_deg", "period_frames", "period_s", "frequency_hz",
         "gap_mad_frames", "gap_cv", "measurement_method",
+        "spatial_calibration_um_per_px", "x_overlap_start_um", "x_overlap_end_um",
+        "slope_um_per_frame", "velocity_um_per_s", "speed_um_per_s",
     ),
     "families": (
         "family_id", "family_label", "direction", "track_count", "interval_count", "track_indices",
@@ -424,6 +456,8 @@ _RIPPLE_CANONICAL_FIELDS = {
         "median_angle_deg", "median_angle_from_time_axis_deg", "median_period_frames",
         "median_period_s", "median_frequency_hz", "frequency_iqr_hz", "x_min_px", "x_max_px",
         "y_min_frame", "y_max_frame", "frequency_method",
+        "spatial_calibration_um_per_px", "median_slope_um_per_frame",
+        "median_velocity_um_per_s", "median_speed_um_per_s", "x_min_um", "x_max_um",
     ),
 }
 
@@ -506,7 +540,15 @@ def descriptive_ripple_csv(data: bytes, export_name: str) -> bytes:
         raise ValueError(f"Unknown ripple export {export_name!r}")
     reader = csv.DictReader(io.StringIO(data.decode("utf-8-sig")))
     available = set(reader.fieldnames or ())
-    missing = [field for field in source_fields if field not in available]
+    optional_fields = {
+        field
+        for field in source_fields
+        if field == "spatial_calibration_um_per_px" or field.endswith("_um")
+        or "_um_per_" in field
+    }
+    missing = [
+        field for field in source_fields if field not in available and field not in optional_fields
+    ]
     if missing:
         raise ValueError(f"Ripple {name} CSV is missing canonical columns: {', '.join(missing)}")
 
@@ -515,6 +557,8 @@ def descriptive_ripple_csv(data: bytes, export_name: str) -> bytes:
     selected_fields: list[str] = []
     seen: set[str] = set()
     for source_field in source_fields:
+        if source_field not in available:
+            continue
         output_field = rename.get(source_field, source_field)
         if output_field in seen:
             continue

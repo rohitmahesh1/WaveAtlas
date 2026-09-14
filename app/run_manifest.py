@@ -21,7 +21,51 @@ from .models import Artifact, ArtifactKind, Peak, Track, Wave
 from .time_utils import utc_now_iso
 
 
-RUN_MANIFEST_SCHEMA_VERSION = 2
+RUN_MANIFEST_SCHEMA_VERSION = 3
+
+
+_ANALYSIS_INPUT_FIELDS = (
+    "source_kind",
+    "input_representation",
+    "analysis_representation",
+    "analysis_value_source",
+    "analysis_image_normalization",
+    "quantitative_information",
+    "lossy_analysis_input",
+    "source_rows",
+    "source_cols",
+    "analysis_rows",
+    "analysis_cols",
+    "pixel_mapping",
+    "coord_origin",
+    "source_origin",
+    "render_origin",
+    "grayscale_method",
+    "binary_grayscale",
+    "binary_threshold",
+    "low_hex",
+    "high_hex",
+    "invert",
+    "non_finite_policy",
+    "non_finite_count",
+    "table_mode",
+    "resolved_table_mode",
+    "value_encoding",
+    "coordinate_transform_version",
+    "native_resolution",
+    "source_coordinate_space",
+    "analysis_coordinate_space",
+    "analysis_to_source_x_scale",
+    "analysis_to_source_frame_scale",
+    "spatial_calibration_um_per_px",
+    "spatial_distance_unit",
+    "spatial_pixel_space",
+)
+
+
+def analysis_input_identity(heatmap_meta: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    source = heatmap_meta or {}
+    return {field: source.get(field) for field in _ANALYSIS_INPUT_FIELDS if field in source}
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -247,6 +291,7 @@ def publish_run_manifest_artifact(
             "content_type": upload.content_type,
             "byte_size": upload.byte_size,
             "sha256": source_sha256,
+            "analysis": analysis_input_identity(heatmap_meta),
         },
         database_outputs=database_result_digests(job_store.session, job_id),
         artifact_outputs=artifact_outputs,

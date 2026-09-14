@@ -2,6 +2,7 @@ import { HeatmapOptionsPanel } from "./HeatmapOptionsPanel";
 import { AnalysisOptionsPanel } from "./AnalysisOptionsPanel";
 import type { HeatmapOptions } from "../utils/heatmapOptions";
 import type { AnalysisMode } from "../utils/analysisOptions";
+import { spatialCalibrationError } from "../utils/spatialCalibration";
 
 export function RunPanel(props: {
   file: File | null;
@@ -11,14 +12,9 @@ export function RunPanel(props: {
     loading: boolean;
     originalWidth: number | null;
     originalHeight: number | null;
-    targetWidth: string;
-    targetHeight: string;
     helperText: string | null;
     loadError: string | null;
-    validationError: string | null;
     valid: boolean;
-    onTargetWidthChange: (value: string) => void;
-    onTargetHeightChange: (value: string) => void;
   } | null;
   jobId: string | null;
   status?: string;
@@ -28,6 +24,8 @@ export function RunPanel(props: {
   onHeatmapOptionsChange?: (value: HeatmapOptions) => void;
   analysisMode?: AnalysisMode;
   onAnalysisModeChange?: (value: AnalysisMode) => void;
+  spatialCalibrationValue?: string;
+  onSpatialCalibrationChange?: (value: string) => void;
   filteredCount: number;
   totalCount: number;
   onCancel?: () => void;
@@ -58,6 +56,8 @@ export function RunPanel(props: {
     onHeatmapOptionsChange,
     analysisMode = "standard",
     onAnalysisModeChange,
+    spatialCalibrationValue = "",
+    onSpatialCalibrationChange,
     filteredCount,
     totalCount,
     onCancel,
@@ -75,7 +75,10 @@ export function RunPanel(props: {
     heatmapDownloadDisabled,
     originalImageDownloadDisabled,
   } = props;
-  const canRun = Boolean(file) && (!imageSizing || (!imageSizing.loading && imageSizing.valid));
+  const calibrationError = spatialCalibrationError(spatialCalibrationValue);
+  const canRun = Boolean(file)
+    && (!imageSizing || (!imageSizing.loading && imageSizing.valid))
+    && !calibrationError;
   const normalizedStatus = String(status ?? "");
   const isCancelled = normalizedStatus === "cancelled";
   const isPausePending = normalizedStatus === "cancel_requested";
@@ -158,41 +161,34 @@ export function RunPanel(props: {
         {imageSizing ? (
           <div className="image-sizing-card">
             <div className="image-sizing-header">
-              <div className="image-sizing-title">Image processing size</div>
-              <div className="image-sizing-copy">Set the internal dimensions used before tracking.</div>
-            </div>
-            <div className="image-sizing-grid">
-              <label className="image-sizing-field">
-                Width (px)
-                <input
-                  type="number"
-                  min="1"
-                  inputMode="numeric"
-                  value={imageSizing.targetWidth}
-                  onChange={(e) => imageSizing.onTargetWidthChange(e.target.value)}
-                  disabled={imageSizing.loading}
-                  placeholder={imageSizing.originalWidth ? String(imageSizing.originalWidth) : "e.g. 1024"}
-                />
-              </label>
-              <label className="image-sizing-field">
-                Height (px)
-                <input
-                  type="number"
-                  min="1"
-                  inputMode="numeric"
-                  value={imageSizing.targetHeight}
-                  onChange={(e) => imageSizing.onTargetHeightChange(e.target.value)}
-                  disabled={imageSizing.loading}
-                  placeholder={imageSizing.originalHeight ? String(imageSizing.originalHeight) : "e.g. 768"}
-                />
-              </label>
+              <div className="image-sizing-title">Native-resolution analysis</div>
+              <div className="image-sizing-copy">
+                Original dimensions preserve the meaning of pixels, frames, and time.
+              </div>
             </div>
             {imageSizing.helperText ? <div className="image-sizing-hint">{imageSizing.helperText}</div> : null}
             {imageSizing.loadError ? <div className="image-sizing-error">{imageSizing.loadError}</div> : null}
-            {imageSizing.validationError ? (
-              <div className="image-sizing-error">{imageSizing.validationError}</div>
-            ) : null}
           </div>
+        ) : null}
+
+        {onSpatialCalibrationChange ? (
+          <label className="run-name-label">
+            Spatial scale (µm/pixel, optional)
+            <input
+              className="run-name-input"
+              type="number"
+              min="0"
+              step="any"
+              inputMode="decimal"
+              value={spatialCalibrationValue}
+              placeholder="e.g. 0.42"
+              onChange={(event) => onSpatialCalibrationChange(event.target.value)}
+            />
+            <span className="image-sizing-hint">
+              Adds µm equivalents to exports while retaining the pixel columns.
+            </span>
+            {calibrationError ? <span className="image-sizing-error">{calibrationError}</span> : null}
+          </label>
         ) : null}
 
         {onAnalysisModeChange ? (

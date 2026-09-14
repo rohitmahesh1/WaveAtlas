@@ -11,8 +11,6 @@ type ImagePromptState = {
   loading: boolean;
   originalWidth: number | null;
   originalHeight: number | null;
-  targetWidth: string;
-  targetHeight: string;
   loadError: string | null;
 };
 
@@ -21,15 +19,8 @@ const EMPTY_STATE: ImagePromptState = {
   loading: false,
   originalWidth: null,
   originalHeight: null,
-  targetWidth: "",
-  targetHeight: "",
   loadError: null,
 };
-
-function parsePositiveInt(value: string): number | null {
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
-}
 
 export function useImageProcessingPrompt() {
   const [state, setState] = useState<ImagePromptState>(EMPTY_STATE);
@@ -49,8 +40,6 @@ export function useImageProcessingPrompt() {
       loading: true,
       originalWidth: null,
       originalHeight: null,
-      targetWidth: "",
-      targetHeight: "",
       loadError: null,
     });
 
@@ -62,8 +51,6 @@ export function useImageProcessingPrompt() {
           loading: false,
           originalWidth: width,
           originalHeight: height,
-          targetWidth: String(width),
-          targetHeight: String(height),
           loadError: null,
         });
       })
@@ -74,9 +61,7 @@ export function useImageProcessingPrompt() {
           loading: false,
           originalWidth: null,
           originalHeight: null,
-          targetWidth: "",
-          targetHeight: "",
-          loadError: "Couldn't read the uploaded image size. Enter the processing dimensions manually.",
+          loadError: "Couldn't preview the image size. WaveAtlas will read it when analysis starts.",
         });
       });
   }, []);
@@ -86,36 +71,19 @@ export function useImageProcessingPrompt() {
     setState(EMPTY_STATE);
   }, []);
 
-  const setTargetWidth = useCallback((value: string) => {
-    setState((current) => ({ ...current, targetWidth: value }));
-  }, []);
-
-  const setTargetHeight = useCallback((value: string) => {
-    setState((current) => ({ ...current, targetHeight: value }));
-  }, []);
-
   const dimensions = useMemo<ImageProcessingDimensions | null>(() => {
-    if (!state.visible || state.loading) return null;
-    const width = parsePositiveInt(state.targetWidth);
-    const height = parsePositiveInt(state.targetHeight);
-    if (width == null || height == null) return null;
-    return { width, height };
-  }, [state.loading, state.targetHeight, state.targetWidth, state.visible]);
+    if (state.originalWidth == null || state.originalHeight == null) return null;
+    return { width: state.originalWidth, height: state.originalHeight };
+  }, [state.originalHeight, state.originalWidth]);
 
   const helperText = useMemo(() => {
     if (!state.visible) return null;
     if (state.loading) return "Reading image size...";
     if (state.originalWidth != null && state.originalHeight != null) {
-      return `Original image: ${state.originalWidth} x ${state.originalHeight}px. Adjust the internal processing size before starting.`;
+      return `Original image: ${state.originalWidth} x ${state.originalHeight}px. Analysis will use this native resolution.`;
     }
-    return "Provide the internal image size to use for processing.";
+    return "Analysis will use the uploaded image at its native resolution.";
   }, [state.loading, state.originalHeight, state.originalWidth, state.visible]);
-
-  const validationError = useMemo(() => {
-    if (!state.visible || state.loading) return null;
-    if (dimensions) return null;
-    return "Enter both width and height in pixels before starting this image run.";
-  }, [dimensions, state.loading, state.visible]);
 
   return {
     imageSizing: state.visible
@@ -123,14 +91,9 @@ export function useImageProcessingPrompt() {
           loading: state.loading,
           originalWidth: state.originalWidth,
           originalHeight: state.originalHeight,
-          targetWidth: state.targetWidth,
-          targetHeight: state.targetHeight,
           helperText,
           loadError: state.loadError,
-          validationError,
-          valid: Boolean(dimensions),
-          onTargetWidthChange: setTargetWidth,
-          onTargetHeightChange: setTargetHeight,
+          valid: !state.loading,
         }
       : null,
     dimensions,

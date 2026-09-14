@@ -8,6 +8,7 @@ import numpy as np
 from PIL import Image
 
 from ..cancel import CancellationRequested
+from ..heatmap_values import encode_heatmap_values
 
 
 def _check_cancel(cancel_cb: Optional[Callable[[], bool]]) -> None:
@@ -34,23 +35,6 @@ def _parse_hex_color(value: Optional[str]) -> Optional[np.ndarray]:
     return np.asarray(rgb, dtype=np.float32) / 255.0
 
 
-def _resize_size(width: int, height: int, cfg: Dict[str, Any]) -> Tuple[int, int]:
-    target_w = cfg.get("target_width", cfg.get("internal_width"))
-    target_h = cfg.get("target_height", cfg.get("internal_height"))
-    target_w = int(target_w) if target_w not in (None, "") else None
-    target_h = int(target_h) if target_h not in (None, "") else None
-
-    if target_w and target_w > 0 and target_h and target_h > 0:
-        return target_w, target_h
-    if target_w and target_w > 0:
-        scale = target_w / max(1, width)
-        return target_w, max(1, int(round(height * scale)))
-    if target_h and target_h > 0:
-        scale = target_h / max(1, height)
-        return max(1, int(round(width * scale))), target_h
-    return width, height
-
-
 def _composite_rgba(img: Image.Image, background_hex: str) -> Image.Image:
     rgba = img.convert("RGBA")
     bg_rgb = _parse_hex_color(background_hex)
@@ -74,16 +58,49 @@ def _rgb_to_hex_projection(rgb01: np.ndarray, low_rgb: np.ndarray, high_rgb: np.
     return np.clip(projected, 0.0, 1.0).astype(np.float32)
 
 
-def image_to_heatmap_bytes(
+def _input_representation(
+    *,
+    original_mode: str,
+    grayscale: bool,
+    binary_grayscale: bool,
+    color_projection: bool,
+) -> Tuple[str, str, bool]:
+    if binary_grayscale:
+        return "binary_image", "binary_scalar_raster", True
+    if color_projection:
+        return "rendered_color_image", "recovered_color_projection", True
+    if original_mode in {"1", "L"} and grayscale:
+        return "scalar_image", "native_scalar_raster", False
+    if original_mode in {"I", "F", "I;16", "I;16B", "I;16L"} and grayscale:
+        return "scalar_image", "scalar_raster_quantized_to_8_bit", True
+    return "color_image", "derived_luminance", True
+
+
+def image_to_heatmap_payload(
     image_bytes: bytes,
     *,
     config: Optional[Dict[str, Any]] = None,
     filename_hint: Optional[str] = None,
     cancel_cb: Optional[Callable[[], bool]] = None,
-) -> Tuple[bytes, Dict[str, Any]]:
+) -> Tuple[bytes, Dict[str, Any], bytes, Dict[str, Any]]:
     _check_cancel(cancel_cb)
     cfg = config or {}
     image_cfg = dict(cfg.get("image_input") or {})
+    resize_fields = (
+        "target_width",
+        "target_height",
+        "internal_width",
+        "internal_height",
+    )
+    configured_resize = [
+        field for field in resize_fields if image_cfg.get(field) not in (None, "")
+    ]
+    if configured_resize:
+        names = ", ".join(f"image_input.{field}" for field in configured_resize)
+        raise ValueError(
+            "Quantitative image analysis requires the original image dimensions; "
+            f"remove {names}."
+        )
 
     grayscale = bool(image_cfg.get("grayscale", True))
     binary_grayscale = bool(image_cfg.get("binary_grayscale", False))
@@ -95,6 +112,12 @@ def image_to_heatmap_bytes(
     alpha_background = str(image_cfg.get("alpha_background", "#000000"))
     low_hex = image_cfg.get("low_hex")
     high_hex = image_cfg.get("high_hex")
+    if (low_hex in (None, "")) != (high_hex in (None, "")):
+        raise ValueError("image_input.low_hex and image_input.high_hex must be supplied together")
+    if not grayscale and (low_hex not in (None, "") or high_hex not in (None, "")):
+        raise ValueError("image_input.low_hex/high_hex require image_input.grayscale=true")
+    if binary_grayscale and not grayscale:
+        raise ValueError("image_input.binary_grayscale requires image_input.grayscale=true")
     origin = str(
         image_cfg.get("origin", (cfg.get("heatmap") or {}).get("origin", "lower"))
     ).strip().lower()
@@ -108,17 +131,16 @@ def image_to_heatmap_bytes(
         rgb = _composite_rgba(img, alpha_background)
     _check_cancel(cancel_cb)
 
-    output_width, output_height = _resize_size(original_width, original_height, image_cfg)
-    if (output_width, output_height) != rgb.size:
-        rgb = rgb.resize((output_width, output_height), Image.Resampling.BILINEAR)
+    output_width, output_height = original_width, original_height
     _check_cancel(cancel_cb)
 
     rgb01 = np.asarray(rgb, dtype=np.float32) / 255.0
     method = "rgb_passthrough"
 
+    low_rgb = _parse_hex_color(low_hex)
+    high_rgb = _parse_hex_color(high_hex)
+    color_projection = bool(grayscale and low_rgb is not None and high_rgb is not None)
     if grayscale:
-        low_rgb = _parse_hex_color(low_hex)
-        high_rgb = _parse_hex_color(high_hex)
         if low_rgb is not None and high_rgb is not None:
             gray01 = _rgb_to_hex_projection(rgb01, low_rgb, high_rgb)
             method = "hex_projection"
@@ -128,13 +150,20 @@ def image_to_heatmap_bytes(
 
         if invert:
             gray01 = 1.0 - gray01
+            method = f"{method}_inverted"
 
         if binary_grayscale:
             gray01 = (gray01 >= binary_threshold).astype(np.float32)
             method = f"{method}_binary"
 
-        out_img = Image.fromarray((gray01 * 255.0).astype(np.uint8), mode="L")
+        out_img = Image.fromarray((gray01 * 255.0).astype(np.uint8))
     else:
+        # Extraction still needs a declared scalar raster. This mirrors the
+        # configured luminance interpretation while leaving the display RGB.
+        gray01 = _rgb_to_luminance(rgb01)
+        if invert:
+            gray01 = 1.0 - gray01
+        method = "luminance_from_rgb_display_inverted" if invert else "luminance_from_rgb_display"
         out_img = rgb
     _check_cancel(cancel_cb)
 
@@ -143,7 +172,14 @@ def image_to_heatmap_bytes(
     png_bytes = buf.getvalue()
     _check_cancel(cancel_cb)
 
-    meta: Dict[str, Any] = {
+    input_representation, quantitative_information, lossy = _input_representation(
+        original_mode=original_mode,
+        grayscale=grayscale,
+        binary_grayscale=binary_grayscale,
+        color_projection=color_projection,
+    )
+    value_bytes = encode_heatmap_values(gray01)
+    shared_meta: Dict[str, Any] = {
         "filename_hint": filename_hint,
         "format": "image",
         "original_mode": original_mode,
@@ -152,9 +188,17 @@ def image_to_heatmap_bytes(
         "output_width": int(output_width),
         "output_height": int(output_height),
         "source_kind": "image",
+        "input_representation": input_representation,
+        "analysis_representation": "scalar_float32",
+        "analysis_value_source": f"image_{method}",
+        "analysis_image_normalization": "finite_min_max",
+        "quantitative_information": quantitative_information,
+        "lossy_analysis_input": lossy,
         "source_rows": int(original_height),
         "source_cols": int(original_width),
-        "pixel_mapping": "processed_pixel",
+        "analysis_rows": int(output_height),
+        "analysis_cols": int(output_width),
+        "pixel_mapping": "source_pixel",
         "coord_origin": "lower",
         "source_origin": origin,
         "render_origin": "upper",
@@ -168,6 +212,37 @@ def image_to_heatmap_bytes(
         "high_hex": str(high_hex) if high_hex else None,
         "invert": invert,
         "alpha_background": alpha_background,
+        "value_encoding": "float32_le",
+        "value_dtype": "float32",
+        "value_order": "row_major",
+        "value_row_order": "top_to_bottom_image",
+        "value_count": int(output_height * output_width),
+        "value_nbytes": len(value_bytes),
+        "z_label": "image intensity",
+        "z_min": float(np.min(gray01)) if gray01.size else None,
+        "z_max": float(np.max(gray01)) if gray01.size else None,
+        "z_vmin": 0.0,
+        "z_vmax": 1.0,
+    }
+    meta: Dict[str, Any] = {
+        **shared_meta,
         "png_bytes": len(png_bytes),
     }
+    value_meta = dict(shared_meta)
+    return png_bytes, meta, value_bytes, value_meta
+
+
+def image_to_heatmap_bytes(
+    image_bytes: bytes,
+    *,
+    config: Optional[Dict[str, Any]] = None,
+    filename_hint: Optional[str] = None,
+    cancel_cb: Optional[Callable[[], bool]] = None,
+) -> Tuple[bytes, Dict[str, Any]]:
+    png_bytes, meta, _, _ = image_to_heatmap_payload(
+        image_bytes,
+        config=config,
+        filename_hint=filename_hint,
+        cancel_cb=cancel_cb,
+    )
     return png_bytes, meta

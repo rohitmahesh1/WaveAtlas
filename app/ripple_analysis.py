@@ -12,6 +12,11 @@ import numpy as np
 
 from .cancel import CancellationRequested
 from .sampling import resolve_sampling_rate
+from .spatial_calibration import (
+    apply_spatial_calibration,
+    apply_spatial_calibration_many,
+    resolve_spatial_calibration,
+)
 from .track_coordinates import coordinate_origin, load_track_coordinates
 
 
@@ -104,6 +109,24 @@ RIPPLE_TRACK_FIELDS = [
     "frequency_hz",
     "frequency_method",
     "eligible",
+    "Spatial Calibration (µm/pixel)",
+    "Start X (µm)",
+    "End X (µm)",
+    "Spatial Span (µm)",
+    "Slope (µm/frame)",
+    "Velocity (µm/sec)",
+    "Speed (µm/sec)",
+    "Line Fit Error (RMSE µm)",
+    "spatial_calibration_um_per_px",
+    "slope_um_per_frame",
+    "velocity_um_per_s",
+    "speed_um_per_s",
+    "line_intercept_um",
+    "line_rmse_um",
+    "line_fit_rmse_um",
+    "spatial_span_um",
+    "x_start_um",
+    "x_end_um",
 ]
 
 RIPPLE_INTERVAL_FIELDS = [
@@ -145,6 +168,18 @@ RIPPLE_INTERVAL_FIELDS = [
     "gap_mad_frames",
     "gap_cv",
     "measurement_method",
+    "Spatial Calibration (µm/pixel)",
+    "Slope (µm/frame)",
+    "Velocity (µm/sec)",
+    "Speed (µm/sec)",
+    "X Overlap Start (µm)",
+    "X Overlap End (µm)",
+    "spatial_calibration_um_per_px",
+    "slope_um_per_frame",
+    "velocity_um_per_s",
+    "speed_um_per_s",
+    "x_overlap_start_um",
+    "x_overlap_end_um",
 ]
 
 RIPPLE_FAMILY_FIELDS = [
@@ -186,6 +221,18 @@ RIPPLE_FAMILY_FIELDS = [
     "y_min_frame",
     "y_max_frame",
     "frequency_method",
+    "Spatial Calibration (µm/pixel)",
+    "Median Slope (µm/frame)",
+    "Median Velocity (µm/sec)",
+    "Median Speed (µm/sec)",
+    "X Min (µm)",
+    "X Max (µm)",
+    "spatial_calibration_um_per_px",
+    "median_slope_um_per_frame",
+    "median_velocity_um_per_s",
+    "median_speed_um_per_s",
+    "x_min_um",
+    "x_max_um",
 ]
 
 
@@ -203,6 +250,7 @@ def analyze_ripple_tracks(
     family_cfg = (ripple_cfg.get("family") or {})
     frequency_cfg = (ripple_cfg.get("frequency") or {})
     sampling_rate = resolve_sampling_rate(config)
+    spatial_calibration = resolve_spatial_calibration(config)
     min_track_rows = int(ripple_cfg.get("min_track_rows", 30))
     min_abs_slope = float(ripple_cfg.get("min_abs_slope", 0.05))
     max_line_rmse = float(ripple_cfg.get("max_line_rmse_px", 12.0))
@@ -292,7 +340,7 @@ def analyze_ripple_tracks(
             frequency_method=frequency_method,
         )
         metrics.update({
-            "coordinate_space": "bottom_left_frame_position",
+            "coordinate_space": "bottom_left_source_frame_position",
             "coord_origin": coordinate_origin(heatmap_meta),
             "pixel_mapping": (heatmap_meta or {}).get("pixel_mapping"),
         })
@@ -364,6 +412,14 @@ def analyze_ripple_tracks(
             "frequency_method": frequency_method,
             "eligible": geometry.eligible,
         })
+
+    for track_row in track_rows:
+        metrics = track_row.get("metrics")
+        if isinstance(metrics, dict):
+            apply_spatial_calibration(metrics, spatial_calibration)
+    apply_spatial_calibration_many(track_csv_rows, spatial_calibration)
+    apply_spatial_calibration_many(intervals, spatial_calibration)
+    apply_spatial_calibration_many(families, spatial_calibration)
 
     return RippleAnalysisResult(
         track_rows=track_rows,

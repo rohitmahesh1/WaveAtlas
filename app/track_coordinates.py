@@ -12,6 +12,27 @@ TRACK_COORDINATE_ORDER = "image_row_position"
 TRACK_INDEX_BASE = 0
 SCIENTIFIC_COORDINATE_ORIGIN = "lower"
 
+_COORDINATE_METADATA_FIELDS = (
+    "coordinate_transform_version",
+    "native_resolution",
+    "source_rows",
+    "source_cols",
+    "analysis_rows",
+    "analysis_cols",
+    "source_coordinate_space",
+    "analysis_coordinate_space",
+    "analysis_to_source_x_scale",
+    "analysis_to_source_frame_scale",
+    "spatial_calibration_um_per_px",
+    "spatial_distance_unit",
+    "spatial_pixel_space",
+)
+
+
+def _coordinate_metadata(meta: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    source = meta or {}
+    return {key: source.get(key) for key in _COORDINATE_METADATA_FIELDS if key in source}
+
 
 @dataclass(frozen=True)
 class TrackCoordinates:
@@ -198,6 +219,7 @@ def track_artifact_metadata(
         "coordinate_index_base": TRACK_INDEX_BASE,
         "coord_origin": coordinate_origin(meta),
         "image_height": coordinate_height(meta),
+        **_coordinate_metadata(meta),
     }
 
 
@@ -217,4 +239,5 @@ def track_manifest_metadata(
         "coordinate_index_base": TRACK_INDEX_BASE,
         "coord_origin": coordinate_origin(heatmap_meta),
         "image_height": coordinate_height(heatmap_meta),
+        **_coordinate_metadata(heatmap_meta),
     }

@@ -13,7 +13,8 @@ from .cancel import CancellationRequested
 from .job_store import JobStore
 from .models import ArtifactKind, EventType, JobStatus
 
-from .io.image_to_heatmap import image_to_heatmap_bytes
+from .heatmap_values import analysis_image_bytes
+from .io.image_to_heatmap import image_to_heatmap_payload
 from .io.table_to_heatmap import table_to_heatmap_payload
 from .extract_core import select_kymo_runner, process_track
 from .analysis_mode import LARGE_WAVE_ANALYSIS_MODE, RIPPLE_ANALYSIS_MODE, resolve_analysis_mode
@@ -31,6 +32,7 @@ from .run_manifest import (
     sha256_bytes,
     sha256_file,
 )
+from .spatial_calibration import coordinate_contract_metadata
 from .time_utils import utc_now, utc_now_iso
 from .track_coordinates import track_artifact_metadata, track_manifest_metadata
 
@@ -397,7 +399,7 @@ def run_job(
             user_log("Generating heatmap", stage="heatmap")
             check_cancel("cancel_requested_before_heatmap")
             if upload.kind == ArtifactKind.upload_image:
-                heatmap_png, heatmap_meta = image_to_heatmap_bytes(
+                heatmap_png, heatmap_meta, heatmap_value_bytes, heatmap_value_meta = image_to_heatmap_payload(
                     input_bytes,
                     config=config,
                     filename_hint=str(input_filename) if input_filename else None,
@@ -413,21 +415,20 @@ def run_job(
             check_cancel("cancel_requested_after_heatmap")
             heatmap_meta = {
                 **(heatmap_meta or {}),
+                **coordinate_contract_metadata(heatmap_meta or {}, config),
                 "source_artifact_id": str(upload.id),
                 "source_artifact_kind": upload.kind.value,
                 "source_filename": input_filename,
                 "source_byte_size": len(input_bytes),
                 "source_sha256": input_sha256,
             }
-            check_cancel("cancel_requested_before_heatmap_publish")
-            publish_bytes(
-                kind=ArtifactKind.base_heatmap,
-                filename="base_heatmap.png",
-                data=heatmap_png,
-                content_type="image/png",
-                label="base_heatmap",
-                meta=heatmap_meta,
-            )
+            heatmap_value_meta = {
+                **(heatmap_value_meta or {}),
+                **coordinate_contract_metadata(heatmap_value_meta or heatmap_meta, config),
+            }
+            # Publish the authoritative values first. If cancellation occurs
+            # between the two writes, resume can safely regenerate the display
+            # artifact; the inverse ordering could leave a display-only run.
             if heatmap_value_bytes is not None:
                 check_cancel("cancel_requested_before_heatmap_values_publish")
                 publish_bytes(
@@ -442,6 +443,15 @@ def run_job(
                         "source_artifact_kind": upload.kind.value,
                     },
                 )
+            check_cancel("cancel_requested_before_heatmap_publish")
+            publish_bytes(
+                kind=ArtifactKind.base_heatmap,
+                filename="base_heatmap.png",
+                data=heatmap_png,
+                content_type="image/png",
+                label="base_heatmap",
+                meta=heatmap_meta,
+            )
             check_cancel("cancel_requested_after_heatmap_publish")
             set_progress("heatmap_ready")
             user_log("Heatmap ready", stage="heatmap_ready")
@@ -455,11 +465,27 @@ def run_job(
 
         check_cancel("cancel_requested_after_heatmap")
 
-        if analysis_mode in {RIPPLE_ANALYSIS_MODE, LARGE_WAVE_ANALYSIS_MODE} and heatmap_value_bytes is None:
+        if heatmap_value_bytes is None:
             cached_values, cached_meta = load_heatmap_values_artifact()
             if cached_values is not None:
                 heatmap_value_bytes = cached_values
                 heatmap_value_meta = cached_meta or {}
+
+        if heatmap_value_bytes is None:
+            raise PipelineError(
+                "This run has no authoritative analysis raster. Start a new run from the original input."
+            )
+
+        # Extractors consume a deterministic grayscale rendering of the scalar
+        # analysis raster. The colored base heatmap remains a display artifact.
+        analysis_dir = scratch_dir / "analysis"
+        analysis_dir.mkdir(parents=True, exist_ok=True)
+        analysis_heatmap_path = analysis_dir / "base_heatmap.png"
+        check_cancel("cancel_requested_before_analysis_heatmap_write")
+        analysis_heatmap_path.write_bytes(
+            analysis_image_bytes(heatmap_value_bytes, heatmap_value_meta or {})
+        )
+        check_cancel("cancel_requested_after_analysis_heatmap_write")
 
         # -----------------------------
         # Heatmap -> tracks (kymo runner) or resume from artifacts
@@ -594,7 +620,7 @@ def run_job(
                         last_ripple_extract_stage = stage
 
                 ripple_out = run_ripple_extraction(
-                    heatmap_path=heatmap_path,
+                    heatmap_path=analysis_heatmap_path,
                     scratch_dir=scratch_dir,
                     config=config,
                     heatmap_value_bytes=heatmap_value_bytes,
@@ -634,7 +660,7 @@ def run_job(
                         last_large_wave_extract_stage = mapped_stage
 
                 large_wave_out = run_large_wave_extraction(
-                    heatmap_path=heatmap_path,
+                    heatmap_path=analysis_heatmap_path,
                     scratch_dir=scratch_dir,
                     config=config,
                     heatmap_value_bytes=heatmap_value_bytes,
@@ -677,7 +703,7 @@ def run_job(
                         last_kymo_stage = stage
 
                 kymo_out = runner.run(
-                    heatmap_path=heatmap_path,
+                    heatmap_path=analysis_heatmap_path,
                     scratch_dir=scratch_dir,
                     progress_cb=kymo_progress,
                     cancel_cb=cancelled,

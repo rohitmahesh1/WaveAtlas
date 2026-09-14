@@ -39,7 +39,7 @@ Optional (not in the default file):
 ## image_input
 Used when an uploaded image is converted into the canonical base heatmap artifact.
 - `image_input.grayscale` (bool): Convert uploaded images to grayscale before tracking. Change when: you want to pass the uploaded RGB image through directly.
-- `image_input.target_width` / `image_input.target_height` (int or null): Resize image input to internal processing dimensions. If only one is set, aspect ratio is preserved.
+- Image inputs are analyzed at their original dimensions. Legacy `target_width`, `target_height`, `internal_width`, and `internal_height` settings are rejected because resizing changes pixel-based measurements.
 - `image_input.low_hex` / `image_input.high_hex` (hex string or null): Optional color endpoints for mapping a false-color image into intensity. Use these for dark-purple-to-yellow image scales.
 - `image_input.invert` (bool): Invert the computed intensity after grayscale conversion.
 - `image_input.alpha_background` (hex string): Background color used when compositing transparent image uploads.
