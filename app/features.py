@@ -747,6 +747,7 @@ def build_wave_rows(
             "peak_position_raw": peak_pos,
             "peak_frame_y_axis": peak_frame,
             "peak_position_x_axis": peak_pos,
+            "peak_position_px": peak_pos,
             "event_value": event_amp,
             "peak_value_original": amp,
             "frame1_raw": frame1_image_row,

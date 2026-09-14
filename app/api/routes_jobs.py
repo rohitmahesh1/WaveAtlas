@@ -1609,6 +1609,15 @@ def export_waves_csv(
                 amplitude = abs(float(signed_amplitude))
             except (TypeError, ValueError):
                 amplitude = signed_amplitude
+            signed_amplitude_um = metric(
+                r,
+                "signed_amplitude_um",
+                metric(r, "amplitude_um"),
+            )
+            try:
+                amplitude_um = abs(float(signed_amplitude_um))
+            except (TypeError, ValueError):
+                amplitude_um = signed_amplitude_um
             period_source = metric(r, "period_source")
             if period_source == "" and analysis_mode != LARGE_WAVE_ANALYSIS_MODE:
                 period_source = "sine_fit"
@@ -1696,6 +1705,15 @@ def export_waves_csv(
                 metric(r, "detrend_fallback_used"),
                 metric(r, "detrend_fallback_reason"),
                 metric(r, "detrend_inlier_fraction"),
+                metric(r, "spatial_calibration_um_per_px"),
+                metric(r, "pos1_um"),
+                metric(r, "pos2_um"),
+                amplitude_um,
+                signed_amplitude_um,
+                metric(r, "delta_pos_um"),
+                metric(r, "velocity_um_per_s"),
+                metric(r, "wavelength_um"),
+                metric(r, "peak_position_um"),
             ]
             _, values = profile_csv_columns(
                 familiar_headers,

@@ -15,6 +15,7 @@ from .signal.period import estimate_valid_dominant_frequency, frequency_to_perio
 from .features import build_wave_rows, build_peak_rows
 from .measurement_status import assess_standard_measurement
 from .sampling import resolve_sampling_rate
+from .spatial_calibration import apply_spatial_calibration, resolve_spatial_calibration
 from .track_coordinates import (
     coordinate_origin,
     image_row_from_frame,
@@ -479,6 +480,7 @@ def process_track_arrays(
         raise ValueError("frame, position, and image_row must have the same length")
 
     sampling_rate = resolve_sampling_rate(config)
+    spatial_calibration = resolve_spatial_calibration(config)
 
     detrend_cfg = (config.get("detrend") or {})
     peaks_cfg = (config.get("peaks") or {})
@@ -635,6 +637,11 @@ def process_track_arrays(
         track_quality["spectral_snr"] = float("nan")
         track_quality["spectral_peak_to_median_ratio"] = float("nan")
     _attach_quality_metric_columns(wave_rows, peak_rows, track_quality)
+    for event_row in [*wave_rows, *peak_rows]:
+        metrics = event_row.get("metrics")
+        if isinstance(metrics, dict):
+            apply_spatial_calibration(metrics, spatial_calibration)
+        apply_spatial_calibration(event_row, spatial_calibration)
 
     amps = np.abs(residual[event_indices]) if len(event_indices) else np.array([], dtype=float)
     num_maxima = sum(1 for kind in event_kinds if kind == "max")
@@ -670,12 +677,14 @@ def process_track_arrays(
             "sample": sample,
             "coord_origin": coordinate_origin(heatmap_meta),
             "pixel_mapping": (heatmap_meta or {}).get("pixel_mapping"),
-            "coordinate_space": "bottom_left_frame_position",
+            "coordinate_space": "bottom_left_source_frame_position",
+            "mean_amplitude_px": float(np.nanmean(amps)) if amps.size else None,
             "detrend": detrend_meta,
             **track_quality,
         },
         "overlay": {},
     }
+    apply_spatial_calibration(track_row["metrics"], spatial_calibration)
     track_row.update({key: _quality_cell_value(value) for key, value in track_quality.items()})
 
     overlay_track_event = _build_overlay_track_event(
@@ -712,6 +721,7 @@ def process_track_arrays(
     overlay_track_event["metrics"] = {
         "analysis_mode": "standard",
         "mean_amplitude": track_row["amplitude"],
+        "mean_amplitude_px": track_row["amplitude"],
         "dominant_frequency": track_row["frequency"],
         "period": track_row["metrics"]["period"],
         "num_peaks": track_row["metrics"]["num_peaks"],
@@ -727,6 +737,7 @@ def process_track_arrays(
         "frame_sampling": frequency_estimate.frame_sampling.metadata(),
         **{key: _quality_cell_value(value) for key, value in track_quality.items()},
     }
+    apply_spatial_calibration(overlay_track_event["metrics"], spatial_calibration)
 
     return track_row, wave_rows, peak_rows, overlay_track_event
 

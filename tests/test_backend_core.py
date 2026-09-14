@@ -40,9 +40,15 @@ from app.api.routes_jobs import (
     _large_wave_peak_events_for_detail,
     validate_config,
 )
-from app.io.image_to_heatmap import image_to_heatmap_bytes
+from app.io.image_to_heatmap import image_to_heatmap_bytes, image_to_heatmap_payload
 from app.io.table_to_heatmap import table_to_heatmap_bytes, table_to_heatmap_payload
-from app.heatmap_values import read_cv_image, write_cv_image
+from app.heatmap_values import (
+    analysis_image_bytes,
+    decode_heatmap_values,
+    load_heatmap_values,
+    read_cv_image,
+    write_cv_image,
+)
 from app.job_store import JobStore, _PEAK_MODEL_KEYS, _WAVE_MODEL_KEYS, _json_safe, _row_for_metric_model
 from app.large_wave_extraction import (
     _RidgeTrace,
@@ -67,6 +73,7 @@ from app.models import ArtifactKind, Artifact, JobRead, JobStatus, Track as Trac
 from app.measurement_schema import (
     MEASUREMENT_DEFINITIONS,
     MEASUREMENT_STATUS_CONTRACT,
+    SPATIAL_CALIBRATION_CONTRACT,
     WAVE_EXPORT_FAMILIAR_HEADERS,
     descriptive_ripple_csv,
     measurement_schema_identity,
@@ -82,6 +89,12 @@ from app.signal.period import assess_frame_sampling, estimate_valid_dominant_fre
 from app.signal import detrend as detrend_module
 from app.signal.detrend import fit_baseline
 from app.sampling import normalize_sampling_rate_config, resolve_sampling_rate
+from app.spatial_calibration import (
+    SpatialCalibration,
+    apply_spatial_calibration,
+    coordinate_contract_metadata,
+    resolve_spatial_calibration,
+)
 from app.run_manifest import sha256_bytes
 from app.time_utils import utc_isoformat
 from app.track_coordinates import (
@@ -196,6 +209,8 @@ class BackendCoreTests(unittest.TestCase):
     def test_standard_track_exposes_estimator_and_evidence_states_separately(self) -> None:
         frame = np.arange(80, dtype=float)
         position = 40.0 + 0.1 * frame + 5.0 * np.sin(2.0 * np.pi * frame / 10.0)
+        config = _base_config()
+        config["io"]["spatial_calibration"] = {"micrometers_per_pixel": 0.4}
 
         track_row, wave_rows, peak_rows, overlay = process_track_arrays(
             job_id=uuid4(),
@@ -205,7 +220,7 @@ class BackendCoreTests(unittest.TestCase):
             frame=frame,
             image_row=frame,
             position=position,
-            config=_base_config(),
+            config=config,
         )
 
         self.assertTrue(track_row["metrics"]["frequency_estimator_valid"])
@@ -225,6 +240,16 @@ class BackendCoreTests(unittest.TestCase):
         self.assertGreater(len(wave_rows), 0)
         self.assertTrue(all(row["metrics"]["estimator_valid"] for row in wave_rows))
         self.assertTrue(all(row["metrics"]["measurement_status"] == "review" for row in wave_rows))
+        self.assertAlmostEqual(
+            wave_rows[0]["metrics"]["amplitude_um"],
+            wave_rows[0]["metrics"]["amplitude_px"] * 0.4,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            track_row["metrics"]["mean_amplitude_um"],
+            track_row["metrics"]["mean_amplitude_px"] * 0.4,
+            places=6,
+        )
         measured_peaks = [row for row in peak_rows if row["metrics"]["measurement_valid"]]
         self.assertGreater(len(measured_peaks), 0)
         self.assertTrue(all(row["metrics"]["measurement_status"] == "review" for row in measured_peaks))
@@ -572,11 +597,144 @@ class BackendCoreTests(unittest.TestCase):
         )
 
         self.assertEqual(meta["source_kind"], "image")
-        self.assertEqual(meta["pixel_mapping"], "processed_pixel")
+        self.assertEqual(meta["pixel_mapping"], "source_pixel")
         self.assertEqual(meta["coord_origin"], "lower")
         self.assertEqual(meta["source_origin"], "upper")
         self.assertEqual(meta["coord_x_label"], "position")
         self.assertEqual(meta["coord_y_label"], "frame")
+
+    def test_image_ingestion_persists_authoritative_scalar_values(self) -> None:
+        source = np.array([[0, 64], [128, 255]], dtype=np.uint8)
+        payload = io.BytesIO()
+        Image.fromarray(source).save(payload, format="PNG")
+
+        _display, meta, value_bytes, value_meta = image_to_heatmap_payload(payload.getvalue())
+        values = decode_heatmap_values(value_bytes, value_meta)
+        analysis_image = np.asarray(Image.open(io.BytesIO(analysis_image_bytes(value_bytes, value_meta))))
+
+        np.testing.assert_allclose(values, source.astype(np.float32) / 255.0, atol=1e-6)
+        np.testing.assert_array_equal(analysis_image, source)
+        self.assertEqual(meta["input_representation"], "scalar_image")
+        self.assertEqual(meta["analysis_value_source"], "image_luminance")
+        self.assertFalse(meta["lossy_analysis_input"])
+        self.assertEqual(value_meta["value_encoding"], "float32_le")
+
+    def test_image_resize_config_is_rejected_for_quantitative_runs(self) -> None:
+        with self.assertRaisesRegex(ValueError, "original image dimensions"):
+            normalize_and_validate_config({"image_input": {"target_width": 256}})
+
+        payload = io.BytesIO()
+        Image.new("L", (8, 6)).save(payload, format="PNG")
+        with self.assertRaisesRegex(ValueError, "original image dimensions"):
+            image_to_heatmap_payload(
+                payload.getvalue(),
+                config={"image_input": {"internal_height": 3}},
+            )
+
+    def test_analysis_raster_is_independent_of_table_display_style(self) -> None:
+        table = b"1,2\n3,5\n"
+        display_a, _, values_a, meta_a = table_to_heatmap_payload(
+            table,
+            config={
+                "heatmap": {
+                    "table_mode": "continuous",
+                    "continuous": {"cmap": "plasma", "vmin": 0, "vmax": 5},
+                }
+            },
+        )
+        display_b, _, values_b, meta_b = table_to_heatmap_payload(
+            table,
+            config={
+                "heatmap": {
+                    "table_mode": "continuous",
+                    "continuous": {"cmap": "gray", "vmin": -10, "vmax": 10},
+                }
+            },
+        )
+
+        self.assertNotEqual(display_a, display_b)
+        self.assertEqual(analysis_image_bytes(values_a, meta_a), analysis_image_bytes(values_b, meta_b))
+
+    def test_lower_origin_table_values_are_oriented_like_the_rendered_image(self) -> None:
+        _, _, value_bytes, value_meta = table_to_heatmap_payload(
+            b"1,2\n3,4\n",
+            config={"heatmap": {"table_mode": "continuous", "origin": "lower"}},
+        )
+
+        np.testing.assert_array_equal(
+            decode_heatmap_values(value_bytes, value_meta),
+            np.asarray([[3.0, 4.0], [1.0, 2.0]], dtype=np.float32),
+        )
+
+    def test_analysis_values_are_never_resized_implicitly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "heatmap.png"
+            Image.new("L", (3, 2)).save(image_path)
+            with self.assertRaisesRegex(RuntimeError, "Authoritative scalar"):
+                load_heatmap_values(
+                    heatmap_path=image_path,
+                    value_bytes=None,
+                    value_meta={},
+                )
+            values = np.zeros((4, 3), dtype="<f4").tobytes()
+            with self.assertRaisesRegex(RuntimeError, "do not resize"):
+                load_heatmap_values(
+                    heatmap_path=image_path,
+                    value_bytes=values,
+                    value_meta={
+                        "analysis_rows": 4,
+                        "analysis_cols": 3,
+                        "render_origin": "upper",
+                        "value_encoding": "float32_le",
+                    },
+                )
+
+    def test_coordinate_contract_requires_native_resolution(self) -> None:
+        metadata = coordinate_contract_metadata(
+            {
+                "source_rows": 100,
+                "source_cols": 200,
+                "analysis_rows": 100,
+                "analysis_cols": 200,
+            },
+            {"io": {"spatial_calibration": {"micrometers_per_pixel": 0.5}}},
+        )
+        self.assertTrue(metadata["native_resolution"])
+        self.assertEqual(metadata["analysis_to_source_x_scale"], 1.0)
+        self.assertEqual(metadata["spatial_calibration_um_per_px"], 0.5)
+
+        with self.assertRaisesRegex(ValueError, "native-resolution"):
+            coordinate_contract_metadata(
+                {
+                    "source_rows": 100,
+                    "source_cols": 200,
+                    "analysis_rows": 50,
+                    "analysis_cols": 100,
+                },
+                {},
+            )
+
+    def test_spatial_calibration_adds_physical_values_without_replacing_pixels(self) -> None:
+        record = {
+            "amplitude_px": 4.0,
+            "velocity_px_per_s": -3.0,
+            "Apex Curvature (px/frame^2)": 2.0,
+        }
+
+        apply_spatial_calibration(record, SpatialCalibration(0.25))
+
+        self.assertEqual(record["amplitude_px"], 4.0)
+        self.assertEqual(record["amplitude_um"], 1.0)
+        self.assertEqual(record["velocity_um_per_s"], -0.75)
+        self.assertEqual(record["Apex Curvature (µm/frame^2)"], 0.5)
+        self.assertEqual(record["Spatial Calibration (µm/pixel)"], 0.25)
+
+        for value in (0, -1, float("nan"), "not-a-number"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "finite positive"):
+                    resolve_spatial_calibration({
+                        "io": {"spatial_calibration": {"micrometers_per_pixel": value}}
+                    })
 
     def test_analysis_mode_defaults_to_standard_and_accepts_ripple_aliases(self) -> None:
         self.assertEqual(resolve_analysis_mode({}), STANDARD_ANALYSIS_MODE)
@@ -946,7 +1104,10 @@ class BackendCoreTests(unittest.TestCase):
                 job_id=uuid4(),
                 track_paths=paths,
                 config={
-                    "io": {"sampling_rate": 5.0},
+                    "io": {
+                        "sampling_rate": 5.0,
+                        "spatial_calibration": {"micrometers_per_pixel": 0.2},
+                    },
                     "kymo": {"backend": "onnx", "track_xy_order": "yx"},
                     "analysis": {
                         "mode": "ripple_family",
@@ -1004,6 +1165,15 @@ class BackendCoreTests(unittest.TestCase):
         self.assertTrue(all(abs(float(row["Speed (pixels/sec)"]) - 5.0) < 1e-6 for row in interval_csv_rows))
         self.assertIn("Median Velocity (pixels/sec)", family_csv_rows[0])
         self.assertIn("Median Angle from Time Axis (degrees)", family_csv_rows[0])
+        self.assertAlmostEqual(
+            result.track_rows[0]["metrics"]["velocity_um_per_s"], 1.0, places=6
+        )
+        self.assertAlmostEqual(
+            float(track_csv_rows[0]["Velocity (µm/sec)"]), 1.0, places=6
+        )
+        self.assertTrue(
+            all(abs(float(row["Speed (µm/sec)"]) - 1.0) < 1e-6 for row in interval_csv_rows)
+        )
 
     def test_ripple_direction_uses_bottom_left_frame_axis_while_overlay_uses_image_rows(self) -> None:
         height = 121
@@ -1546,8 +1716,17 @@ class BackendCoreTests(unittest.TestCase):
             self.assertEqual(labels.count("large_wave_measurements"), 1)
             self.assertEqual(labels.count("large_wave_events"), 1)
             self.assertEqual(labels.count("result_manifest"), 1)
-            self.assertEqual(result_manifest["schema_version"], 2)
+            self.assertEqual(result_manifest["schema_version"], 3)
             self.assertEqual(result_manifest["analysis_mode"], "large_wave")
+            self.assertEqual(
+                result_manifest["input"]["analysis"]["analysis_representation"],
+                "scalar_float32",
+            )
+            self.assertEqual(
+                result_manifest["input"]["analysis"]["analysis_value_source"],
+                "processed_numeric_matrix",
+            )
+            self.assertTrue(result_manifest["input"]["analysis"]["native_resolution"])
             self.assertEqual(result_manifest["measurement_schema"], measurement_schema_identity())
             self.assertEqual(result_manifest["input"]["sha256"], expected_input_sha256)
             self.assertEqual(result_manifest_sha256, sha256_bytes(result_manifest_bytes))
@@ -2237,7 +2416,10 @@ class BackendCoreTests(unittest.TestCase):
                 "metrics": {**candidate["metrics"], "peak_i": center + 2},
             }
             config = {
-                "io": {"sampling_rate": 10.0},
+                "io": {
+                    "sampling_rate": 10.0,
+                    "spatial_calibration": {"micrometers_per_pixel": 0.5},
+                },
                 "kymo": {"backend": "onnx", "track_xy_order": "yx"},
                 "detrend": {"degree": 1, "min_samples": 0.5, "random_state": 42},
                 "analysis": {
@@ -2279,6 +2461,9 @@ class BackendCoreTests(unittest.TestCase):
         measurement = result.measurements[0]
         self.assertEqual(measurement["fit_method"], "asymmetric_half_cosine_local_chord")
         self.assertAlmostEqual(measurement["amplitude_px"], measurement["fit_amp_A"], places=6)
+        self.assertAlmostEqual(
+            measurement["amplitude_um"], measurement["amplitude_px"] * 0.5, places=6
+        )
         self.assertEqual(measurement["period_source"], "equivalent_sinusoid_from_lobe")
         self.assertIsNone(measurement["recurrence_period_frames"])
         self.assertAlmostEqual(
@@ -2297,6 +2482,9 @@ class BackendCoreTests(unittest.TestCase):
         self.assertEqual(csv_rows[0]["Fit Target"], "large_wave_local_chord")
         self.assertAlmostEqual(
             float(csv_rows[0]["Amplitude (Pixels)"]), measurement["amplitude_px"], places=6
+        )
+        self.assertAlmostEqual(
+            float(csv_rows[0]["Amplitude (µm)"]), measurement["amplitude_um"], places=6
         )
         self.assertAlmostEqual(
             float(csv_rows[0]["Frame 2 Raw"]) - float(csv_rows[0]["Frame 1 Raw"]),
@@ -2852,7 +3040,7 @@ class BackendCoreTests(unittest.TestCase):
     def test_measurement_schema_has_stable_unique_identity(self) -> None:
         identity = measurement_schema_identity()
 
-        self.assertEqual(identity["version"], 2)
+        self.assertEqual(identity["version"], 3)
         self.assertEqual(identity["default_column_labels"], "familiar")
         self.assertEqual(identity["available_column_labels"], ["familiar", "descriptive"])
         self.assertEqual(len(identity["sha256"]), 64)
@@ -2861,6 +3049,8 @@ class BackendCoreTests(unittest.TestCase):
         self.assertIn("large_wave_equivalent_lobe_frequency_hz", MEASUREMENT_DEFINITIONS)
         self.assertEqual(MEASUREMENT_STATUS_CONTRACT["values"], ["invalid", "review", "accepted"])
         self.assertTrue(MEASUREMENT_STATUS_CONTRACT["accepted_requires_evidence_rule_version"])
+        self.assertTrue(SPATIAL_CALIBRATION_CONTRACT["source_pixel_values_retained"])
+        self.assertFalse(SPATIAL_CALIBRATION_CONTRACT["frame_axis_scaled"])
 
     def test_descriptive_wave_columns_remove_only_legacy_aliases(self) -> None:
         familiar_values = list(range(len(WAVE_EXPORT_FAMILIAR_HEADERS)))

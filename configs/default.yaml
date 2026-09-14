@@ -4,6 +4,9 @@ logging:
 
 io:
   sampling_rate: 5.0
+  spatial_calibration:
+    # Optional horizontal source-image scale. Leave null to report pixels only.
+    micrometers_per_pixel: null
   image_globs: ["*.png", "*.jpg", "*.jpeg"]
   track_glob: "*.npy"
   table_globs: ["*.csv", "*.tsv", "*.xls", "*.xlsx"]
@@ -29,8 +32,6 @@ heatmap:
 
 image_input:
   grayscale: true
-  target_width: null
-  target_height: null
   low_hex: null
   high_hex: null
   invert: false

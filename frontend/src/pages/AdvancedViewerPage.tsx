@@ -30,6 +30,7 @@ import { useImageProcessingPrompt } from "../hooks/useImageProcessingPrompt";
 import { useSharedJobSession } from "../hooks/useSharedJobSession";
 import { downloadCsv, downloadFromUrl, downloadJson } from "../utils/download";
 import { mergeRunConfigWithImageProcessing } from "../utils/imageProcessing";
+import { buildSpatialCalibrationConfig } from "../utils/spatialCalibration";
 import {
   buildHeatmapOptionsConfig,
   DEFAULT_HEATMAP_OPTIONS,
@@ -187,6 +188,7 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
   const [runNameAuto, setRunNameAuto] = useState<boolean>(true);
   const [heatmapOptions, setHeatmapOptions] = useState<HeatmapOptions>(DEFAULT_HEATMAP_OPTIONS);
   const [runAnalysisMode, setRunAnalysisMode] = useState<AnalysisMode>(DEFAULT_ANALYSIS_MODE);
+  const [spatialCalibration, setSpatialCalibration] = useState<string>("");
   const runCounterRef = useRef<number>(1);
 
   const [hideBaseImage, setHideBaseImage] = useState<boolean>(false);
@@ -714,6 +716,7 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
                   {
                     ...buildHeatmapOptionsConfig(heatmapOptions),
                     ...buildAnalysisOptionsConfig(runAnalysisMode),
+                    ...buildSpatialCalibrationConfig(spatialCalibration),
                   },
                   imageProcessingDimensions
                 ),
@@ -733,6 +736,8 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
             onHeatmapOptionsChange={setHeatmapOptions}
             analysisMode={runAnalysisMode}
             onAnalysisModeChange={setRunAnalysisMode}
+            spatialCalibrationValue={spatialCalibration}
+            onSpatialCalibrationChange={setSpatialCalibration}
             filteredCount={filteredTracks.length}
             totalCount={tracks.length}
             onCancel={cancelCurrentJob}
@@ -761,6 +766,7 @@ export default function AdvancedViewerPage(props: { onViewAllRuns?: () => void }
               clearSession();
               setFile(null);
               resetImageProcessing();
+              setSpatialCalibration("");
               setRunName("");
               setRunNameAuto(true);
               clearTrackSelection();

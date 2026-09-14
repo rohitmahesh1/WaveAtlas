@@ -153,9 +153,28 @@ async function loadHeatmapValuesArtifact(
   const buffer = await res.arrayBuffer();
   if (buffer.byteLength < expectedBytes) return null;
   const valuesBuffer = buffer.byteLength === expectedBytes ? buffer : buffer.slice(0, expectedBytes);
+  let values = new Float32Array(valuesBuffer);
+  const renderOrigin =
+    typeof meta?.render_origin === "string"
+      ? meta.render_origin.toLowerCase()
+      : typeof meta?.origin === "string"
+        ? meta.origin.toLowerCase()
+        : "upper";
+  const rowOrder =
+    typeof meta?.value_row_order === "string"
+      ? meta.value_row_order.toLowerCase()
+      : "top_to_bottom_source";
+  if (renderOrigin === "lower" && rowOrder === "top_to_bottom_source") {
+    const renderedValues = new Float32Array(values.length);
+    for (let row = 0; row < height; row += 1) {
+      const sourceStart = (height - 1 - row) * width;
+      renderedValues.set(values.subarray(sourceStart, sourceStart + width), row * width);
+    }
+    values = renderedValues;
+  }
 
   return {
-    values: new Float32Array(valuesBuffer),
+    values,
     width,
     height,
     origin:

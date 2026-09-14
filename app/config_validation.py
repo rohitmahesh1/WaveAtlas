@@ -133,6 +133,16 @@ def normalize_and_validate_config(config: Optional[Dict[str, Any]]) -> Dict[str,
 
     normalized = normalize_sampling_rate_config(config)
 
+    io_config = _section(normalized, "io")
+    spatial_calibration = _section(io_config, "spatial_calibration", path="io")
+    if spatial_calibration.get("micrometers_per_pixel") not in (None, ""):
+        spatial_calibration["micrometers_per_pixel"] = _positive(
+            spatial_calibration["micrometers_per_pixel"],
+            field="io.spatial_calibration.micrometers_per_pixel",
+        )
+        io_config["spatial_calibration"] = spatial_calibration
+        normalized["io"] = io_config
+
     analysis = _section(normalized, "analysis")
     if "mode" in analysis:
         analysis["mode"] = normalize_analysis_mode(analysis["mode"])
@@ -163,6 +173,45 @@ def normalize_and_validate_config(config: Optional[Dict[str, Any]]) -> Dict[str,
                         f"heatmap.{mode_name}.origin must be 'lower' or 'upper'"
                     )
             _validate_bounds(mode_config, "vmin", "vmax", path=f"heatmap.{mode_name}")
+
+    image_input = _section(normalized, "image_input")
+    if "origin" in image_input:
+        origin = str(image_input["origin"]).strip().lower()
+        if origin not in {"lower", "upper"}:
+            raise ValueError("image_input.origin must be 'lower' or 'upper'")
+    if "binary_threshold" in image_input:
+        threshold = _finite(
+            image_input["binary_threshold"],
+            field="image_input.binary_threshold",
+            minimum=0.0,
+        )
+        if threshold > 1.0:
+            raise ValueError("image_input.binary_threshold must not exceed 1")
+    low_hex = image_input.get("low_hex")
+    high_hex = image_input.get("high_hex")
+    if (low_hex in (None, "")) != (high_hex in (None, "")):
+        raise ValueError("image_input.low_hex and image_input.high_hex must be supplied together")
+    if image_input.get("grayscale") is False and (
+        low_hex not in (None, "") or high_hex not in (None, "")
+    ):
+        raise ValueError("image_input.low_hex/high_hex require image_input.grayscale=true")
+    if image_input.get("binary_grayscale") is True and image_input.get("grayscale") is False:
+        raise ValueError("image_input.binary_grayscale requires image_input.grayscale=true")
+    resize_fields = (
+        "target_width",
+        "target_height",
+        "internal_width",
+        "internal_height",
+    )
+    configured_resize = [
+        field for field in resize_fields if image_input.get(field) not in (None, "")
+    ]
+    if configured_resize:
+        names = ", ".join(f"image_input.{field}" for field in configured_resize)
+        raise ValueError(
+            "Quantitative image analysis uses the original image dimensions; "
+            f"remove {names}."
+        )
 
     period = _section(normalized, "period")
     _validate_bounds(period, "min_freq", "max_freq", path="period", positive=True)
