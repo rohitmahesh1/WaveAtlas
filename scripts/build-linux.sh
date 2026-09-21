@@ -111,6 +111,51 @@ embedded_library_path="$(
 export LD_LIBRARY_PATH="$embedded_library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 npm run build --prefix desktop -- --bundles appimage --verbose -- --locked
 
+appdir="$root/desktop/src-tauri/target/release/bundle/appimage/WaveAtlas.AppDir"
+if [[ ! -d "$appdir/usr/lib" ]]; then
+    echo "The AppImage build did not leave its AppDir available for compatibility processing." >&2
+    exit 1
+fi
+
+# linuxdeploy currently bundles Ubuntu's display-stack libraries even though
+# they must match the target system's graphics drivers.  Remove only those
+# libraries so Wayland/EGL can use the compatible versions supplied by the
+# user's distribution.
+display_libraries=(
+    libwayland-client.so.0
+    libwayland-cursor.so.0
+    libwayland-egl.so.1
+    libwayland-server.so.0
+    libxkbcommon.so.0
+    libxcb-randr.so.0
+    libxcb-render.so.0
+    libxcb-shm.so.0
+    libXau.so.6
+    libXdmcp.so.6
+)
+for library in "${display_libraries[@]}"; do
+    library_path="$appdir/usr/lib/$library"
+    if [[ ! -f "$library_path" ]]; then
+        echo "Expected bundled display library is missing: $library" >&2
+        exit 1
+    fi
+    rm "$library_path"
+done
+
+appimagetool_version="1.9.1"
+appimagetool="/tmp/appimagetool-x86_64.AppImage"
+curl -fsSLo "$appimagetool" \
+    "https://github.com/AppImage/appimagetool/releases/download/${appimagetool_version}/appimagetool-x86_64.AppImage"
+echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  $appimagetool" \
+    | sha256sum --check --status
+chmod +x "$appimagetool"
+appimage_runtime_version="20251108"
+appimage_runtime="/tmp/appimage-runtime-x86_64"
+curl -fsSLo "$appimage_runtime" \
+    "https://github.com/AppImage/type2-runtime/releases/download/${appimage_runtime_version}/runtime-x86_64"
+echo "2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d  $appimage_runtime" \
+    | sha256sum --check --status
+
 mapfile -t appimages < <(find desktop/src-tauri/target/release/bundle/appimage \
     -maxdepth 1 -type f -name '*.AppImage')
 mapfile -t debs < <(find desktop/src-tauri/target/release/bundle/deb \
@@ -119,6 +164,9 @@ if [[ "${#appimages[@]}" != 1 || "${#debs[@]}" != 1 ]]; then
     echo "Expected one AppImage and one Debian package." >&2
     exit 1
 fi
+rm "${appimages[0]}"
+ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "$appimagetool" \
+    --runtime-file "$appimage_runtime" "$appdir" "${appimages[0]}"
 
 release_dir="$root/desktop/build/release-linux"
 rm -rf "$release_dir"
