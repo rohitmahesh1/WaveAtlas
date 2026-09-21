@@ -12,11 +12,20 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": "all",
     "publisher": "Rohit Mahesh",
     "shortDescription": "Local wave analysis for kymograph research data",
-    "icon": ["icons/icon.ico"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
     "resources": { "../payload/": "backend/" },
+    "linux": {
+      "appimage": { "bundleMediaFramework": false },
+      "deb": { "files": {} }
+    },
     "windows": {
       "allowDowngrades": false,
       "webviewInstallMode": { "type": "offlineInstaller", "silent": true },
