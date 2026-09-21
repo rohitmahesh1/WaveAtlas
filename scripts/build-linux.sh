@@ -73,8 +73,10 @@ curl --proto '=https' --tlsv1.2 -fsSLo /tmp/rustup-init \
     https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
 chmod +x /tmp/rustup-init
 /tmp/rustup-init -y --profile minimal --default-toolchain stable --no-modify-path
+export PATH="/root/.cargo/bin:$PATH"
+rustup component add rustfmt
 
-export PATH="/opt/waveatlas-python/bin:/opt/node/bin:/root/.cargo/bin:$PATH"
+export PATH="/opt/waveatlas-python/bin:/opt/node/bin:$PATH"
 cd "$root"
 
 version="$(python scripts/version.py --check)"
