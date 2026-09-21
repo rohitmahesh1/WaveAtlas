@@ -14,6 +14,11 @@ use std::{
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
+#[cfg(windows)]
+const BACKEND_EXECUTABLE: &str = "waveatlas-backend.exe";
+#[cfg(not(windows))]
+const BACKEND_EXECUTABLE: &str = "waveatlas-backend";
+
 #[derive(Clone, Deserialize)]
 struct Ready {
     origin: String,
@@ -102,6 +107,26 @@ fn show_error(app: &tauri::AppHandle, message: &str) {
     }
 }
 
+fn open_folder(path: &Path) {
+    // These paths are selected by native menu actions, never webview input.
+    #[cfg(windows)]
+    let mut command = Command::new("explorer.exe");
+    #[cfg(target_os = "linux")]
+    let mut command = Command::new("xdg-open");
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    {
+        let _ = command
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    }
+}
+
 fn stop_backend(app: &tauri::AppHandle) {
     let backend = app.state::<Backend>();
     // Keep the child alive briefly for cooperative cancellation and checkpointing.
@@ -184,7 +209,7 @@ fn close_requested(app: tauri::AppHandle) {
 
 fn start_backend(app: tauri::AppHandle) -> Result<(), String> {
     let resources = app.path().resource_dir().map_err(|e| e.to_string())?;
-    let executable = resources.join("backend/waveatlas-backend.exe");
+    let executable = resources.join("backend").join(BACKEND_EXECUTABLE);
     let workspace = app.state::<Backend>().workspace.clone();
     std::fs::create_dir_all(workspace.join("logs")).map_err(|e| e.to_string())?;
     let stderr =
@@ -330,8 +355,11 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let workspace = app.path().app_local_data_dir()?.join("workspace");
-            let legacy_workspace = app.path().local_data_dir()?.join("WaveAtlas");
-            migrate_legacy_workspace(&legacy_workspace, &workspace)?;
+            #[cfg(windows)]
+            {
+                let legacy_workspace = app.path().local_data_dir()?.join("WaveAtlas");
+                migrate_legacy_workspace(&legacy_workspace, &workspace)?;
+            }
             app.manage(Backend {
                 child: Mutex::new(None),
                 ready: Mutex::new(None),
@@ -376,15 +404,7 @@ fn main() {
                     _ => None,
                 };
                 if let Some(path) = path {
-                    // Only these fixed local folders can be opened, never webview input.
-                    #[cfg(windows)]
-                    {
-                        let _ = Command::new("explorer.exe").arg(path).spawn();
-                    }
-                    #[cfg(not(windows))]
-                    {
-                        let _ = path;
-                    }
+                    open_folder(&path);
                 }
             });
             let loading =

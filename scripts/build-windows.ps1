@@ -33,9 +33,9 @@ if ($Signed) {
     Run-Checked $env:WAVEATLAS_SIGN_COMMAND @("$root/desktop/payload/waveatlas-backend.exe")
     $config = @{ bundle = @{ windows = @{ signCommand = @{ cmd = $env:WAVEATLAS_SIGN_COMMAND; args = @("%1") } } } }
     $config | ConvertTo-Json -Depth 6 | Set-Content "desktop/build/signing.json" -Encoding utf8
-    Run-Checked "npm.cmd" @("run", "build", "--prefix", "desktop", "--", "--config", "$root/desktop/build/signing.json", "--", "--locked")
+    Run-Checked "npm.cmd" @("run", "build", "--prefix", "desktop", "--", "--bundles", "nsis", "--config", "$root/desktop/build/signing.json", "--", "--locked")
 } else {
-    Run-Checked "npm.cmd" @("run", "build", "--prefix", "desktop", "--", "--", "--locked")
+    Run-Checked "npm.cmd" @("run", "build", "--prefix", "desktop", "--", "--bundles", "nsis", "--", "--locked")
 }
 $installers = @(Get-ChildItem "desktop/src-tauri/target/release/bundle/nsis/*.exe")
 if ($installers.Count -ne 1) { throw "Expected one Windows installer, found $($installers.Count)" }

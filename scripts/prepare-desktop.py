@@ -132,6 +132,9 @@ def main():
     icon.save(
         icons / "icon.ico", sizes=[(32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
     )
+    icon.resize((32, 32), Image.Resampling.LANCZOS).save(icons / "32x32.png")
+    icon.resize((128, 128), Image.Resampling.LANCZOS).save(icons / "128x128.png")
+    icon.save(icons / "128x128@2x.png")
     print(f"Desktop inputs ready: {version}, model release {models['release']}")
 
 
