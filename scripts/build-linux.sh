@@ -104,6 +104,11 @@ rm -rf desktop/src-tauri/target/release/bundle/appimage \
 npm run build --prefix desktop -- --bundles deb -- --locked
 export APPIMAGE_EXTRACT_AND_RUN=1
 export NO_STRIP=true
+embedded_library_path="$(
+    find "$root/desktop/payload" -type f -name '*.so*' -printf '%h\n' \
+        | sort -u | paste -sd: -
+)"
+export LD_LIBRARY_PATH="$embedded_library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 npm run build --prefix desktop -- --bundles appimage --verbose -- --locked
 
 mapfile -t appimages < <(find desktop/src-tauri/target/release/bundle/appimage \
