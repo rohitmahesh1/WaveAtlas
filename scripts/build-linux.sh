@@ -101,7 +101,10 @@ python scripts/smoke-desktop.py --backend "$root/desktop/payload/waveatlas-backe
 
 rm -rf desktop/src-tauri/target/release/bundle/appimage \
     desktop/src-tauri/target/release/bundle/deb
-npm run build --prefix desktop -- --bundles appimage,deb -- --locked
+npm run build --prefix desktop -- --bundles deb -- --locked
+export APPIMAGE_EXTRACT_AND_RUN=1
+export NO_STRIP=true
+npm run build --prefix desktop -- --bundles appimage --verbose -- --locked
 
 mapfile -t appimages < <(find desktop/src-tauri/target/release/bundle/appimage \
     -maxdepth 1 -type f -name '*.AppImage')

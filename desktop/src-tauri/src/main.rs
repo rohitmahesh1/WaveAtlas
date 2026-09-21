@@ -36,6 +36,7 @@ struct Backend {
     workspace: PathBuf,
 }
 
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
 fn migrate_legacy_workspace(legacy: &Path, workspace: &Path) -> io::Result<()> {
     // Preview builds stored research data at `%LOCALAPPDATA%\WaveAtlas`, which is
     // also the default per-user NSIS install directory. Move only workspace
